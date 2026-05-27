@@ -1,0 +1,93 @@
+# Leap Gateway example config (v3, FeiLian forwarding-node sidecar).
+#
+# Copy to gateway.yaml and edit. Mounted on the FeiLian forwarding node at
+# /etc/leap/gateway.yaml.
+
+api:
+  # 18080 (not 8080) — feilian-sentry on the forwarding node already binds
+  # 127.0.0.1:8080. Pick something out of the way.
+  listen: "127.0.0.1:18080"
+  # token: "change-me"  # uncomment to require Authorization: Bearer <token>
+
+subscribe:
+  refresh_interval: 30m
+  refresh_on_startup: true
+  http_timeout: 30s
+  user_agent: "sing-box/1.8.0"
+
+# At least one subscription. format: auto | clash | singbox | uri | sip008
+# Multiple subscriptions are supported — leap aggregates outbounds across all
+# enabled entries. Change the URL or add another entry, then call
+# `POST /api/subscribe/refresh` to apply.
+subscriptions:
+  - name: "main"
+    url: "https://example.com/your/subscription/url"
+    format: "auto"
+    enabled: true
+
+# FeiLian SaaS-assigned values for this forwarding node. The deploy operator
+# must fill these in — they cannot be defaulted.
+node:
+  client_subnet:    "10.8.11.0/24"   # CIDR of the FeiLian client pool on this node
+  tun0_gateway_ip:  "10.8.11.1"      # gateway IP on tun0; sing-box DNS binds here
+  egress_iface:     "ens18"          # public-internet egress NIC
+
+singbox:
+  config_path: "/etc/leap/singbox/config.json"
+  log_level:   "info"
+
+  # Clash-API HTTP endpoint sing-box exposes for hot reload + observability.
+  clash_api:
+    external_controller: "127.0.0.1:9090"
+    # secret: "change-me"
+
+  tun:
+    enabled:        true
+    interface_name: "utun-leap"
+    address:        "172.19.0.1/30"
+    fwmark:         0x42         # nft mangle marks 10.8.x.x forward traffic with this
+    routing_table:  100          # ip rule fwmark 0x42 lookup 100
+
+  dns:
+    # Override default <tun0_gateway_ip>:53 if needed.
+    # listen: "10.8.11.1:53"
+    fakeip_range: "198.18.0.0/15"   # sing-box-internal pool; do NOT put this in FeiLian SaaS
+    # Resolution paths. Defaults match docs/dns.md §6 with measured FeiLian
+    # node connectivity (Cloudflare DoT reachable, doh.pub un-poisoned for
+    # overseas).
+    cn_doh:
+      - "https://doh.pub/dns-query"
+      - "https://dns.alidns.com/dns-query"
+    proxy_doh:
+      - "tls://1.1.1.1:853"
+      - "https://doh.pub/dns-query"
+    bootstrap_resolver: "udp://119.29.29.29"
+
+  route:
+    geosite_url: "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-cn.srs"
+    geoip_url:   "https://raw.githubusercontent.com/SagerNet/sing-geoip/rule-set/geoip-cn.srs"
+
+  # urltest controls the auto-selected proxy outbound that handles overseas
+  # traffic. sing-box's native urltest re-tests the pool on `interval`; the
+  # in-process watchdog supplements it with a fast-path probe of the active
+  # node, forcing a re-evaluation on `fail_threshold` consecutive failures so
+  # one hung node doesn't break overseas traffic for up to `interval` minutes.
+  urltest:
+    interval: 3m                                       # full pool re-test cadence
+    tolerance: 50                                      # ms hysteresis before switching
+    probe_url: "https://www.gstatic.com/generate_204"  # must traverse GFW (that's what we're testing)
+    # Filter the urltest pool by node-tag regex. Empty = every airport node is
+    # a candidate. Example below restricts the pool to Singapore + US nodes
+    # (yuyun-style names like "🇸🇬 新加坡01 ..." / "🇺🇸 美国01 ..."); all parsed
+    # outbounds remain queryable via clash-api regardless of this filter.
+    node_pattern: "新加坡|美国"
+    watchdog:
+      enabled: true
+      interval: 5s        # how often to probe the live selection
+      timeout: 3s         # per-probe timeout
+      fail_threshold: 3   # consecutive fails before forced re-evaluation
+
+  # Optional ad-hoc inbounds for debugging from the node itself. Leave empty in
+  # production — TUN inbound + DNS direct inbound on tun0_gateway_ip is enough.
+  # socks_listen: "127.0.0.1:1080"
+  # http_listen:  "127.0.0.1:1081"

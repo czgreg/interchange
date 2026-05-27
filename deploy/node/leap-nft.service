@@ -1,0 +1,28 @@
+[Unit]
+Description=Inject leap nft table inet leap + fwmark policy routing
+After=feilian-tun@tun0.service leap-singbox.service
+BindsTo=feilian-tun@tun0.service
+Wants=leap-singbox.service
+# Restart with leap-singbox: when sing-box restarts, the kernel destroys
+# utun-leap (along with our `default dev utun-leap` route in table 100), so
+# we must re-run iproute.sh up after sing-box recreates the interface.
+PartOf=leap-singbox.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+
+# Wait up to 30s for sing-box to create the utun-leap interface. ip route add
+# below requires this device to exist.
+ExecStartPre=/bin/bash -c 'for i in $(seq 1 30); do ip link show utun-leap >/dev/null 2>&1 && exit 0; sleep 1; done; echo "utun-leap not present after 30s" >&2; exit 1'
+
+ExecStart=/usr/sbin/nft -f /etc/leap/nft.conf
+ExecStart=/etc/leap/iproute.sh up
+
+# On stop / restart: tear down our nft table + ip rule + ip route. The "-"
+# prefix tells systemd to ignore non-zero exit (in case nothing's installed).
+ExecStop=-/usr/sbin/nft delete table inet leap
+ExecStop=-/etc/leap/iproute.sh down
+
+[Install]
+WantedBy=multi-user.target

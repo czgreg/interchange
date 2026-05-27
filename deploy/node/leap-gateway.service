@@ -1,0 +1,18 @@
+[Unit]
+Description=leap-gateway control plane (subscription fetch + sing-box render + clash-api reload)
+After=leap-singbox.service
+Wants=leap-singbox.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/leap-gateway --config /etc/leap/gateway.yaml
+Restart=on-failure
+RestartSec=10
+
+# Restrict filesystem; control plane only needs config + state.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/var/lib/leap /etc/leap
+
+[Install]
+WantedBy=multi-user.target

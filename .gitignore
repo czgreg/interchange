@@ -1,0 +1,24 @@
+# Build artifacts
+/bin/
+/dist/
+/build/
+*.exe
+
+# Stage cache (sing-box downloads)
+/.cache/
+
+# Operator config (contains subscription tokens)
+/gateway.yaml
+
+# Local state
+/var/
+*.db
+*.db-journal
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# Generated configs
+/configs/runtime/
