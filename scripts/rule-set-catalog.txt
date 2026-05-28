@@ -90,9 +90,23 @@ geosite-icloud
 # ---------------------------------------------------------------------------
 # Geoip — IP-based rule-sets (sagernet/sing-geoip)
 #
-# Only for apps that bypass DNS by hardcoding IPs. Don't add geoip-google /
-# geoip-cloudflare / geoip-fastly here — those overlap with too much of the
-# wider internet and would silently widen the whitelist.
+# IMPORTANT: SagerNet's sing-geoip rule-set branch only ships **ISO 3166
+# country codes** (geoip-cn, geoip-jp, geoip-us, geoip-hk, ...). There is NO
+# geoip-telegram, geoip-google, geoip-cloudflare etc. there — those tags
+# don't exist upstream.
+#
+# Use cases:
+#   ✓ Country-scoped routing — e.g. add geoip-jp here and surface it in
+#     gateway.yaml whitelist.geoips to route only Japan-CIDR traffic via
+#     the airport.
+#   ✓ Apps that bypass DNS by hardcoding IPs (Telegram MTProto, Signal,
+#     ProtonVPN bootstrap, certain game servers) — but for those, the
+#     upstream tag doesn't exist, so use whitelist.ip_cidr in gateway.yaml
+#     directly with the known prefixes (149.154.0.0/16 + 91.108.0.0/16 for
+#     Telegram).
+#   ✗ Adding geoip-cloudflare / geoip-google / geoip-fastly etc. — those
+#     would route half the internet through the airport even if SagerNet
+#     ever published them. Don't.
+#
+# (Empty by default — country-code geoip is opt-in per deployment.)
 # ---------------------------------------------------------------------------
-
-geoip-telegram   # Telegram desktop/mobile MTProto (149.154/16, 91.108/16)
