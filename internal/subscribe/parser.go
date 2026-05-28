@@ -46,7 +46,7 @@ func (m *Manager) Refresh(ctx context.Context) ([]SubscriptionResult, error) {
 		if !e.Enabled {
 			continue
 		}
-		body, err := m.fetcher.Get(ctx, e.URL)
+		body, err := m.fetcher.GetWithUA(ctx, e.URL, e.UserAgent)
 		if err != nil {
 			if firstErr == nil {
 				firstErr = fmt.Errorf("fetch %s: %w", e.Name, err)

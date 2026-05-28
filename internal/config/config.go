@@ -33,6 +33,15 @@ type SubscriptionEntry struct {
 	URL     string `yaml:"url"`
 	Format  string `yaml:"format"` // auto | clash | singbox | uri | sip008
 	Enabled bool   `yaml:"enabled"`
+	// UserAgent overrides Subscribe.UserAgent for this subscription only.
+	// Different airports gate by UA in incompatible ways:
+	//   - yuyun (mhlnf.cn) returns full sing-box JSON for "sing-box/*" UA but
+	//     a stripped Clash YAML with "proxies: []" for Clash UA.
+	//   - ash (671234.xyz) returns HTTP 500 for "sing-box/*" UA but full
+	//     Clash YAML for "ClashforWindows/*" UA.
+	// Set this per subscription to whatever UA the provider expects;
+	// leave empty to use the global default.
+	UserAgent string `yaml:"user_agent,omitempty"`
 }
 
 // NodeConfig describes the FeiLian forwarding node that leap is sidecared on.
@@ -272,11 +281,9 @@ func (c *Config) applyDefaults() {
 		c.Subscribe.HTTPTimeout = 30 * time.Second
 	}
 	if c.Subscribe.UserAgent == "" {
-		// Most airport subscription providers gate by User-Agent. A Clash UA
-		// is the safe universal default: every provider returns Clash YAML
-		// for it (parser auto-detects). sing-box/* UA used to be reasonable
-		// but some providers (e.g. ash/671234.xyz) actively reject it with
-		// HTTP 500. Don't change without checking against the real fleet.
+		// Default airport User-Agent. Most providers speak Clash; some (yuyun)
+		// also speak native sing-box JSON and prefer "sing-box/*" UA — those
+		// must override per-subscription via SubscriptionEntry.UserAgent.
 		c.Subscribe.UserAgent = "ClashforWindows/0.20.39"
 	}
 	c.SingBox.ApplyDefaults()

@@ -15,6 +15,7 @@ type subscriptionDTO struct {
 	URL         string `json:"url"` // masked in GET responses
 	Enabled     bool   `json:"enabled"`
 	Format      string `json:"format,omitempty"`
+	UserAgent   string `json:"user_agent,omitempty"`
 	NodesCount  int    `json:"nodes_count,omitempty"`
 	LastRefresh string `json:"last_refresh,omitempty"`
 }
@@ -32,6 +33,7 @@ func (s *Server) handleSubscriptionsGet(w http.ResponseWriter, _ *http.Request) 
 			URL:        maskURLToken(e.URL),
 			Enabled:    e.Enabled,
 			Format:     e.Format,
+			UserAgent:  e.UserAgent,
 			NodesCount: nodesByName[e.Name],
 		}
 		if !last.IsZero() {
@@ -66,10 +68,11 @@ func (s *Server) handleSubscriptionsPost(w http.ResponseWriter, r *http.Request)
 	}
 
 	new := config.SubscriptionEntry{
-		Name:    dto.Name,
-		URL:     dto.URL,
-		Format:  defaultIfEmpty(dto.Format, "auto"),
-		Enabled: true, // default-on for newly added subscriptions
+		Name:      dto.Name,
+		URL:       dto.URL,
+		Format:    defaultIfEmpty(dto.Format, "auto"),
+		Enabled:   true, // default-on for newly added subscriptions
+		UserAgent: strings.TrimSpace(dto.UserAgent),
 	}
 	err := s.deps.Store.Mutate(s.deps.Cfg, func(c *config.Config) error {
 		c.Subscriptions = append(c.Subscriptions, new)
@@ -111,8 +114,10 @@ func (s *Server) handleSubscriptionsPut(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	newUA := strings.TrimSpace(dto.UserAgent)
 	err := s.deps.Store.Mutate(s.deps.Cfg, func(c *config.Config) error {
 		c.Subscriptions[idx].URL = dto.URL
+		c.Subscriptions[idx].UserAgent = newUA
 		return nil
 	})
 	if err != nil {

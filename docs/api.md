@@ -415,6 +415,7 @@ PUT `/api/whitelist` 时 geosites/geoips 必须从对应的 `available` 挑。
     "url": "https://yuyun.example/sub?token=3f18***8960",
     "enabled": true,
     "format": "auto",
+    "user_agent": "sing-box/1.10.7",
     "nodes_count": 66,
     "last_refresh": "2026-05-28T03:54:31Z"
   }
@@ -427,6 +428,7 @@ PUT `/api/whitelist` 时 geosites/geoips 必须从对应的 `available` 挑。
 | `url` | URL，但 `token=` `key=` `password=` `auth=` `secret=` 这几个查询参数中部用 `***` 打码 |
 | `enabled` | 是否启用 |
 | `format` | `auto` / `clash` / `singbox` / `uri` / `sip008` |
+| `user_agent` | 拉订阅时用的 UA。空表示用全局 `subscribe.user_agent`。机场对 UA 敏感时用：yuyun 给 Clash UA 返回 `proxies: []` 阉割版（要 `sing-box/1.10.7`）；ash 给 sing-box UA HTTP 500（要 `ClashforWindows/0.20.39`） |
 | `nodes_count` | 上一次 refresh 该订阅解析出多少节点 |
 | `last_refresh` | 全局最后一次 refresh 时间（不是单条订阅的） |
 
@@ -438,7 +440,8 @@ PUT `/api/whitelist` 时 geosites/geoips 必须从对应的 `available` 挑。
 {
   "name": "backup",
   "url":  "https://other-airport.example/sub?token=...",
-  "format": "auto"
+  "format": "auto",
+  "user_agent": "ClashforWindows/0.20.39"
 }
 ```
 
@@ -447,6 +450,7 @@ PUT `/api/whitelist` 时 geosites/geoips 必须从对应的 `available` 挑。
 - `name` 必填、非空。重复名 409。
 - `url` 必填、scheme 必须是 `http` / `https`、host 非空。
 - `format` 缺省 `auto`。
+- `user_agent` 可选，缺省走全局 `subscribe.user_agent`。机场拉不到节点时优先怀疑 UA。
 - 新增订阅默认 `enabled: true`。
 
 成功：写 yaml → SetEntries → Refresh → render → restart sing-box → 201 + 同 GET 结构（含新订阅）。
@@ -455,12 +459,16 @@ PUT `/api/whitelist` 时 geosites/geoips 必须从对应的 `available` 挑。
 
 ## PUT /api/subscriptions/{name}
 
-只支持改 `url`。请求：
+支持改 `url` 和 `user_agent`。请求：
 
 ```json
-{"url": "https://yuyun.example/sub?token=NEW_TOKEN"}
+{
+  "url": "https://yuyun.example/sub?token=NEW_TOKEN",
+  "user_agent": "sing-box/1.10.7"
+}
 ```
 
+`user_agent` 缺省（空字符串）= 清除该订阅的 override，走全局默认。
 未找到 404。校验通过后写 yaml + 全链刷新，返回 200 + 完整列表。
 
 ## DELETE /api/subscriptions/{name}

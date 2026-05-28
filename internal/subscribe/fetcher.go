@@ -27,11 +27,21 @@ func newFetcher(timeout time.Duration, ua string) *fetcher {
 }
 
 func (f *fetcher) Get(ctx context.Context, url string) ([]byte, error) {
+	return f.GetWithUA(ctx, url, "")
+}
+
+// GetWithUA fetches url using the override UA if non-empty, else the
+// fetcher's default. Used by Manager.Refresh to support per-subscription
+// User-Agent (some airports gate content by UA in incompatible ways).
+func (f *fetcher) GetWithUA(ctx context.Context, url, ua string) ([]byte, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("User-Agent", f.userAgent)
+	if ua == "" {
+		ua = f.userAgent
+	}
+	req.Header.Set("User-Agent", ua)
 	resp, err := f.client.Do(req)
 	if err != nil {
 		return nil, err
