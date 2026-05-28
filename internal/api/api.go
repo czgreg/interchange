@@ -10,8 +10,11 @@ import (
 	"time"
 
 	"github.com/leap-gateway/leap-gateway/internal/config"
+	"github.com/leap-gateway/leap-gateway/internal/configstore"
+	"github.com/leap-gateway/leap-gateway/internal/nodeinfo"
 	"github.com/leap-gateway/leap-gateway/internal/singbox"
 	"github.com/leap-gateway/leap-gateway/internal/subscribe"
+	"github.com/leap-gateway/leap-gateway/internal/watchdog"
 )
 
 type Deps struct {
@@ -19,6 +22,9 @@ type Deps struct {
 	Renderer   *singbox.Renderer
 	Controller *singbox.Controller
 	Cfg        *config.Config
+	Store      *configstore.Store
+	NodeInfo   *nodeinfo.Reporter
+	Watchdog   *watchdog.Watchdog
 }
 
 type Server struct {
@@ -33,6 +39,19 @@ func NewServer(deps Deps) *Server {
 	mux.HandleFunc("GET /api/status", s.auth(s.handleStatus))
 	mux.HandleFunc("GET /api/nodes", s.auth(s.handleNodes))
 	mux.HandleFunc("POST /api/subscribe/refresh", s.auth(s.handleRefresh))
+
+	mux.HandleFunc("GET /api/proxies/active", s.auth(s.handleProxiesActive))
+
+	mux.HandleFunc("GET /api/whitelist", s.auth(s.handleWhitelistGet))
+	mux.HandleFunc("PUT /api/whitelist", s.auth(s.handleWhitelistPut))
+
+	mux.HandleFunc("GET /api/geosites", s.auth(s.handleGeositesGet))
+
+	mux.HandleFunc("GET /api/subscriptions", s.auth(s.handleSubscriptionsGet))
+	mux.HandleFunc("POST /api/subscriptions", s.auth(s.handleSubscriptionsPost))
+	mux.HandleFunc("PUT /api/subscriptions/{name}", s.auth(s.handleSubscriptionsPut))
+	mux.HandleFunc("DELETE /api/subscriptions/{name}", s.auth(s.handleSubscriptionsDelete))
+
 	s.srv = &http.Server{
 		Addr:              deps.Cfg.API.Listen,
 		Handler:           mux,

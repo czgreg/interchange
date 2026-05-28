@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strings"
 
 	"github.com/leap-gateway/leap-gateway/internal/config"
 	"github.com/leap-gateway/leap-gateway/internal/subscribe"
@@ -19,6 +20,7 @@ import (
 type Renderer struct {
 	cfg  config.SingBoxConfig
 	node config.NodeConfig
+	subs []config.SubscriptionEntry
 }
 
 func NewRenderer(cfg config.SingBoxConfig) *Renderer {
@@ -33,6 +35,25 @@ func NewRenderer(cfg config.SingBoxConfig) *Renderer {
 func (r *Renderer) WithNode(n config.NodeConfig) *Renderer {
 	r.node = n
 	return r
+}
+
+// WithSubscriptions captures the configured subscription order so the renderer
+// can split the urltest pool into urltest-primary (first enabled subscription's
+// nodes) and urltest-backup (remaining enabled subs). Only takes effect when
+// ≥2 subscriptions are enabled — single-sub deployments still emit a single
+// urltest with tag "urltest-primary".
+func (r *Renderer) WithSubscriptions(subs []config.SubscriptionEntry) *Renderer {
+	r.SetSubscriptions(subs)
+	return r
+}
+
+// SetSubscriptions replaces the subscription order in place — used by the
+// management API after a CRUD edit, before re-rendering. Defensive copy so
+// later mutations to the caller's slice don't leak into render-time logic.
+func (r *Renderer) SetSubscriptions(subs []config.SubscriptionEntry) {
+	cp := make([]config.SubscriptionEntry, len(subs))
+	copy(cp, subs)
+	r.subs = cp
 }
 
 // Path is the on-disk path of the rendered config.
@@ -86,7 +107,14 @@ func (r *Renderer) buildLog() map[string]any {
 //   - "local-bootstrap" — IP-literal UDP, used by remote/local to resolve their
 //     own host names without chicken-and-egg
 //
-// rules: outbound=any → local (avoid loops); CN domains → local; A/AAAA → fakeip.
+// rules and final depend on Route.Mode:
+//
+//	overseas (default): A/AAAA → fakeip; CN domains → local; final → remote.
+//	                    Mirror of route: every non-CN destination goes proxy.
+//	whitelist:          fakeip only for whitelisted geosites + domain_suffix;
+//	                    final → local. Mirror of route: non-WL → direct, so
+//	                    they need real-IP resolution (a fakeip handed to a
+//	                    direct outbound is unreachable on the public internet).
 func (r *Renderer) buildDNS() map[string]any {
 	servers := []map[string]any{
 		{
@@ -118,8 +146,21 @@ func (r *Renderer) buildDNS() map[string]any {
 		{"outbound": "any", "server": "local"},
 		// CN domains → local DoH (real IP, hits CN CDN edges).
 		{"rule_set": []string{"geosite-cn"}, "server": "local"},
-		// Everything else A/AAAA → fake-IP.
-		{"query_type": []string{"A", "AAAA"}, "server": "fakeip"},
+	}
+
+	final := "remote"
+	if r.cfg.Route.Mode == "whitelist" {
+		// Only WL hits get fakeip; everything else falls through to local.
+		if tags := whitelistGeositeTags(r.cfg.Route.Whitelist); len(tags) > 0 {
+			rules = append(rules, map[string]any{"rule_set": tags, "server": "fakeip"})
+		}
+		if sx := r.cfg.Route.Whitelist.DomainSuffix; len(sx) > 0 {
+			rules = append(rules, map[string]any{"domain_suffix": sx, "server": "fakeip"})
+		}
+		final = "local"
+	} else {
+		// overseas mode: every A/AAAA that isn't CN → fakeip; everything else → remote.
+		rules = append(rules, map[string]any{"query_type": []string{"A", "AAAA"}, "server": "fakeip"})
 	}
 
 	return map[string]any{
@@ -128,7 +169,7 @@ func (r *Renderer) buildDNS() map[string]any {
 		"fakeip":            map[string]any{"enabled": true, "inet4_range": r.cfg.DNS.FakeIPRange},
 		"strategy":          "ipv4_only",
 		"independent_cache": true,
-		"final":             "remote",
+		"final":             final,
 	}
 }
 
@@ -140,14 +181,15 @@ func (r *Renderer) buildInbounds() []map[string]any {
 
 	if r.cfg.TUN.Enabled && r.node.Tun0GatewayIP != "" {
 		inbounds = append(inbounds, map[string]any{
-			"type":           "tun",
-			"tag":            "tun-in",
-			"interface_name": r.cfg.TUN.InterfaceName,
-			"address":        []string{r.cfg.TUN.Address},
-			"auto_route":     false,
-			"strict_route":   false,
-			"stack":          "system",
-			"sniff":          true,
+			"type":                       "tun",
+			"tag":                        "tun-in",
+			"interface_name":             r.cfg.TUN.InterfaceName,
+			"address":                    []string{r.cfg.TUN.Address},
+			"auto_route":                 false,
+			"strict_route":               false,
+			"stack":                      "system",
+			"sniff":                      true,
+			"sniff_override_destination": true,
 		})
 	}
 
@@ -194,68 +236,58 @@ func (r *Renderer) buildInbounds() []map[string]any {
 	return inbounds
 }
 
-// buildOutbounds emits the outbound graph per design.md §3:
+// buildOutbounds emits the outbound graph per design.md §3.
 //
-//	out (selector) → urltest → [airport nodes filtered by URLTest.NodePattern]
-//	                          → direct
-//	direct, dns-out, block, plus the airport node entries themselves.
+// One enabled subscription:
+//
+//	out (selector) → urltest-primary → [airport nodes filtered by NodePattern]
+//	                                  → direct
+//
+// Two or more enabled subscriptions:
+//
+//	out (selector) → urltest-primary → [first sub's nodes, NodePattern-filtered]
+//	              → urltest-backup  → [other subs' nodes, NodePattern-filtered]
+//	              → direct
 //
 // All parsed airport nodes are kept as defined outbounds (queryable via
-// clash-api) regardless of the filter; only the urltest pool is restricted.
+// clash-api) regardless of which urltest they land in. The watchdog flips the
+// "out" selector between urltest-primary and urltest-backup when the primary's
+// active node fails enough times in a row.
 func (r *Renderer) buildOutbounds(outbounds []subscribe.Outbound) []map[string]any {
-	tags := make([]string, 0, len(outbounds))
-	for _, o := range outbounds {
-		if t := o.Tag(); t != "" {
-			tags = append(tags, t)
-		}
+	primaryName, hasBackup := r.primarySubscription()
+	primaryTags, backupTags := r.splitTagsBySub(outbounds, primaryName, hasBackup)
+
+	primaryPool := r.applyNodePattern(primaryTags, "urltest-primary")
+	var backupPool []string
+	if hasBackup {
+		backupPool = r.applyNodePattern(backupTags, "urltest-backup")
 	}
 
-	urltestPool := tags
-	if pattern := r.cfg.URLTest.NodePattern; pattern != "" {
-		re, err := regexp.Compile(pattern)
-		if err != nil {
-			slog.Warn("urltest node_pattern is not a valid regexp; using all nodes",
-				"pattern", pattern, "err", err)
-		} else {
-			filtered := make([]string, 0, len(tags))
-			for _, t := range tags {
-				if re.MatchString(t) {
-					filtered = append(filtered, t)
-				}
-			}
-			if len(filtered) == 0 && len(tags) > 0 {
-				slog.Warn("urltest node_pattern matched no nodes; falling back to all",
-					"pattern", pattern, "total_nodes", len(tags))
-			} else {
-				urltestPool = filtered
-				slog.Info("urltest pool filtered",
-					"pattern", pattern, "selected", len(filtered), "total", len(tags))
-			}
-		}
-	}
-
-	all := make([]map[string]any, 0, len(outbounds)+5)
+	all := make([]map[string]any, 0, len(outbounds)+6)
 
 	interval := r.cfg.URLTest.Interval.String()
 	probeURL := r.cfg.URLTest.ProbeURL
 	tolerance := r.cfg.URLTest.Tolerance
 
-	if len(urltestPool) > 0 {
+	switch {
+	case len(primaryPool) > 0 && len(backupPool) > 0:
 		all = append(all, map[string]any{
 			"type":      "selector",
 			"tag":       "out",
-			"outbounds": append([]string{"urltest"}, "direct"),
-			"default":   "urltest",
+			"outbounds": []string{"urltest-primary", "urltest-backup", "direct"},
+			"default":   "urltest-primary",
 		})
+		all = append(all, urltestEntry("urltest-primary", primaryPool, probeURL, interval, tolerance))
+		all = append(all, urltestEntry("urltest-backup", backupPool, probeURL, interval, tolerance))
+	case len(primaryPool) > 0:
 		all = append(all, map[string]any{
-			"type":      "urltest",
-			"tag":       "urltest",
-			"outbounds": urltestPool,
-			"url":       probeURL,
-			"interval":  interval,
-			"tolerance": tolerance,
+			"type":      "selector",
+			"tag":       "out",
+			"outbounds": []string{"urltest-primary", "direct"},
+			"default":   "urltest-primary",
 		})
-	} else {
+		all = append(all, urltestEntry("urltest-primary", primaryPool, probeURL, interval, tolerance))
+	default:
 		// Bootstrap: no nodes parsed yet. Make "out" point to direct so the
 		// rendered config is still loadable; sing-box will start, route.final
 		// keeps working, just without proxy capability until a refresh
@@ -282,45 +314,159 @@ func (r *Renderer) buildOutbounds(outbounds []subscribe.Outbound) []map[string]a
 	return all
 }
 
-// buildRoute emits the route section per design.md §5: dns→dns-out, private/CN
-// rule_set → direct, final → out (selector). Rule sets are remote, downloaded
-// via the proxy detour (so the node itself doesn't need to reach
-// raw.githubusercontent.com directly — that traverses GFW).
+// primarySubscription returns the name of the first enabled subscription and
+// whether at least one other enabled subscription exists (i.e. backup pool is
+// possible). Returns ("", false) when no subscription order info is available
+// — falls back to "all nodes go to primary" semantics.
+func (r *Renderer) primarySubscription() (name string, hasBackup bool) {
+	enabled := 0
+	for _, s := range r.subs {
+		if !s.Enabled {
+			continue
+		}
+		enabled++
+		if name == "" {
+			name = s.Name
+		}
+	}
+	return name, enabled >= 2
+}
+
+// splitTagsBySub partitions outbound tags by the subscription-name prefix
+// (`<sub_name>/...` per parser.go ParseBytes). When primaryName is empty —
+// i.e. WithSubscriptions wasn't called — every tag goes to the primary pool.
+func (r *Renderer) splitTagsBySub(outbounds []subscribe.Outbound, primaryName string, hasBackup bool) (primary, backup []string) {
+	for _, o := range outbounds {
+		t := o.Tag()
+		if t == "" {
+			continue
+		}
+		if primaryName == "" || !hasBackup {
+			primary = append(primary, t)
+			continue
+		}
+		prefix := primaryName + "/"
+		if strings.HasPrefix(t, prefix) {
+			primary = append(primary, t)
+		} else {
+			backup = append(backup, t)
+		}
+	}
+	return primary, backup
+}
+
+// applyNodePattern compiles URLTest.NodePattern and returns the subset of tags
+// that match. label is for log clarity ("urltest-primary" / "urltest-backup").
+// On no-match-but-non-empty-input, returns the original (so the pool is never
+// silently emptied by a too-strict pattern).
+func (r *Renderer) applyNodePattern(tags []string, label string) []string {
+	pattern := r.cfg.URLTest.NodePattern
+	if pattern == "" || len(tags) == 0 {
+		return tags
+	}
+	re, err := regexp.Compile(pattern)
+	if err != nil {
+		slog.Warn("urltest node_pattern is not a valid regexp; using all nodes",
+			"pool", label, "pattern", pattern, "err", err)
+		return tags
+	}
+	filtered := make([]string, 0, len(tags))
+	for _, t := range tags {
+		if re.MatchString(t) {
+			filtered = append(filtered, t)
+		}
+	}
+	if len(filtered) == 0 {
+		slog.Warn("urltest node_pattern matched no nodes; falling back to all",
+			"pool", label, "pattern", pattern, "total_nodes", len(tags))
+		return tags
+	}
+	slog.Info("urltest pool filtered",
+		"pool", label, "pattern", pattern, "selected", len(filtered), "total", len(tags))
+	return filtered
+}
+
+func urltestEntry(tag string, pool []string, probeURL, interval string, tolerance int) map[string]any {
+	return map[string]any{
+		"type":      "urltest",
+		"tag":       tag,
+		"outbounds": pool,
+		"url":       probeURL,
+		"interval":  interval,
+		"tolerance": tolerance,
+	}
+}
+
+// buildRoute emits the route section. Two modes:
+//
+//	overseas (default): dns→dns-out, private/CN → direct, final → out (selector).
+//	                    Every non-CN destination goes through urltest.
+//	whitelist:          dns→dns-out, private/CN → direct, WL hits → out,
+//	                    final → direct. Only whitelisted destinations egress
+//	                    via airport; everything else goes direct.
+//
+// Rule sets are loaded as type=local from RuleSetsDir. .srs files are baked
+// into the deploy tarball by scripts/stage.sh, sidestepping the GFW-blocked
+// raw.githubusercontent.com path AND the startup race where 14 parallel
+// remote downloads compete with urltest's first measurement window.
 func (r *Renderer) buildRoute() map[string]any {
+	dir := r.cfg.RuleSetsDir
 	ruleSet := []map[string]any{
-		{
-			"tag":              "geosite-cn",
-			"type":             "remote",
-			"format":           "binary",
-			"url":              r.cfg.Route.GeositeURL,
-			"download_detour":  "out",
-			"update_interval":  "168h",
-		},
-		{
-			"tag":              "geoip-cn",
-			"type":             "remote",
-			"format":           "binary",
-			"url":              r.cfg.Route.GeoIPURL,
-			"download_detour":  "out",
-			"update_interval":  "168h",
-		},
+		ruleSetLocal("geosite-cn", dir),
+		ruleSetLocal("geoip-cn", dir),
 	}
 
 	rules := []map[string]any{
-		// DNS traffic landing on dns-in or sniffed as DNS → handled by sing-box's DNS subsystem.
 		{"protocol": "dns", "outbound": "dns-out"},
-		// Private / LAN ranges → never proxy.
 		{"ip_is_private": true, "outbound": "direct"},
-		// CN domains / IPs → direct.
 		{"rule_set": []string{"geosite-cn", "geoip-cn"}, "outbound": "direct"},
+	}
+
+	final := "out"
+	if r.cfg.Route.Mode == "whitelist" {
+		for _, g := range r.cfg.Route.Whitelist.Geosites {
+			ruleSet = append(ruleSet, ruleSetLocal(g.Name, dir))
+		}
+		if tags := whitelistGeositeTags(r.cfg.Route.Whitelist); len(tags) > 0 {
+			rules = append(rules, map[string]any{"rule_set": tags, "outbound": "out"})
+		}
+		if sx := r.cfg.Route.Whitelist.DomainSuffix; len(sx) > 0 {
+			rules = append(rules, map[string]any{"domain_suffix": sx, "outbound": "out"})
+		}
+		// Footgun guard: a whitelist mode with neither geosites nor suffixes
+		// would route everything to direct, leaving no reason to run sing-box
+		// at all. Warn but proceed — the user might be testing or in transition.
+		if len(r.cfg.Route.Whitelist.Geosites) == 0 && len(r.cfg.Route.Whitelist.DomainSuffix) == 0 {
+			slog.Warn("route.mode=whitelist but whitelist is empty; all overseas traffic will go direct")
+		}
+		final = "direct"
 	}
 
 	return map[string]any{
 		"rule_set":              ruleSet,
 		"rules":                 rules,
-		"final":                 "out",
+		"final":                 final,
 		"auto_detect_interface": true,
 	}
+}
+
+func ruleSetLocal(tag, dir string) map[string]any {
+	return map[string]any{
+		"tag":    tag,
+		"type":   "local",
+		"format": "binary",
+		"path":   dir + "/" + tag + ".srs",
+	}
+}
+
+func whitelistGeositeTags(wl config.WhitelistConfig) []string {
+	tags := make([]string, 0, len(wl.Geosites))
+	for _, g := range wl.Geosites {
+		if g.Name != "" {
+			tags = append(tags, g.Name)
+		}
+	}
+	return tags
 }
 
 func (r *Renderer) buildExperimental() map[string]any {

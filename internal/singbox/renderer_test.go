@@ -96,7 +96,7 @@ func TestRendererProductionMode(t *testing.T) {
 		m, _ := ob.(map[string]any)
 		gotTags[m["tag"].(string)] = m["type"].(string)
 	}
-	for _, want := range []string{"out", "urltest", "n1", "n2", "direct", "dns-out", "block"} {
+	for _, want := range []string{"out", "urltest-primary", "n1", "n2", "direct", "dns-out", "block"} {
 		if _, ok := gotTags[want]; !ok {
 			t.Errorf("outbounds missing tag=%q", want)
 		}
@@ -205,5 +205,196 @@ func TestRendererNoNodes(t *testing.T) {
 
 	if _, err := os.Stat(r.Path()); err != nil {
 		t.Errorf("config not written: %v", err)
+	}
+}
+
+func TestRendererPrimaryBackupSplit(t *testing.T) {
+	// With ≥2 enabled subscriptions, the renderer should split outbounds by
+	// the "<sub_name>/" tag prefix into urltest-primary (first sub) and
+	// urltest-backup (the rest), and the selector "out" should list both.
+	r, _ := newTestRenderer(t, true)
+	r = r.WithSubscriptions([]config.SubscriptionEntry{
+		{Name: "yuyun", Enabled: true},
+		{Name: "backup", Enabled: true},
+		{Name: "off", Enabled: false}, // disabled subs are ignored
+	})
+
+	outs := []subscribe.Outbound{
+		{"type": "vmess", "tag": "yuyun/SG01", "server": "a", "server_port": 443, "uuid": "x"},
+		{"type": "vmess", "tag": "yuyun/US01", "server": "b", "server_port": 443, "uuid": "y"},
+		{"type": "trojan", "tag": "backup/HK01", "server": "c", "server_port": 443, "password": "p"},
+	}
+	data, err := r.Write(outs)
+	if err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	var doc map[string]any
+	_ = json.Unmarshal(data, &doc)
+
+	allOuts, _ := doc["outbounds"].([]any)
+	pools := map[string][]any{}
+	var selOut map[string]any
+	for _, ob := range allOuts {
+		m, _ := ob.(map[string]any)
+		tag, _ := m["tag"].(string)
+		switch tag {
+		case "out":
+			selOut = m
+		case "urltest-primary", "urltest-backup":
+			pl, _ := m["outbounds"].([]any)
+			pools[tag] = pl
+		}
+	}
+	if selOut == nil {
+		t.Fatal("missing selector out")
+	}
+	selList, _ := selOut["outbounds"].([]any)
+	wantSel := []string{"urltest-primary", "urltest-backup", "direct"}
+	if len(selList) != len(wantSel) {
+		t.Fatalf("selector out members %v, want %v", selList, wantSel)
+	}
+	for i, want := range wantSel {
+		if selList[i] != want {
+			t.Errorf("selector out[%d] = %v, want %v", i, selList[i], want)
+		}
+	}
+	if selOut["default"] != "urltest-primary" {
+		t.Errorf("selector default = %v, want urltest-primary", selOut["default"])
+	}
+
+	if len(pools["urltest-primary"]) != 2 {
+		t.Errorf("urltest-primary pool = %v, want 2 yuyun nodes", pools["urltest-primary"])
+	}
+	if len(pools["urltest-backup"]) != 1 {
+		t.Errorf("urltest-backup pool = %v, want 1 backup node", pools["urltest-backup"])
+	}
+}
+
+func TestRendererSingleSubscription(t *testing.T) {
+	// One enabled sub: still emit urltest-primary (consistent naming for the
+	// watchdog), no urltest-backup.
+	r, _ := newTestRenderer(t, true)
+	r = r.WithSubscriptions([]config.SubscriptionEntry{{Name: "yuyun", Enabled: true}})
+
+	data, err := r.Write([]subscribe.Outbound{
+		{"type": "vmess", "tag": "yuyun/SG01", "server": "a", "server_port": 443, "uuid": "x"},
+	})
+	if err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	var doc map[string]any
+	_ = json.Unmarshal(data, &doc)
+
+	allOuts, _ := doc["outbounds"].([]any)
+	tags := map[string]bool{}
+	var selOut map[string]any
+	for _, ob := range allOuts {
+		m, _ := ob.(map[string]any)
+		tags[m["tag"].(string)] = true
+		if m["tag"] == "out" {
+			selOut = m
+		}
+	}
+	if !tags["urltest-primary"] {
+		t.Errorf("missing urltest-primary in single-sub case")
+	}
+	if tags["urltest-backup"] {
+		t.Errorf("urltest-backup should not exist in single-sub case")
+	}
+	selList, _ := selOut["outbounds"].([]any)
+	if len(selList) != 2 {
+		t.Errorf("single-sub selector should have 2 members (urltest-primary, direct), got %v", selList)
+	}
+}
+
+func TestRendererWhitelistMode(t *testing.T) {
+	r, _ := newTestRenderer(t, true)
+	r.cfg.Route.Mode = "whitelist"
+	r.cfg.Route.Whitelist = config.WhitelistConfig{
+		Geosites: []config.GeositeRef{
+			{Name: "geosite-google", URL: "https://example.invalid/google.srs"},
+			{Name: "geosite-openai", URL: "https://example.invalid/openai.srs"},
+		},
+		DomainSuffix: []string{"claude.ai", "anthropic.com"},
+	}
+
+	data, err := r.Write([]subscribe.Outbound{
+		{"type": "vmess", "tag": "n1", "server": "a", "server_port": 443, "uuid": "x"},
+	})
+	if err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	var doc map[string]any
+	_ = json.Unmarshal(data, &doc)
+
+	dns, _ := doc["dns"].(map[string]any)
+	if dns["final"] != "local" {
+		t.Errorf("dns.final = %v, want local in whitelist mode", dns["final"])
+	}
+	dnsRules, _ := dns["rules"].([]any)
+	foundFakeIPGeosite, foundFakeIPSuffix, foundQueryTypeFakeIP := false, false, false
+	for _, rule := range dnsRules {
+		m, _ := rule.(map[string]any)
+		if m["server"] != "fakeip" {
+			continue
+		}
+		if rs, ok := m["rule_set"].([]any); ok && len(rs) == 2 {
+			foundFakeIPGeosite = true
+		}
+		if sx, ok := m["domain_suffix"].([]any); ok && len(sx) == 2 {
+			foundFakeIPSuffix = true
+		}
+		if _, ok := m["query_type"]; ok {
+			foundQueryTypeFakeIP = true
+		}
+	}
+	if !foundFakeIPGeosite {
+		t.Errorf("dns: missing fakeip rule for whitelist geosites")
+	}
+	if !foundFakeIPSuffix {
+		t.Errorf("dns: missing fakeip rule for whitelist domain_suffix")
+	}
+	if foundQueryTypeFakeIP {
+		t.Errorf("dns: whitelist mode must not emit catch-all A/AAAA→fakeip rule")
+	}
+
+	route, _ := doc["route"].(map[string]any)
+	if route["final"] != "direct" {
+		t.Errorf("route.final = %v, want direct in whitelist mode", route["final"])
+	}
+	ruleSet, _ := route["rule_set"].([]any)
+	if len(ruleSet) != 4 {
+		t.Errorf("want 4 rule_set entries (cn + ip + 2 wl geosites), got %d", len(ruleSet))
+	}
+	gotTags := make(map[string]bool)
+	for _, rs := range ruleSet {
+		m, _ := rs.(map[string]any)
+		gotTags[m["tag"].(string)] = true
+	}
+	for _, want := range []string{"geosite-cn", "geoip-cn", "geosite-google", "geosite-openai"} {
+		if !gotTags[want] {
+			t.Errorf("rule_set missing tag=%q", want)
+		}
+	}
+
+	routeRules, _ := route["rules"].([]any)
+	foundRouteGeositeOut, foundRouteSuffixOut := false, false
+	for _, rule := range routeRules {
+		m, _ := rule.(map[string]any)
+		if m["outbound"] != "out" {
+			continue
+		}
+		if rs, ok := m["rule_set"].([]any); ok && len(rs) == 2 {
+			foundRouteGeositeOut = true
+		}
+		if sx, ok := m["domain_suffix"].([]any); ok && len(sx) == 2 {
+			foundRouteSuffixOut = true
+		}
+	}
+	if !foundRouteGeositeOut {
+		t.Errorf("route: missing rule_set→out rule for whitelist geosites")
+	}
+	if !foundRouteSuffixOut {
+		t.Errorf("route: missing domain_suffix→out rule for whitelist suffixes")
 	}
 }

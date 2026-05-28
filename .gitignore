@@ -20,5 +20,8 @@
 .vscode/
 *.swp
 
+# macOS
+.DS_Store
+
 # Generated configs
 /configs/runtime/

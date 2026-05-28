@@ -67,6 +67,45 @@ singbox:
     geosite_url: "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-cn.srs"
     geoip_url:   "https://raw.githubusercontent.com/SagerNet/sing-geoip/rule-set/geoip-cn.srs"
 
+    # mode: how non-CN traffic is split.
+    #   overseas (default): every non-CN destination → urltest (airport).
+    #                       The most transparent option — clients don't need
+    #                       to think about which sites are blocked.
+    #   whitelist:          only domains matching `whitelist.*` go to airport;
+    #                       everything else (including non-CN sites that
+    #                       aren't whitelisted) goes direct. Saves airport
+    #                       bandwidth at the cost of curating the list.
+    # CN domains/IPs and private LAN ranges always go direct in both modes.
+    mode: overseas
+
+    # whitelist is consulted only when mode == whitelist. The two lists below
+    # are unioned at render time. Both DNS fakeip handling and route rules
+    # follow the same set, so the WL is the single source of truth.
+    #
+    # Switch to mode: whitelist + uncomment this section if you want a curated
+    # split. The list below covers what's typically blocked from CN; team
+    # members are free to add long-tail entries via domain_suffix.
+    whitelist:
+      geosites:
+        - {name: geosite-google,     url: "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-google.srs"}
+        - {name: geosite-youtube,    url: "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-youtube.srs"}
+        - {name: geosite-openai,     url: "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-openai.srs"}
+        - {name: geosite-github,     url: "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-github.srs"}
+        - {name: geosite-twitter,    url: "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-twitter.srs"}
+        - {name: geosite-facebook,   url: "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-facebook.srs"}
+        - {name: geosite-telegram,   url: "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-telegram.srs"}
+        - {name: geosite-cloudflare, url: "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-cloudflare.srs"}
+        - {name: geosite-discord,    url: "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-discord.srs"}
+        - {name: geosite-wikimedia,  url: "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-wikimedia.srs"}
+        - {name: geosite-reddit,     url: "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-reddit.srs"}
+        - {name: geosite-linkedin,   url: "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-linkedin.srs"}
+      domain_suffix:
+        - claude.ai
+        - anthropic.com
+        - cursor.com
+        - figma.com
+        - quora.com
+
   # urltest controls the auto-selected proxy outbound that handles overseas
   # traffic. sing-box's native urltest re-tests the pool on `interval`; the
   # in-process watchdog supplements it with a fast-path probe of the active

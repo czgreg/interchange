@@ -138,7 +138,7 @@ install_leap() {
   install -m 0755 "$SCRIPT_DIR/leap-gateway" /usr/local/bin/leap-gateway
   log "leap-gateway installed"
 
-  install -d -m 0755 /etc/leap /etc/leap/singbox /var/lib/leap
+  install -d -m 0755 /etc/leap /etc/leap/singbox /etc/leap/singbox/rule-sets /var/lib/leap
 
   if [ -f "$SCRIPT_DIR/gateway.yaml" ]; then
     install -m 0640 "$SCRIPT_DIR/gateway.yaml" /etc/leap/gateway.yaml
@@ -148,6 +148,16 @@ install_leap() {
   else
     log "keeping existing /etc/leap/gateway.yaml (no gateway.yaml in $SCRIPT_DIR)"
   fi
+
+  # rule-sets — baked into the tarball by stage.sh. sing-box loads these as
+  # type=local so startup is deterministic regardless of urltest readiness.
+  if [ -d "$SCRIPT_DIR/rule-sets" ] && compgen -G "$SCRIPT_DIR/rule-sets/*.srs" >/dev/null; then
+    install -m 0644 "$SCRIPT_DIR"/rule-sets/*.srs /etc/leap/singbox/rule-sets/
+    n=$(find "$SCRIPT_DIR/rule-sets" -name '*.srs' | wc -l | tr -d ' ')
+    log "rule-sets installed ($n .srs files in /etc/leap/singbox/rule-sets/)"
+  else
+    fail "no rule-sets/*.srs in $SCRIPT_DIR — re-run scripts/stage.sh on operator workstation"
+  fi
 }
 
 # ---------------------------------------------------------------------------
@@ -156,9 +166,14 @@ install_leap() {
 install_nft() {
   client_subnet=$(grep -E '^\s*client_subnet:' /etc/leap/gateway.yaml | awk -F'"' '{print $2}')
   [ -n "$client_subnet" ] || fail "node.client_subnet not set in /etc/leap/gateway.yaml"
-  sed "s|@CLIENT_SUBNET@|$client_subnet|g" "$SCRIPT_DIR/nft.conf.tmpl" \
+  api_listen=$(grep -E '^\s*listen:' /etc/leap/gateway.yaml | head -1 | awk -F'"' '{print $2}')
+  api_port=${api_listen##*:}
+  [ -n "$api_port" ] || api_port=18080
+  sed -e "s|@CLIENT_SUBNET@|$client_subnet|g" \
+      -e "s|@API_PORT@|$api_port|g" \
+      "$SCRIPT_DIR/nft.conf.tmpl" \
     > /etc/leap/nft.conf
-  log "nft.conf rendered (client_subnet=$client_subnet)"
+  log "nft.conf rendered (client_subnet=$client_subnet, api_port=$api_port)"
 
   install -m 0755 "$SCRIPT_DIR/iproute.sh" /etc/leap/iproute.sh
   log "iproute.sh installed"

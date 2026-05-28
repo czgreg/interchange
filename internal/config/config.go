@@ -54,6 +54,13 @@ type SingBoxConfig struct {
 	ConfigPath string `yaml:"config_path"`
 	LogLevel   string `yaml:"log_level"`
 
+	// RuleSetsDir is where the renderer expects .srs files (geosite-cn.srs,
+	// geoip-cn.srs, plus any whitelist geosite). Files are baked into the
+	// tarball by scripts/stage.sh and installed by deploy/node/install.sh —
+	// they're loaded at startup with type=local so sing-box doesn't have to
+	// race against urltest readiness during initial download.
+	RuleSetsDir string `yaml:"rule_sets_dir"`
+
 	ClashAPI ClashAPIConfig `yaml:"clash_api"`
 
 	// TUN drives the TUN inbound that catches forwarded traffic redirected to
@@ -108,6 +115,43 @@ type DNSConfig struct {
 type RouteConfig struct {
 	GeositeURL string `yaml:"geosite_url"`
 	GeoIPURL   string `yaml:"geoip_url"`
+
+	// Mode controls how non-CN traffic is split.
+	//
+	//   "overseas" (default): every non-CN destination → urltest (airport).
+	//                         CN domains/IPs still go direct via geosite-cn /
+	//                         geoip-cn. This is the original behavior — most
+	//                         transparent to clients.
+	//   "whitelist":          only domains hitting Whitelist.* go to urltest;
+	//                         everything else (including non-CN sites that
+	//                         aren't whitelisted) goes direct. Saves airport
+	//                         bandwidth at the cost of curating the list.
+	//
+	// Empty / unrecognized values fall back to "overseas".
+	Mode string `yaml:"mode"`
+
+	// Whitelist is consulted only when Mode == "whitelist".
+	Whitelist WhitelistConfig `yaml:"whitelist"`
+}
+
+// WhitelistConfig enumerates what's allowed through the airport in whitelist
+// mode. The two lists are unioned at render time.
+type WhitelistConfig struct {
+	// Geosites references named sing-box rule_sets — each entry becomes both a
+	// route.rule_set entry (downloaded via the proxy) and a route rule that
+	// hands its hits to outbound "out". Tag must start with "geosite-" by
+	// convention.
+	Geosites []GeositeRef `yaml:"geosites"`
+
+	// DomainSuffix is an ad-hoc list of domain suffixes (e.g. "claude.ai",
+	// "anthropic.com") that don't yet have a geosite entry or that you want to
+	// pin without waiting for the next rule_set update_interval.
+	DomainSuffix []string `yaml:"domain_suffix"`
+}
+
+type GeositeRef struct {
+	Name string `yaml:"name"`
+	URL  string `yaml:"url"`
 }
 
 // URLTestConfig drives both sing-box's native urltest outbound and the
@@ -138,6 +182,31 @@ type WatchdogConfig struct {
 	Interval      time.Duration `yaml:"interval"`       // default 5s
 	Timeout       time.Duration `yaml:"timeout"`        // default 3s
 	FailThreshold int           `yaml:"fail_threshold"` // default 3
+
+	// JitterPercent randomizes Interval by ±N% per tick (default 20). Reduces
+	// the "exactly every 5s" fingerprint visible from inside the airport.
+	JitterPercent int `yaml:"jitter_percent"`
+
+	// BackoffMax caps the inter-probe sleep when the connection has been
+	// healthy for many consecutive ticks. Default 60s. Sequence with default
+	// Interval=5s: 5 → 10 → 20 → 40 → 60. Any failure or selection change
+	// resets to Interval. Set to 0 to disable backoff.
+	BackoffMax time.Duration `yaml:"backoff_max"`
+
+	// RealTrafficSkip: if true, skip a probe whenever clash-api /connections
+	// reports any positive byte-delta on a connection routed through "out"
+	// since the last poll. Real user traffic IS the health signal — no need
+	// to spam synthetic probes. Default true; set explicit `false` to opt out.
+	// Pointer so we can distinguish "unset" (→default true) from "set false".
+	RealTrafficSkip *bool `yaml:"real_traffic_skip"`
+
+	// PrimaryRecoveryInterval: when failed-over to backup, how often to
+	// independently probe the primary's currently-selected node. Default 30m.
+	PrimaryRecoveryInterval time.Duration `yaml:"primary_recovery_interval"`
+
+	// PrimaryRecoveryThreshold: consecutive healthy probes on primary required
+	// before switching back from backup. Default 3.
+	PrimaryRecoveryThreshold int `yaml:"primary_recovery_threshold"`
 }
 
 func Load(path string) (*Config, error) {
@@ -178,6 +247,9 @@ func (c *Config) applyDefaults() {
 func (c *SingBoxConfig) ApplyDefaults() {
 	if c.ConfigPath == "" {
 		c.ConfigPath = "/etc/leap/singbox/config.json"
+	}
+	if c.RuleSetsDir == "" {
+		c.RuleSetsDir = "/etc/leap/singbox/rule-sets"
 	}
 	if c.LogLevel == "" {
 		c.LogLevel = "info"
@@ -232,6 +304,9 @@ func (c *SingBoxConfig) ApplyDefaults() {
 	if c.Route.GeoIPURL == "" {
 		c.Route.GeoIPURL = "https://raw.githubusercontent.com/SagerNet/sing-geoip/rule-set/geoip-cn.srs"
 	}
+	if c.Route.Mode == "" {
+		c.Route.Mode = "overseas"
+	}
 
 	// URLTest defaults.
 	if c.URLTest.Interval == 0 {
@@ -252,5 +327,23 @@ func (c *SingBoxConfig) ApplyDefaults() {
 	}
 	if c.URLTest.Watchdog.FailThreshold == 0 {
 		c.URLTest.Watchdog.FailThreshold = 3
+	}
+	if c.URLTest.Watchdog.JitterPercent == 0 {
+		c.URLTest.Watchdog.JitterPercent = 20
+	}
+	if c.URLTest.Watchdog.BackoffMax == 0 {
+		c.URLTest.Watchdog.BackoffMax = 60 * time.Second
+	}
+	// RealTrafficSkip is bool* — nil means "user didn't set it, use default
+	// true". Explicit false in yaml opts out.
+	if c.URLTest.Watchdog.RealTrafficSkip == nil {
+		t := true
+		c.URLTest.Watchdog.RealTrafficSkip = &t
+	}
+	if c.URLTest.Watchdog.PrimaryRecoveryInterval == 0 {
+		c.URLTest.Watchdog.PrimaryRecoveryInterval = 30 * time.Minute
+	}
+	if c.URLTest.Watchdog.PrimaryRecoveryThreshold == 0 {
+		c.URLTest.Watchdog.PrimaryRecoveryThreshold = 3
 	}
 }

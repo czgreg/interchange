@@ -80,7 +80,74 @@ cp deploy/node/install.sh \
 chmod 0755 "$STAGE_DIR/install.sh" "$STAGE_DIR/iproute.sh"
 log "deploy/node/* files staged"
 
-# 5. Tarball.
+# 5. Rule-set .srs blobs. Fetched into the tarball so sing-box can load them as
+#    type=local at startup — sidesteps the GFW path AND the startup race where
+#    14 parallel remote downloads compete with urltest's first measurement.
+#    Sources merged from gateway.yaml (URLs ending in .srs) AND
+#    scripts/geosite-catalog.txt (operator catalog the API exposes as the
+#    "available" set). Per-URL cache in .cache/rule-sets/. Delete that dir to
+#    force re-fetch.
+RULESETS_CACHE="$SINGBOX_CACHE/rule-sets"
+mkdir -p "$RULESETS_CACHE" "$STAGE_DIR/rule-sets"
+
+# Tags requested by gateway.yaml (full URLs).
+RULESET_URLS=()
+while IFS= read -r u; do
+  RULESET_URLS+=("$u")
+done < <(grep -oE 'https://[^"[:space:]]+\.srs' "$GATEWAY_YAML" | sort -u)
+
+# Catalog tags — derive their URL from the standard sagernet path.
+CATALOG="$REPO_ROOT/scripts/geosite-catalog.txt"
+if [ -f "$CATALOG" ]; then
+  while IFS= read -r line; do
+    line="${line%%#*}"
+    line="$(echo "$line" | tr -d '[:space:]')"
+    [ -z "$line" ] && continue
+    RULESET_URLS+=("https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/${line}.srs")
+  done < "$CATALOG"
+fi
+
+# Dedupe (bash 3.2 has no associative arrays — use a sentinel string).
+DEDUPED_URLS=()
+SEEN=$'\n'
+for u in "${RULESET_URLS[@]}"; do
+  case "$SEEN" in
+    *$'\n'"$u"$'\n'*) ;;
+    *)
+      DEDUPED_URLS+=("$u")
+      SEEN="$SEEN$u"$'\n'
+      ;;
+  esac
+done
+
+if [ "${#DEDUPED_URLS[@]}" -eq 0 ]; then
+  fail "no rule-set URLs found (checked $GATEWAY_YAML and $CATALOG)"
+fi
+log "fetching ${#DEDUPED_URLS[@]} rule-set .srs files (gateway.yaml + catalog)"
+fetched=0
+skipped=0
+for url in "${DEDUPED_URLS[@]}"; do
+  fname="$(basename "$url")"
+  cached="$RULESETS_CACHE/$fname"
+  if [ ! -s "$cached" ]; then
+    # Catalog entries can fail (rare/typo'd categories); skip with warning
+    # rather than abort the whole build. gateway.yaml entries are required —
+    # but with the fail-soft path here, missing yaml entries surface later
+    # at sing-box startup with a clear error instead. Acceptable tradeoff.
+    if ! curl -fsSL --retry 2 --max-time 30 "$url" -o "$cached.tmp"; then
+      log "  skip $fname (fetch failed)"
+      rm -f "$cached.tmp"
+      skipped=$((skipped+1))
+      continue
+    fi
+    mv "$cached.tmp" "$cached"
+  fi
+  cp "$cached" "$STAGE_DIR/rule-sets/$fname"
+  fetched=$((fetched+1))
+done
+log "rule-sets staged: $fetched ok, $skipped skipped ($(du -sh "$STAGE_DIR/rule-sets" | cut -f1))"
+
+# 6. Tarball.
 TARBALL="$OUT_DIR/leap-stage.tgz"
 tar -czf "$TARBALL" -C "$OUT_DIR" leap-stage
 log "wrote $TARBALL ($(du -h "$TARBALL" | cut -f1))"

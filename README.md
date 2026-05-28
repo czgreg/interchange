@@ -61,9 +61,39 @@ go run ./cmd/selftest --file /tmp/saved-body.json --format singbox
 | GET | `/healthz` | 存活检查 |
 | GET | `/api/status` | 订阅状态、节点数、sing-box 健康 |
 | GET | `/api/nodes` | 当前所有出站节点 |
-| POST | `/api/subscribe/refresh` | 立即拉取订阅 + 渲染 + 重载 sing-box |
+| GET | `/api/proxies/active` | 节点全景：node + feilian + leap services + 当前机场 + watchdog |
+| GET | `/api/whitelist` | 当前白名单 (mode / geosites / domain_suffix) |
+| PUT | `/api/whitelist` | 整体替换白名单（geosites 必须 ⊆ available；写 yaml + 重启 sing-box） |
+| GET | `/api/geosites` | `available` (本地 .srs 文件) + `active` (yaml 里启用的) |
+| GET | `/api/subscriptions` | 订阅列表，URL token 自动打码 |
+| POST | `/api/subscriptions` | 新增 `{name, url}` |
+| PUT | `/api/subscriptions/{name}` | 改 URL |
+| DELETE | `/api/subscriptions/{name}` | 删 |
+| POST | `/api/subscribe/refresh` | 立即拉取 + 渲染 + 重载 sing-box |
 
 如果配置了 `api.token`，所有 `/api/*` 请求需带 `Authorization: Bearer <token>`。
+
+WL / 订阅的写操作都会原子写回 `/etc/leap/gateway.yaml` 并 `systemctl restart leap-singbox`（5-10s 中断）。yaml 的注释会丢失（go-yaml v3 round-trip 限制），介意请只读不写。
+
+### 常用 curl 一键查
+
+```bash
+TOK=$(grep -oE 'token: "\S+"' /etc/leap/gateway.yaml | head -1 | awk -F'"' '{print $2}')
+H="Authorization: Bearer $TOK"   # 没配 token 就别传 -H
+
+# 节点全景：飞连服务、leap 服务、机场、watchdog
+curl -s -H "$H" 127.0.0.1:18080/api/proxies/active | python3 -m json.tool
+
+# 看现在白名单里有什么
+curl -s -H "$H" 127.0.0.1:18080/api/whitelist | python3 -m json.tool
+
+# 看本地有哪些 geosite 可选 (PUT WL 时必须从这里挑)
+curl -s -H "$H" 127.0.0.1:18080/api/geosites | python3 -m json.tool
+
+# 加 / 删一条 domain_suffix —— 整体替换语义，要先 GET 拿到现状再 PUT
+curl -s -H "$H" 127.0.0.1:18080/api/whitelist | jq '.domain_suffix += ["new-site.com"]' \
+  | curl -s -H "$H" -H "Content-Type: application/json" -X PUT 127.0.0.1:18080/api/whitelist -d @-
+```
 
 ## 节点运维速查（在部署节点上跑）
 

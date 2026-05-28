@@ -11,10 +11,16 @@ import (
 
 	"github.com/leap-gateway/leap-gateway/internal/api"
 	"github.com/leap-gateway/leap-gateway/internal/config"
+	"github.com/leap-gateway/leap-gateway/internal/configstore"
+	"github.com/leap-gateway/leap-gateway/internal/nodeinfo"
 	"github.com/leap-gateway/leap-gateway/internal/singbox"
 	"github.com/leap-gateway/leap-gateway/internal/subscribe"
 	"github.com/leap-gateway/leap-gateway/internal/watchdog"
 )
+
+// Version is set at build time via -ldflags="-X main.Version=...". Defaults
+// to "dev" for local builds.
+var Version = "dev"
 
 func main() {
 	cfgPath := flag.String("config", "/etc/leap/gateway.yaml", "config file path")
@@ -31,8 +37,13 @@ func main() {
 	}
 
 	mgr := subscribe.NewManagerWithFetch(cfg.Subscriptions, cfg.Subscribe.HTTPTimeout, cfg.Subscribe.UserAgent)
-	renderer := singbox.NewRenderer(cfg.SingBox).WithNode(cfg.Node)
+	renderer := singbox.NewRenderer(cfg.SingBox).
+		WithNode(cfg.Node).
+		WithSubscriptions(cfg.Subscriptions)
 	sbCtl := singbox.NewController(cfg.SingBox.ClashAPI)
+	store := configstore.New(*cfgPath)
+	wd := watchdog.New(cfg.SingBox.ClashAPI, cfg.SingBox.URLTest.Watchdog, cfg.SingBox.URLTest.ProbeURL)
+	ni := nodeinfo.New(cfg.Node, Version)
 
 	if _, err := renderer.Write(nil); err != nil {
 		slog.Error("write bootstrap singbox config", "err", err)
@@ -49,6 +60,9 @@ func main() {
 		Renderer:   renderer,
 		Controller: sbCtl,
 		Cfg:        cfg,
+		Store:      store,
+		NodeInfo:   ni,
+		Watchdog:   wd,
 	})
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -86,8 +100,8 @@ func main() {
 		}
 	}()
 
-	wd := watchdog.New(cfg.SingBox.ClashAPI, cfg.SingBox.URLTest.Watchdog, cfg.SingBox.URLTest.ProbeURL)
 	go wd.Run(ctx)
+	go ni.Run(ctx)
 
 	<-ctx.Done()
 	slog.Info("shutting down")

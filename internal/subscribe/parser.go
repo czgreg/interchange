@@ -75,6 +75,19 @@ func (m *Manager) Snapshot() ([]SubscriptionResult, time.Time) {
 	return m.lastResults, m.lastRefreshed
 }
 
+// SetEntries swaps the subscription set the next Refresh will iterate. Used by
+// the management API after CRUD edits — the underlying cfg.Subscriptions
+// slice may have been reallocated, so we cannot rely on shared backing array.
+func (m *Manager) SetEntries(entries []config.SubscriptionEntry) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	// Defensive copy so external mutations to the caller's slice don't show
+	// up mid-refresh.
+	cp := make([]config.SubscriptionEntry, len(entries))
+	copy(cp, entries)
+	m.entries = cp
+}
+
 // ParseBytes runs the parse + filter + tag-prefix path on a body that the
 // caller already has in memory — useful for offline replay (selftest), unit
 // tests, and any path that doesn't go through the HTTP fetcher.
