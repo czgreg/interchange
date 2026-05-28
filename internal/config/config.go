@@ -70,6 +70,13 @@ type SingBoxConfig struct {
 	// race against urltest readiness during initial download.
 	RuleSetsDir string `yaml:"rule_sets_dir"`
 
+	// BinaryPath points at the sing-box executable. The control plane shells
+	// out to it for `rule-set decompile` (used by whitelistexpand to turn
+	// geoip-* .srs blobs into a flat IP/CIDR list for /api/whitelist/resolved).
+	// The leap-singbox.service unit has its own ExecStart and isn't affected
+	// by this — it's only used out-of-band by the leap-gateway process.
+	BinaryPath string `yaml:"binary_path"`
+
 	ClashAPI ClashAPIConfig `yaml:"clash_api"`
 
 	// TUN drives the TUN inbound that catches forwarded traffic redirected to
@@ -297,6 +304,9 @@ func (c *SingBoxConfig) ApplyDefaults() {
 	}
 	if c.RuleSetsDir == "" {
 		c.RuleSetsDir = "/etc/leap/singbox/rule-sets"
+	}
+	if c.BinaryPath == "" {
+		c.BinaryPath = "/usr/local/bin/sing-box"
 	}
 	if c.LogLevel == "" {
 		c.LogLevel = "info"

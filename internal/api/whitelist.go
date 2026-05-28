@@ -122,10 +122,11 @@ func (s *Server) handleWhitelistPut(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Async refresh of the v2fly-expanded domain list. Don't block the PUT
-	// response on it — the upstream fetch can take several seconds, and the
-	// caller already has confirmation that the WL itself was applied. Stale
-	// /api/whitelist/domains snapshots are explicitly marked stale=true.
+	// Async refresh of the resolved snapshot (domains + ip_cidrs). Don't
+	// block the PUT response on it — the upstream fetch can take several
+	// seconds, and the caller already has confirmation that the WL itself
+	// was applied. Stale /api/whitelist/resolved snapshots are explicitly
+	// marked stale=true.
 	if s.deps.Expander != nil {
 		go s.refreshExpander()
 	}
@@ -217,11 +218,11 @@ func (s *Server) refreshExpander() {
 	}
 }
 
-// handleWhitelistDomains returns the v2fly-expanded list of domain suffixes
-// derived from the current whitelist. Mirrors what scripts/expand-whitelist.py
-// produces — used by FeiLian-side tooling to keep its 极速模式 list in sync
-// with leap's whitelist.
-func (s *Server) handleWhitelistDomains(w http.ResponseWriter, r *http.Request) {
+// handleWhitelistResolved returns the resolved snapshot — geosites/geoips
+// expanded into flat domain + IP CIDR lists, merged with the literal
+// domain_suffix / ip_cidr entries. Used by FeiLian's "极速模式" which only
+// accepts concrete domain + CIDR values (not rule-set tags).
+func (s *Server) handleWhitelistResolved(w http.ResponseWriter, r *http.Request) {
 	if s.deps.Expander == nil {
 		http.Error(w, "expander not configured", http.StatusServiceUnavailable)
 		return

@@ -45,7 +45,8 @@ func main() {
 	store := configstore.New(*cfgPath)
 	wd := watchdog.New(cfg.SingBox.ClashAPI, cfg.SingBox.URLTest.Watchdog, cfg.SingBox.URLTest.ProbeURL)
 	ni := nodeinfo.New(cfg.Node, Version)
-	expander := whitelistexpand.New("")
+	expander := whitelistexpand.New("").
+		WithRuleSets(cfg.SingBox.RuleSetsDir, cfg.SingBox.BinaryPath)
 	if err := expander.LoadFromDisk(); err != nil {
 		slog.Warn("whitelistexpand: cannot load on-disk cache", "err", err)
 	}
@@ -109,10 +110,12 @@ func main() {
 	go wd.Run(ctx)
 	go ni.Run(ctx)
 
-	// Warm the v2fly-expanded WL domain cache at startup. Doing it async means
-	// /api/whitelist/domains can serve the previous on-disk cache immediately;
-	// the refresh just makes it current. Wait a couple seconds first to avoid
-	// contending with the initial subscription refresh + sing-box reload.
+	// Warm the resolved-snapshot cache (geosite domain expansion + geoip
+	// .srs decompile + literal merge) at startup. Doing it async means
+	// /api/whitelist/resolved can serve the previous on-disk cache
+	// immediately; the refresh just makes it current. Wait a couple seconds
+	// first to avoid contending with the initial subscription refresh +
+	// sing-box reload.
 	go func() {
 		waitFor(ctx, 8*time.Second)
 		warmCtx, cancel := context.WithTimeout(ctx, 60*time.Second)

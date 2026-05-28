@@ -64,7 +64,7 @@ chain input {
 | GET | `/api/proxies/active` | 无 | 节点全景：node + feilian + leap services + 当前机场 + watchdog |
 | GET | `/api/whitelist` | 无 | 白名单（mode + geosites + geoips + domain_suffix + ip_cidr） |
 | PUT | `/api/whitelist` | 写 yaml + 重启 sing-box + 异步重建展开缓存 | 整体替换白名单 |
-| GET | `/api/whitelist/domains` | 无（首次冷启动会同步拉一次） | 把 geosites + domain_suffix 展开成扁平域名列表（飞连"极速模式"用，**不含 IP 规则**） |
+| GET | `/api/whitelist/resolved` | 无（首次冷启动会同步拉一次） | rule-set tag → 扁平 `domains[]` + `ip_cidrs[]`。飞连"极速模式"用 |
 | GET | `/api/rule-sets` | 无 | `geosites` / `geoips`（本地 .srs 文件）+ `active` 子集 |
 | GET | `/api/geosites` | 无 | 兼容别名：仅返回 geosite，等价于 `/api/rule-sets` 的 geosite 部分 |
 | GET | `/api/subscriptions` | 无 | 订阅列表，URL token 自动打码 |
@@ -306,24 +306,32 @@ curl -s -H "$H" 127.0.0.1:18080/api/whitelist \
 
 ---
 
-## GET /api/whitelist/domains
+## GET /api/whitelist/resolved
 
-把当前白名单里**只对域名生效的部分**（geosites + domain_suffix）展开成扁平的域名后缀列表。
-**`geoips` 和 `ip_cidr` 不参与展开**（它们是 IP 规则，飞连"极速模式"只接受域名清单）。
-专门给飞连 SaaS 控制端的"极速模式"用：飞连终端只接受具体域名清单，
-不认 `geosite-google` 这种 tag，所以要把 geosite 递归展开成根域名喂回去。
+把当前白名单里所有规则解析成扁平的具体值——`domains[]` (geosites + domain_suffix
+展开后去重) 和 `ip_cidrs[]` (geoips + ip_cidr 展开后去重)。专门给飞连 SaaS 控制端的
+"极速模式"用：飞连终端只接受具体域名 + IP 段清单，不认 `geosite-google` /
+`geoip-telegram` 这种 tag，所以要把 rule-set 展开喂回去。
 
-数据源：`v2fly/domain-list-community`（这是 `sagernet/sing-geosite` 的上游），
-通过 jsdelivr CDN 拉（`cdn.jsdelivr.net`，CN 内可达），失败回退 `raw.githubusercontent.com`。
+数据源：
+- `domains`：`v2fly/domain-list-community`（这是 `sagernet/sing-geosite` 的上游），
+  通过 jsdelivr CDN 拉（`cdn.jsdelivr.net`，CN 内可达），失败回退 `raw.githubusercontent.com`。
+- `ip_cidrs`：节点上本地 `/etc/leap/singbox/rule-sets/<geoip-tag>.srs`，由
+  `sing-box rule-set decompile` 解出 `rules[].ip_cidr` 合并去重。完全离线，
+  不依赖任何上游网络。
 
 ```json
 {
-  "geosites": ["geosite-google", "geosite-openai", "geosite-github"],
-  "geoips": ["geoip-telegram"],
-  "domain_suffix": ["claude.ai", "anthropic.com"],
-  "ip_cidr": ["149.154.0.0/16", "91.108.0.0/16"],
+  "input": {
+    "geosites": ["geosite-google", "geosite-openai", "geosite-github"],
+    "geoips": ["geoip-telegram"],
+    "domain_suffix": ["claude.ai", "anthropic.com"],
+    "ip_cidr": ["149.154.0.0/16", "91.108.0.0/16"]
+  },
   "domains": ["0emm.com", "1e100.net", "abc.xyz", "...", "youtube.com"],
-  "count": 1754,
+  "ip_cidrs": ["91.108.0.0/16", "149.154.0.0/16"],
+  "domains_count": 1754,
+  "ip_cidrs_count": 2,
   "last_built_at": "2026-05-28T09:12:06.622561162Z",
   "source": "https://cdn.jsdelivr.net/gh/v2fly/domain-list-community@master/data/"
 }
@@ -331,41 +339,42 @@ curl -s -H "$H" 127.0.0.1:18080/api/whitelist \
 
 | 字段 | 说明 |
 |---|---|
-| `geosites` | 这次展开用的 tag 列表（与 `/api/whitelist` 同步） |
-| `geoips` | 当前 yaml 里的 geoip tag（**仅回显**，不参与展开；飞连"极速模式"用不上） |
-| `domain_suffix` | 这次展开用的额外后缀（与 `/api/whitelist` 同步） |
-| `ip_cidr` | 当前 yaml 里的 IP/CIDR（**仅回显**，不参与展开） |
-| `domains` | 展开后的扁平域名列表（小写、字典序、去重）。`include:` 递归跟、`regex:` `keyword:` 跳过、`@attribute` 剥掉、`full:` `domain:` 前缀去掉 |
-| `count` | `len(domains)`，方便客户端判断是否符合预期 |
+| `input.geosites` / `input.geoips` / `input.domain_suffix` / `input.ip_cidr` | 这次展开用的原始 yaml 输入（与 `/api/whitelist` 同步），便于消费方确认快照对应当前配置 |
+| `domains` | 由 geosites + domain_suffix 展开。小写、字典序、去重。`include:` 递归跟、`regex:` `keyword:` 跳过、`@attribute` 剥掉、`full:` `domain:` 前缀去掉 |
+| `ip_cidrs` | 由 geoips（.srs decompile）+ 字面 ip_cidr 合并。字典序、去重 |
+| `domains_count` | `len(domains)` |
+| `ip_cidrs_count` | `len(ip_cidrs)` |
 | `last_built_at` | 本快照的构建时间（UTC，RFC3339） |
-| `source` | 实际成功拉到数据的 base URL |
+| `source` | 实际成功拉到 v2fly 数据的 base URL（geosite 失败时为空） |
 | `stale` | （仅当存在）`true` 表示最近一次刷新失败、当前返回的是上一次的旧快照 |
 | `last_error` | （仅当存在）最近一次失败的错误描述 |
 
 **行为**：
 
-- 启动时从 `/var/lib/leap/whitelist-domains.json` 加载上次的快照（避免首启返回空），
+- 启动时从 `/var/lib/leap/whitelist-resolved.json` 加载上次的快照（避免首启返回空），
   然后在后台跑一次 8s 后启动的 warm refresh 把快照更新到当前 yaml 的内容。
-- `PUT /api/whitelist` 写完后**异步**触发一次 refresh（不阻塞 PUT 响应；
-  上游拉取一般 1–3s，PoC 测下来 jsdelivr 单文件 200–500ms）。
+  老路径 `/var/lib/leap/whitelist-domains.json` 会作为 fallback 读取并升级到新结构。
+- `PUT /api/whitelist` 写完后**异步**触发一次 refresh（不阻塞 PUT 响应）。
 - 如果调用时还从来没有任何快照（首次部署刚起来、warm 还没跑完），会**同步**触发一次
   上限 30s 的 refresh；超时 / 失败 → 503 `expansion not yet available — try again in a few seconds`。
 - 上游周期性失败时**不会**用空覆盖旧快照，会把旧快照标记 `stale=true` 继续返回。
 - expander 进程内串行（同一时刻只跑一次 refresh），多次连发 PUT 不会打爆上游。
+- geoip 展开是本地 op，几十毫秒就完成，不会影响 latency。
 
 ```bash
 # PoC 直接拉（无 token）
-curl -s http://192.168.70.92:18080/api/whitelist/domains | jq .
+curl -s http://192.168.70.92:18080/api/whitelist/resolved | jq .
 
-# 飞连"极速模式"配置：只取 domains 字段，每行一个
-curl -s http://192.168.70.92:18080/api/whitelist/domains | jq -r '.domains[]'
+# 飞连"极速模式"配置：分别取 domains / ip_cidrs，每行一个
+curl -s http://192.168.70.92:18080/api/whitelist/resolved | jq -r '.domains[]'
+curl -s http://192.168.70.92:18080/api/whitelist/resolved | jq -r '.ip_cidrs[]'
 
-# 节点本机
-curl -s http://127.0.0.1:18080/api/whitelist/domains | jq '.count, .last_built_at'
+# 节点本机摘要
+curl -s http://127.0.0.1:18080/api/whitelist/resolved | jq '.domains_count, .ip_cidrs_count, .last_built_at'
 ```
 
-> 同样的展开逻辑也有一个 CLI 版本：`scripts/expand-whitelist.py`（默认就是去打 PoC 的这个端点；
-> 也支持 `--geosites foo,bar --domain-suffix x.com` 离线跑）。两边输出一致。
+> 同样的展开逻辑也有一个 CLI 版本：`scripts/expand-whitelist.py`，但只展开 domain
+> （不做 geoip decompile，因为本地没装 sing-box）。需要 IP CIDR 时直接打 API。
 
 ---
 
@@ -535,8 +544,8 @@ curl -s -H "$H" 127.0.0.1:18080/api/proxies/active | python3 -m json.tool
 # 当前白名单
 curl -s -H "$H" 127.0.0.1:18080/api/whitelist | python3 -m json.tool
 
-# 展开后的扁平域名列表（飞连"极速模式"用）
-curl -s -H "$H" 127.0.0.1:18080/api/whitelist/domains | python3 -m json.tool
+# 展开后的扁平域名 + IP 段列表（飞连"极速模式"用）
+curl -s -H "$H" 127.0.0.1:18080/api/whitelist/resolved | python3 -m json.tool
 
 # 本地 .srs 可选清单（geosites + geoips 一起拉）
 curl -s -H "$H" 127.0.0.1:18080/api/rule-sets | python3 -m json.tool
@@ -562,8 +571,9 @@ curl -s $LEAP/api/whitelist | \
   curl -s -H "Content-Type: application/json" \
        -X PUT $LEAP/api/whitelist -d @-
 
-# 拉展开后的飞连"极速模式"域名清单（一行一个，可直接粘进飞连 SaaS）
-curl -s $LEAP/api/whitelist/domains | jq -r '.domains[]'
+# 拉展开后的飞连"极速模式"清单（domains 一行一个；ip_cidrs 同理）
+curl -s $LEAP/api/whitelist/resolved | jq -r '.domains[]'
+curl -s $LEAP/api/whitelist/resolved | jq -r '.ip_cidrs[]'
 
 # 加一条订阅（自动触发主备分流）
 curl -s -H "Content-Type: application/json" \
