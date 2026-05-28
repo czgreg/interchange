@@ -63,7 +63,8 @@ chain input {
 | GET | `/api/nodes` | 无 | 当前所有出站节点（扁平化） |
 | GET | `/api/proxies/active` | 无 | 节点全景：node + feilian + leap services + 当前机场 + watchdog |
 | GET | `/api/whitelist` | 无 | 白名单（mode + geosites + domain_suffix） |
-| PUT | `/api/whitelist` | 写 yaml + 重启 sing-box | 整体替换白名单 |
+| PUT | `/api/whitelist` | 写 yaml + 重启 sing-box + 异步重建展开缓存 | 整体替换白名单 |
+| GET | `/api/whitelist/domains` | 无（首次冷启动会同步拉一次） | 把 geosites + domain_suffix 展开成扁平域名列表（飞连"极速模式"用） |
 | GET | `/api/geosites` | 无 | `available`（本地 .srs 文件）+ `active`（已启用） |
 | GET | `/api/subscriptions` | 无 | 订阅列表，URL token 自动打码 |
 | POST | `/api/subscriptions` | 写 yaml + 拉订阅 + 重启 sing-box | 新增订阅 |
@@ -290,6 +291,64 @@ curl -s -H "$H" 127.0.0.1:18080/api/whitelist \
 
 ---
 
+## GET /api/whitelist/domains
+
+把当前白名单（geosites + domain_suffix）展开成**扁平的域名后缀列表**。
+专门给飞连 SaaS 控制端的"极速模式"用：飞连终端只接受具体域名清单，
+不认 `geosite-google` 这种 tag，所以要把 geosite 递归展开成根域名喂回去。
+
+数据源：`v2fly/domain-list-community`（这是 `sagernet/sing-geosite` 的上游），
+通过 jsdelivr CDN 拉（`cdn.jsdelivr.net`，CN 内可达），失败回退 `raw.githubusercontent.com`。
+
+```json
+{
+  "geosites": ["geosite-google", "geosite-openai", "geosite-github"],
+  "domain_suffix": ["claude.ai", "anthropic.com"],
+  "domains": ["0emm.com", "1e100.net", "abc.xyz", "...", "youtube.com"],
+  "count": 1754,
+  "last_built_at": "2026-05-28T09:12:06.622561162Z",
+  "source": "https://cdn.jsdelivr.net/gh/v2fly/domain-list-community@master/data/"
+}
+```
+
+| 字段 | 说明 |
+|---|---|
+| `geosites` | 这次展开用的 tag 列表（与 `/api/whitelist` 同步） |
+| `domain_suffix` | 这次展开用的额外后缀（与 `/api/whitelist` 同步） |
+| `domains` | 展开后的扁平域名列表（小写、字典序、去重）。`include:` 递归跟、`regex:` `keyword:` 跳过、`@attribute` 剥掉、`full:` `domain:` 前缀去掉 |
+| `count` | `len(domains)`，方便客户端判断是否符合预期 |
+| `last_built_at` | 本快照的构建时间（UTC，RFC3339） |
+| `source` | 实际成功拉到数据的 base URL |
+| `stale` | （仅当存在）`true` 表示最近一次刷新失败、当前返回的是上一次的旧快照 |
+| `last_error` | （仅当存在）最近一次失败的错误描述 |
+
+**行为**：
+
+- 启动时从 `/var/lib/leap/whitelist-domains.json` 加载上次的快照（避免首启返回空），
+  然后在后台跑一次 8s 后启动的 warm refresh 把快照更新到当前 yaml 的内容。
+- `PUT /api/whitelist` 写完后**异步**触发一次 refresh（不阻塞 PUT 响应；
+  上游拉取一般 1–3s，PoC 测下来 jsdelivr 单文件 200–500ms）。
+- 如果调用时还从来没有任何快照（首次部署刚起来、warm 还没跑完），会**同步**触发一次
+  上限 30s 的 refresh；超时 / 失败 → 503 `expansion not yet available — try again in a few seconds`。
+- 上游周期性失败时**不会**用空覆盖旧快照，会把旧快照标记 `stale=true` 继续返回。
+- expander 进程内串行（同一时刻只跑一次 refresh），多次连发 PUT 不会打爆上游。
+
+```bash
+# PoC 直接拉（无 token）
+curl -s http://192.168.70.92:18080/api/whitelist/domains | jq .
+
+# 飞连"极速模式"配置：只取 domains 字段，每行一个
+curl -s http://192.168.70.92:18080/api/whitelist/domains | jq -r '.domains[]'
+
+# 节点本机
+curl -s http://127.0.0.1:18080/api/whitelist/domains | jq '.count, .last_built_at'
+```
+
+> 同样的展开逻辑也有一个 CLI 版本：`scripts/expand-whitelist.py`（默认就是去打 PoC 的这个端点；
+> 也支持 `--geosites foo,bar --domain-suffix x.com` 离线跑）。两边输出一致。
+
+---
+
 ## GET /api/geosites
 
 ```json
@@ -429,6 +488,9 @@ curl -s -H "$H" 127.0.0.1:18080/api/proxies/active | python3 -m json.tool
 # 当前白名单
 curl -s -H "$H" 127.0.0.1:18080/api/whitelist | python3 -m json.tool
 
+# 展开后的扁平域名列表（飞连"极速模式"用）
+curl -s -H "$H" 127.0.0.1:18080/api/whitelist/domains | python3 -m json.tool
+
 # 本地 .srs 可选清单
 curl -s -H "$H" 127.0.0.1:18080/api/geosites | python3 -m json.tool
 
@@ -452,6 +514,9 @@ curl -s $LEAP/api/whitelist | \
   jq '.domain_suffix += ["new-site.com"]' | \
   curl -s -H "Content-Type: application/json" \
        -X PUT $LEAP/api/whitelist -d @-
+
+# 拉展开后的飞连"极速模式"域名清单（一行一个，可直接粘进飞连 SaaS）
+curl -s $LEAP/api/whitelist/domains | jq -r '.domains[]'
 
 # 加一条订阅（自动触发主备分流）
 curl -s -H "Content-Type: application/json" \

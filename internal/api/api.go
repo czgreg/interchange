@@ -15,6 +15,7 @@ import (
 	"github.com/leap-gateway/leap-gateway/internal/singbox"
 	"github.com/leap-gateway/leap-gateway/internal/subscribe"
 	"github.com/leap-gateway/leap-gateway/internal/watchdog"
+	"github.com/leap-gateway/leap-gateway/internal/whitelistexpand"
 )
 
 type Deps struct {
@@ -25,6 +26,7 @@ type Deps struct {
 	Store      *configstore.Store
 	NodeInfo   *nodeinfo.Reporter
 	Watchdog   *watchdog.Watchdog
+	Expander   *whitelistexpand.Expander
 }
 
 type Server struct {
@@ -44,6 +46,7 @@ func NewServer(deps Deps) *Server {
 
 	mux.HandleFunc("GET /api/whitelist", s.auth(s.handleWhitelistGet))
 	mux.HandleFunc("PUT /api/whitelist", s.auth(s.handleWhitelistPut))
+	mux.HandleFunc("GET /api/whitelist/domains", s.auth(s.handleWhitelistDomains))
 
 	mux.HandleFunc("GET /api/geosites", s.auth(s.handleGeositesGet))
 

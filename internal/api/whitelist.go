@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/leap-gateway/leap-gateway/internal/config"
 )
@@ -118,7 +119,65 @@ func (s *Server) handleWhitelistPut(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Async refresh of the v2fly-expanded domain list. Don't block the PUT
+	// response on it — the upstream fetch can take several seconds, and the
+	// caller already has confirmation that the WL itself was applied. Stale
+	// /api/whitelist/domains snapshots are explicitly marked stale=true.
+	if s.deps.Expander != nil {
+		go s.refreshExpander()
+	}
+
 	s.handleWhitelistGet(w, r)
+}
+
+// refreshExpander runs the v2fly expansion against the current cfg in a
+// fresh context so it survives the request that triggered it.
+func (s *Server) refreshExpander() {
+	if s.deps.Expander == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	wl := s.deps.Cfg.SingBox.Route.Whitelist
+	geosites := make([]string, 0, len(wl.Geosites))
+	for _, g := range wl.Geosites {
+		geosites = append(geosites, g.Name)
+	}
+	if _, err := s.deps.Expander.Refresh(ctx, geosites, wl.DomainSuffix); err != nil {
+		// Already logged inside Refresh; nothing else to do here — old
+		// snapshot is preserved and marked stale.
+		_ = err
+	}
+}
+
+// handleWhitelistDomains returns the v2fly-expanded list of domain suffixes
+// derived from the current whitelist. Mirrors what scripts/expand-whitelist.py
+// produces — used by FeiLian-side tooling to keep its 极速模式 list in sync
+// with leap's whitelist.
+func (s *Server) handleWhitelistDomains(w http.ResponseWriter, r *http.Request) {
+	if s.deps.Expander == nil {
+		http.Error(w, "expander not configured", http.StatusServiceUnavailable)
+		return
+	}
+	snap := s.deps.Expander.Snapshot()
+	if snap == nil {
+		// First-boot: no cache yet. Trigger one inline (best-effort) so the
+		// caller doesn't have to poll. Still bound by request timeout.
+		wl := s.deps.Cfg.SingBox.Route.Whitelist
+		geosites := make([]string, 0, len(wl.Geosites))
+		for _, g := range wl.Geosites {
+			geosites = append(geosites, g.Name)
+		}
+		ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+		defer cancel()
+		built, err := s.deps.Expander.Refresh(ctx, geosites, wl.DomainSuffix)
+		if err != nil || built == nil {
+			http.Error(w, "expansion not yet available — try again in a few seconds", http.StatusServiceUnavailable)
+			return
+		}
+		snap = built
+	}
+	writeJSON(w, http.StatusOK, snap)
 }
 
 // rerenderAndReload re-renders the sing-box config from the cached subscription

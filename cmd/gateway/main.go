@@ -16,6 +16,7 @@ import (
 	"github.com/leap-gateway/leap-gateway/internal/singbox"
 	"github.com/leap-gateway/leap-gateway/internal/subscribe"
 	"github.com/leap-gateway/leap-gateway/internal/watchdog"
+	"github.com/leap-gateway/leap-gateway/internal/whitelistexpand"
 )
 
 // Version is set at build time via -ldflags="-X main.Version=...". Defaults
@@ -44,6 +45,10 @@ func main() {
 	store := configstore.New(*cfgPath)
 	wd := watchdog.New(cfg.SingBox.ClashAPI, cfg.SingBox.URLTest.Watchdog, cfg.SingBox.URLTest.ProbeURL)
 	ni := nodeinfo.New(cfg.Node, Version)
+	expander := whitelistexpand.New("")
+	if err := expander.LoadFromDisk(); err != nil {
+		slog.Warn("whitelistexpand: cannot load on-disk cache", "err", err)
+	}
 
 	if _, err := renderer.Write(nil); err != nil {
 		slog.Error("write bootstrap singbox config", "err", err)
@@ -63,6 +68,7 @@ func main() {
 		Store:      store,
 		NodeInfo:   ni,
 		Watchdog:   wd,
+		Expander:   expander,
 	})
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -102,6 +108,24 @@ func main() {
 
 	go wd.Run(ctx)
 	go ni.Run(ctx)
+
+	// Warm the v2fly-expanded WL domain cache at startup. Doing it async means
+	// /api/whitelist/domains can serve the previous on-disk cache immediately;
+	// the refresh just makes it current. Wait a couple seconds first to avoid
+	// contending with the initial subscription refresh + sing-box reload.
+	go func() {
+		waitFor(ctx, 8*time.Second)
+		warmCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
+		defer cancel()
+		wl := cfg.SingBox.Route.Whitelist
+		geosites := make([]string, 0, len(wl.Geosites))
+		for _, g := range wl.Geosites {
+			geosites = append(geosites, g.Name)
+		}
+		if _, err := expander.Refresh(warmCtx, geosites, wl.DomainSuffix); err != nil {
+			slog.Warn("whitelistexpand: startup warm failed", "err", err)
+		}
+	}()
 
 	<-ctx.Done()
 	slog.Info("shutting down")
