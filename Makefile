@@ -18,9 +18,12 @@
 NODE        ?= dianwei@192.168.70.92
 NODE_HOST   := $(word 2,$(subst @, ,$(NODE)))
 LEAP_API    ?= http://192.168.70.92:18080
+GATEWAY_YAML?= ./gateway.yaml
 GOOS        ?= linux
 GOARCH      ?= amd64
 LDFLAGS     := -s -w -X main.Version=$(shell git rev-parse --short HEAD 2>/dev/null || echo dev)
+
+export GATEWAY_YAML
 
 SSH_OPTS    := -o StrictHostKeyChecking=no -o ConnectTimeout=8
 SSH         := ssh -o BatchMode=yes $(SSH_OPTS) $(NODE)
@@ -57,7 +60,7 @@ vet:  ## go vet
 
 .PHONY: stage
 stage:  ## 打全量部署 tarball (build/leap-stage.tgz, ~14M gzipped)
-	GATEWAY_YAML=$${GATEWAY_YAML:-./gateway.yaml} ./scripts/stage.sh
+	./scripts/stage.sh
 
 # ---------------------------------------------------------------------------
 # Deploy
@@ -93,8 +96,8 @@ deploy-full: stage  ## 全量重装：改了 install.sh / *.service / nft 模板
 
 .PHONY: deploy-yaml
 deploy-yaml:  ## 仅替换 /etc/leap/gateway.yaml 并重启 leap-gateway（不动二进制）
-	@test -f gateway.yaml || (echo "no ./gateway.yaml" && exit 1)
-	@$(SCP) gateway.yaml $(NODE):/tmp/gateway.yaml.new
+	@test -f $(GATEWAY_YAML) || (echo "no $(GATEWAY_YAML)" && exit 1)
+	@$(SCP) $(GATEWAY_YAML) $(NODE):/tmp/gateway.yaml.new
 	@$(SSH) 'sudo install -m0644 -o root -g root /tmp/gateway.yaml.new /etc/leap/gateway.yaml && \
 	  sudo systemctl restart leap-gateway && rm -f /tmp/gateway.yaml.new && \
 	  sleep 1 && sudo journalctl -u leap-gateway -n 5 --no-pager'

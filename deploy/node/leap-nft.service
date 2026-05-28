@@ -7,14 +7,17 @@ Wants=leap-singbox.service
 # utun-leap (along with our `default dev utun-leap` route in table 100), so
 # we must re-run iproute.sh up after sing-box recreates the interface.
 PartOf=leap-singbox.service
+# Don't let systemd give up on us during a sing-box crash-loop.
+StartLimitIntervalSec=0
 
 [Service]
 Type=oneshot
 RemainAfterExit=yes
 
-# Wait up to 30s for sing-box to create the utun-leap interface. ip route add
-# below requires this device to exist.
-ExecStartPre=/bin/bash -c 'for i in $(seq 1 30); do ip link show utun-leap >/dev/null 2>&1 && exit 0; sleep 1; done; echo "utun-leap not present after 30s" >&2; exit 1'
+# Wait up to 60s for sing-box to create the utun-leap interface. Longer than
+# the previous 30s because a sing-box config error sends it into a 5-10s
+# restart loop, and we should outlast a transient one.
+ExecStartPre=/bin/bash -c 'for i in $(seq 1 60); do ip link show utun-leap >/dev/null 2>&1 && exit 0; sleep 1; done; echo "utun-leap not present after 60s" >&2; exit 1'
 
 ExecStart=/usr/sbin/nft -f /etc/leap/nft.conf
 ExecStart=/etc/leap/iproute.sh up
@@ -23,6 +26,12 @@ ExecStart=/etc/leap/iproute.sh up
 # prefix tells systemd to ignore non-zero exit (in case nothing's installed).
 ExecStop=-/usr/sbin/nft delete table inet leap
 ExecStop=-/etc/leap/iproute.sh down
+
+# Self-heal when utun-leap was unavailable on first start (sing-box was
+# crash-looping). Without this, oneshot units stay in failed state forever
+# even after sing-box recovers.
+Restart=on-failure
+RestartSec=15s
 
 [Install]
 WantedBy=multi-user.target
