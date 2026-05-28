@@ -1,0 +1,98 @@
+# scripts/rule-set-catalog.txt — rule-set tags to bundle into the deploy tarball.
+#
+# stage.sh fetches every line below + every URL in gateway.yaml, downloads the
+# corresponding .srs from the appropriate sagernet repo (decided by prefix),
+# and ships them under /etc/leap/singbox/rule-sets/. The management API
+# surfaces these as `available` in GET /api/rule-sets; operators pick a subset
+# to enable via PUT /api/whitelist.
+#
+# Format:
+#   - Lines starting with # and blank lines are ignored.
+#   - One tag per line, no .srs suffix.
+#   - Prefix decides upstream:
+#       geosite-*  →  sing-geosite repo (domain match)
+#       geoip-*    →  sing-geoip repo   (IP CIDR match)
+#
+# When to add a geoip-* entry (the field is dangerous if abused):
+#   ✓ App hardcodes IPs and skips DNS — Telegram MTProto, Signal, ProtonVPN
+#     bootstrap, certain game servers, etc.
+#   ✗ Mainstream HTTPS apps that resolve via DNS — geosite-* already catches
+#     them via fakeip + sniff. Adding geoip-cloudflare / geoip-google routes
+#     half the internet through the airport and defeats whitelist mode.
+#
+# Add or remove freely — re-run scripts/stage.sh to refresh the bundle.
+# Re-deploy (install.sh / make deploy-full) to push the new catalog to nodes.
+
+# ---------------------------------------------------------------------------
+# Geosite — domain-based rule-sets (sagernet/sing-geosite)
+# ---------------------------------------------------------------------------
+
+# Tech / dev tools
+geosite-google
+geosite-youtube
+geosite-openai
+geosite-anthropic
+geosite-github
+geosite-microsoft
+geosite-apple
+geosite-amazon
+geosite-cloudflare
+geosite-akamai
+geosite-jetbrains
+geosite-docker
+geosite-npmjs
+geosite-stackexchange
+
+# Social / messaging
+geosite-twitter
+geosite-facebook
+geosite-instagram
+geosite-whatsapp
+geosite-telegram
+geosite-discord
+geosite-slack
+geosite-zoom
+geosite-signal
+geosite-line
+
+# Streaming / media
+geosite-netflix
+geosite-spotify
+geosite-hbo
+geosite-disney
+geosite-hulu
+geosite-twitch
+geosite-vimeo
+geosite-soundcloud
+geosite-pixiv
+geosite-tiktok
+
+# Reference / news
+geosite-reddit
+geosite-wikimedia
+geosite-quora
+geosite-medium
+geosite-bbc
+geosite-cnn
+geosite-nytimes
+
+# Productivity / SaaS
+geosite-linkedin
+geosite-paypal
+geosite-stripe
+geosite-coinbase
+geosite-notion
+geosite-figma
+geosite-dropbox
+geosite-onedrive
+geosite-icloud
+
+# ---------------------------------------------------------------------------
+# Geoip — IP-based rule-sets (sagernet/sing-geoip)
+#
+# Only for apps that bypass DNS by hardcoding IPs. Don't add geoip-google /
+# geoip-cloudflare / geoip-fastly here — those overlap with too much of the
+# wider internet and would silently widen the whitelist.
+# ---------------------------------------------------------------------------
+
+geoip-telegram   # Telegram desktop/mobile MTProto (149.154/16, 91.108/16)

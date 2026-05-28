@@ -151,8 +151,11 @@ func (r *Renderer) buildDNS() map[string]any {
 	final := "remote"
 	if r.cfg.Route.Mode == "whitelist" {
 		// Only WL hits get fakeip; everything else falls through to local.
-		if tags := whitelistGeositeTags(r.cfg.Route.Whitelist); len(tags) > 0 {
-			rules = append(rules, map[string]any{"rule_set": tags, "server": "fakeip"})
+		// Note: geoip / ip_cidr are NOT used here — DNS rules only operate on
+		// domains. IP-side whitelist entries take effect at the route layer
+		// when an app skips DNS entirely (e.g. Telegram MTProto).
+		if len(r.cfg.Route.Whitelist.Geosites) > 0 {
+			rules = append(rules, map[string]any{"rule_set": []string(r.cfg.Route.Whitelist.Geosites), "server": "fakeip"})
 		}
 		if sx := r.cfg.Route.Whitelist.DomainSuffix; len(sx) > 0 {
 			rules = append(rules, map[string]any{"domain_suffix": sx, "server": "fakeip"})
@@ -424,19 +427,34 @@ func (r *Renderer) buildRoute() map[string]any {
 
 	final := "out"
 	if r.cfg.Route.Mode == "whitelist" {
-		for _, g := range r.cfg.Route.Whitelist.Geosites {
-			ruleSet = append(ruleSet, ruleSetLocal(g.Name, dir))
+		wl := r.cfg.Route.Whitelist
+		// Domain rule-sets first (geosite-*) — sing-box loads each as a separate
+		// .srs file via type=local, no upstream fetch.
+		for _, name := range wl.Geosites {
+			ruleSet = append(ruleSet, ruleSetLocal(name, dir))
 		}
-		if tags := whitelistGeositeTags(r.cfg.Route.Whitelist); len(tags) > 0 {
-			rules = append(rules, map[string]any{"rule_set": tags, "outbound": "out"})
+		// IP rule-sets (geoip-*) — same shape on disk, different upstream repo.
+		// Critical for apps that hardcode DC IPs and skip DNS entirely
+		// (Telegram MTProto, Signal, ProtonVPN bootstrap).
+		for _, name := range wl.Geoips {
+			ruleSet = append(ruleSet, ruleSetLocal(name, dir))
 		}
-		if sx := r.cfg.Route.Whitelist.DomainSuffix; len(sx) > 0 {
-			rules = append(rules, map[string]any{"domain_suffix": sx, "outbound": "out"})
+		if len(wl.Geosites) > 0 {
+			rules = append(rules, map[string]any{"rule_set": []string(wl.Geosites), "outbound": "out"})
 		}
-		// Footgun guard: a whitelist mode with neither geosites nor suffixes
-		// would route everything to direct, leaving no reason to run sing-box
-		// at all. Warn but proceed — the user might be testing or in transition.
-		if len(r.cfg.Route.Whitelist.Geosites) == 0 && len(r.cfg.Route.Whitelist.DomainSuffix) == 0 {
+		if len(wl.DomainSuffix) > 0 {
+			rules = append(rules, map[string]any{"domain_suffix": wl.DomainSuffix, "outbound": "out"})
+		}
+		if len(wl.Geoips) > 0 {
+			rules = append(rules, map[string]any{"rule_set": []string(wl.Geoips), "outbound": "out"})
+		}
+		if len(wl.IPCIDR) > 0 {
+			rules = append(rules, map[string]any{"ip_cidr": wl.IPCIDR, "outbound": "out"})
+		}
+		// Footgun guard: a whitelist with nothing in it would route everything
+		// to direct, defeating the point of running sing-box. Warn but proceed
+		// — operator may be in transition.
+		if len(wl.Geosites) == 0 && len(wl.DomainSuffix) == 0 && len(wl.Geoips) == 0 && len(wl.IPCIDR) == 0 {
 			slog.Warn("route.mode=whitelist but whitelist is empty; all overseas traffic will go direct")
 		}
 		final = "direct"
@@ -457,16 +475,6 @@ func ruleSetLocal(tag, dir string) map[string]any {
 		"format": "binary",
 		"path":   dir + "/" + tag + ".srs",
 	}
-}
-
-func whitelistGeositeTags(wl config.WhitelistConfig) []string {
-	tags := make([]string, 0, len(wl.Geosites))
-	for _, g := range wl.Geosites {
-		if g.Name != "" {
-			tags = append(tags, g.Name)
-		}
-	}
-	return tags
 }
 
 func (r *Renderer) buildExperimental() map[string]any {

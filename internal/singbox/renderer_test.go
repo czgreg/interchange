@@ -311,11 +311,10 @@ func TestRendererWhitelistMode(t *testing.T) {
 	r, _ := newTestRenderer(t, true)
 	r.cfg.Route.Mode = "whitelist"
 	r.cfg.Route.Whitelist = config.WhitelistConfig{
-		Geosites: []config.GeositeRef{
-			{Name: "geosite-google", URL: "https://example.invalid/google.srs"},
-			{Name: "geosite-openai", URL: "https://example.invalid/openai.srs"},
-		},
+		Geosites:     config.StringList{"geosite-google", "geosite-openai"},
+		Geoips:       config.StringList{"geoip-telegram"},
 		DomainSuffix: []string{"claude.ai", "anthropic.com"},
+		IPCIDR:       []string{"149.154.0.0/16", "91.108.0.0/16"},
 	}
 
 	data, err := r.Write([]subscribe.Outbound{
@@ -347,6 +346,10 @@ func TestRendererWhitelistMode(t *testing.T) {
 		if _, ok := m["query_type"]; ok {
 			foundQueryTypeFakeIP = true
 		}
+		// Geoip / ip_cidr must NOT appear in DNS rules — DNS only matches domains.
+		if _, ok := m["ip_cidr"]; ok {
+			t.Errorf("dns: ip_cidr leaked into DNS rules")
+		}
 	}
 	if !foundFakeIPGeosite {
 		t.Errorf("dns: missing fakeip rule for whitelist geosites")
@@ -363,32 +366,43 @@ func TestRendererWhitelistMode(t *testing.T) {
 		t.Errorf("route.final = %v, want direct in whitelist mode", route["final"])
 	}
 	ruleSet, _ := route["rule_set"].([]any)
-	if len(ruleSet) != 4 {
-		t.Errorf("want 4 rule_set entries (cn + ip + 2 wl geosites), got %d", len(ruleSet))
+	// 2 cn (geosite + geoip) + 2 wl geosites + 1 wl geoip = 5
+	if len(ruleSet) != 5 {
+		t.Errorf("want 5 rule_set entries (cn + 2 wl geosites + 1 wl geoip), got %d", len(ruleSet))
 	}
 	gotTags := make(map[string]bool)
 	for _, rs := range ruleSet {
 		m, _ := rs.(map[string]any)
 		gotTags[m["tag"].(string)] = true
 	}
-	for _, want := range []string{"geosite-cn", "geoip-cn", "geosite-google", "geosite-openai"} {
+	for _, want := range []string{"geosite-cn", "geoip-cn", "geosite-google", "geosite-openai", "geoip-telegram"} {
 		if !gotTags[want] {
 			t.Errorf("rule_set missing tag=%q", want)
 		}
 	}
 
 	routeRules, _ := route["rules"].([]any)
-	foundRouteGeositeOut, foundRouteSuffixOut := false, false
+	foundRouteGeositeOut, foundRouteSuffixOut, foundRouteGeoipOut, foundRouteIPCIDROut := false, false, false, false
 	for _, rule := range routeRules {
 		m, _ := rule.(map[string]any)
 		if m["outbound"] != "out" {
 			continue
 		}
-		if rs, ok := m["rule_set"].([]any); ok && len(rs) == 2 {
-			foundRouteGeositeOut = true
+		if rs, ok := m["rule_set"].([]any); ok {
+			switch len(rs) {
+			case 2:
+				foundRouteGeositeOut = true
+			case 1:
+				if rs[0] == "geoip-telegram" {
+					foundRouteGeoipOut = true
+				}
+			}
 		}
 		if sx, ok := m["domain_suffix"].([]any); ok && len(sx) == 2 {
 			foundRouteSuffixOut = true
+		}
+		if cidrs, ok := m["ip_cidr"].([]any); ok && len(cidrs) == 2 {
+			foundRouteIPCIDROut = true
 		}
 	}
 	if !foundRouteGeositeOut {
@@ -396,5 +410,11 @@ func TestRendererWhitelistMode(t *testing.T) {
 	}
 	if !foundRouteSuffixOut {
 		t.Errorf("route: missing domain_suffix→out rule for whitelist suffixes")
+	}
+	if !foundRouteGeoipOut {
+		t.Errorf("route: missing rule_set→out rule for whitelist geoips")
+	}
+	if !foundRouteIPCIDROut {
+		t.Errorf("route: missing ip_cidr→out rule for whitelist CIDRs")
 	}
 }

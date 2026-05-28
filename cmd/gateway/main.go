@@ -118,11 +118,7 @@ func main() {
 		warmCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
 		defer cancel()
 		wl := cfg.SingBox.Route.Whitelist
-		geosites := make([]string, 0, len(wl.Geosites))
-		for _, g := range wl.Geosites {
-			geosites = append(geosites, g.Name)
-		}
-		if _, err := expander.Refresh(warmCtx, geosites, wl.DomainSuffix); err != nil {
+		if _, err := expander.Refresh(warmCtx, wl.Geosites, wl.Geoips, wl.DomainSuffix, wl.IPCIDR); err != nil {
 			slog.Warn("whitelistexpand: startup warm failed", "err", err)
 		}
 	}()

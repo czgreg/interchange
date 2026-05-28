@@ -58,6 +58,10 @@ test:  ## go test ./...
 vet:  ## go vet
 	go vet ./...
 
+.PHONY: verify-render
+verify-render:  ## 用 sing-box 1.10.7 校验渲染产物 schema (sing-box check)，预防 grpc-bug 类回归
+	@./scripts/verify-render.sh
+
 .PHONY: stage
 stage:  ## 打全量部署 tarball (build/leap-stage.tgz, ~14M gzipped)
 	./scripts/stage.sh

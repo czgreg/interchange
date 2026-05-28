@@ -62,10 +62,11 @@ chain input {
 | GET | `/api/status` | 无 | 订阅 / 节点数 / sing-box 健康 |
 | GET | `/api/nodes` | 无 | 当前所有出站节点（扁平化） |
 | GET | `/api/proxies/active` | 无 | 节点全景：node + feilian + leap services + 当前机场 + watchdog |
-| GET | `/api/whitelist` | 无 | 白名单（mode + geosites + domain_suffix） |
+| GET | `/api/whitelist` | 无 | 白名单（mode + geosites + geoips + domain_suffix + ip_cidr） |
 | PUT | `/api/whitelist` | 写 yaml + 重启 sing-box + 异步重建展开缓存 | 整体替换白名单 |
-| GET | `/api/whitelist/domains` | 无（首次冷启动会同步拉一次） | 把 geosites + domain_suffix 展开成扁平域名列表（飞连"极速模式"用） |
-| GET | `/api/geosites` | 无 | `available`（本地 .srs 文件）+ `active`（已启用） |
+| GET | `/api/whitelist/domains` | 无（首次冷启动会同步拉一次） | 把 geosites + domain_suffix 展开成扁平域名列表（飞连"极速模式"用，**不含 IP 规则**） |
+| GET | `/api/rule-sets` | 无 | `geosites` / `geoips`（本地 .srs 文件）+ `active` 子集 |
+| GET | `/api/geosites` | 无 | 兼容别名：仅返回 geosite，等价于 `/api/rule-sets` 的 geosite 部分 |
 | GET | `/api/subscriptions` | 无 | 订阅列表，URL token 自动打码 |
 | POST | `/api/subscriptions` | 写 yaml + 拉订阅 + 重启 sing-box | 新增订阅 |
 | PUT | `/api/subscriptions/{name}` | 写 yaml + 拉订阅 + 重启 sing-box | 改 URL |
@@ -246,15 +247,19 @@ curl -s http://192.168.70.92:18080/healthz
 {
   "mode": "whitelist",
   "geosites": ["geosite-google", "geosite-youtube", "geosite-openai"],
-  "domain_suffix": ["claude.ai", "anthropic.com"]
+  "geoips": ["geoip-telegram"],
+  "domain_suffix": ["claude.ai", "anthropic.com"],
+  "ip_cidr": ["149.154.0.0/16", "91.108.0.0/16"]
 }
 ```
 
 | 字段 | 说明 |
 |---|---|
 | `mode` | `overseas` 或 `whitelist`。`overseas` = 命中 cn 的直连，其余走机场；`whitelist` = 仅命中白名单走机场，其它直连 |
-| `geosites` | 启用的 geosite tag 数组（必须是本地 .srs 已就位的，从 `/api/geosites` 取） |
+| `geosites` | 启用的 geosite tag 数组（必须是本地 .srs 已就位的，从 `/api/rule-sets` 取） |
+| `geoips` | 启用的 geoip tag 数组（同上）。**只对硬编码 IP / 不查 DNS 的应用有意义**（Telegram MTProto 是典型）。**禁止**加 `geoip-google` / `geoip-cloudflare` 这类大段——会把半个互联网扫进白名单 |
 | `domain_suffix` | 额外的域名后缀列表（小写 + bare domain） |
+| `ip_cidr` | 额外的 IP/CIDR 列表（IPv4/IPv6 都接受；裸 IP 自动按 `/32` 或 `/128` 处理）。临时兜底，主用法是上游 `geoip-*.srs` 拉不到时仍能命中 |
 
 ## PUT /api/whitelist
 
@@ -266,15 +271,19 @@ curl -s http://192.168.70.92:18080/healthz
 {
   "mode": "whitelist",
   "geosites": ["geosite-google", "geosite-anthropic"],
-  "domain_suffix": ["claude.ai", "openai.com"]
+  "geoips": ["geoip-telegram"],
+  "domain_suffix": ["claude.ai", "openai.com"],
+  "ip_cidr": ["149.154.0.0/16", "91.108.0.0/16"]
 }
 ```
 
 校验：
 
 - `mode` 缺省 = 不动当前；显式只接受 `overseas` / `whitelist`。
-- `geosites` 必须 ⊆ `/api/geosites` 的 `available`，否则 400。
+- `geosites` 必须 ⊆ `/api/rule-sets` 的 `geosites`，否则 400。每条要 `geosite-` 前缀。
+- `geoips` 必须 ⊆ `/api/rule-sets` 的 `geoips`，否则 400。每条要 `geoip-` 前缀。
 - `domain_suffix` 每条必须是裸域名（含 `.`、不含 `://` `/` `空白`、首尾无 `.`）。
+- `ip_cidr` 每条必须是合法 CIDR 或裸 IP（裸 IP 落盘前归一化成 `/32` 或 `/128`）。
 - 重复项自动去重，空字符串忽略。
 
 成功后立即 `systemctl restart leap-singbox`（5–10s 海外业务中断），返回 200 + 新状态（同 GET 结构）。
@@ -287,13 +296,20 @@ curl -s -H "$H" 127.0.0.1:18080/api/whitelist \
   | jq '.domain_suffix += ["new-site.com"]' \
   | curl -s -H "$H" -H "Content-Type: application/json" -X PUT \
       127.0.0.1:18080/api/whitelist -d @-
+
+# 加一条 ip_cidr (例如某 App 自己回报的 IP 段)
+curl -s -H "$H" 127.0.0.1:18080/api/whitelist \
+  | jq '.ip_cidr += ["203.0.113.0/24"]' \
+  | curl -s -H "$H" -H "Content-Type: application/json" -X PUT \
+      127.0.0.1:18080/api/whitelist -d @-
 ```
 
 ---
 
 ## GET /api/whitelist/domains
 
-把当前白名单（geosites + domain_suffix）展开成**扁平的域名后缀列表**。
+把当前白名单里**只对域名生效的部分**（geosites + domain_suffix）展开成扁平的域名后缀列表。
+**`geoips` 和 `ip_cidr` 不参与展开**（它们是 IP 规则，飞连"极速模式"只接受域名清单）。
 专门给飞连 SaaS 控制端的"极速模式"用：飞连终端只接受具体域名清单，
 不认 `geosite-google` 这种 tag，所以要把 geosite 递归展开成根域名喂回去。
 
@@ -303,7 +319,9 @@ curl -s -H "$H" 127.0.0.1:18080/api/whitelist \
 ```json
 {
   "geosites": ["geosite-google", "geosite-openai", "geosite-github"],
+  "geoips": ["geoip-telegram"],
   "domain_suffix": ["claude.ai", "anthropic.com"],
+  "ip_cidr": ["149.154.0.0/16", "91.108.0.0/16"],
   "domains": ["0emm.com", "1e100.net", "abc.xyz", "...", "youtube.com"],
   "count": 1754,
   "last_built_at": "2026-05-28T09:12:06.622561162Z",
@@ -314,7 +332,9 @@ curl -s -H "$H" 127.0.0.1:18080/api/whitelist \
 | 字段 | 说明 |
 |---|---|
 | `geosites` | 这次展开用的 tag 列表（与 `/api/whitelist` 同步） |
+| `geoips` | 当前 yaml 里的 geoip tag（**仅回显**，不参与展开；飞连"极速模式"用不上） |
 | `domain_suffix` | 这次展开用的额外后缀（与 `/api/whitelist` 同步） |
+| `ip_cidr` | 当前 yaml 里的 IP/CIDR（**仅回显**，不参与展开） |
 | `domains` | 展开后的扁平域名列表（小写、字典序、去重）。`include:` 递归跟、`regex:` `keyword:` 跳过、`@attribute` 剥掉、`full:` `domain:` 前缀去掉 |
 | `count` | `len(domains)`，方便客户端判断是否符合预期 |
 | `last_built_at` | 本快照的构建时间（UTC，RFC3339） |
@@ -349,21 +369,40 @@ curl -s http://127.0.0.1:18080/api/whitelist/domains | jq '.count, .last_built_a
 
 ---
 
-## GET /api/geosites
+## GET /api/rule-sets
 
 ```json
 {
-  "available": ["geosite-anthropic", "geosite-cn", "geosite-discord", ...],
-  "active":    ["geosite-google", "geosite-openai"]
+  "geosites": {
+    "available": ["geosite-anthropic", "geosite-discord", "geosite-google", "..."],
+    "active":    ["geosite-google", "geosite-openai"]
+  },
+  "geoips": {
+    "available": ["geoip-telegram"],
+    "active":    ["geoip-telegram"]
+  }
 }
 ```
 
 | 字段 | 说明 |
 |---|---|
-| `available` | 节点上 `/etc/leap/singbox/rule-sets/*.srs` 实际存在的 tag（去掉 `.srs` 后缀，**排除 `geosite-cn` / `geoip-cn`**——它们由路由内置使用） |
-| `active` | 当前 yaml 里 `whitelist.geosites` 启用的子集 |
+| `geosites.available` | 节点上 `/etc/leap/singbox/rule-sets/geosite-*.srs` 实际存在的 tag（去掉 `.srs` 后缀，**排除 `geosite-cn`**——它由路由内置使用） |
+| `geosites.active` | 当前 yaml `whitelist.geosites` 启用的子集 |
+| `geoips.available` | 节点上 `geoip-*.srs` 存在的 tag（**排除 `geoip-cn`**） |
+| `geoips.active` | 当前 yaml `whitelist.geoips` 启用的子集 |
 
-PUT `/api/whitelist` 时 geosites 必须从 `available` 挑。
+PUT `/api/whitelist` 时 geosites/geoips 必须从对应的 `available` 挑。
+
+## GET /api/geosites（兼容别名）
+
+```json
+{
+  "available": ["geosite-anthropic", "geosite-discord", "geosite-google", "..."],
+  "active":    ["geosite-google", "geosite-openai"]
+}
+```
+
+只返回 geosite 部分，结构与旧版一致。新代码请用 `/api/rule-sets`。
 
 ---
 
@@ -491,8 +530,8 @@ curl -s -H "$H" 127.0.0.1:18080/api/whitelist | python3 -m json.tool
 # 展开后的扁平域名列表（飞连"极速模式"用）
 curl -s -H "$H" 127.0.0.1:18080/api/whitelist/domains | python3 -m json.tool
 
-# 本地 .srs 可选清单
-curl -s -H "$H" 127.0.0.1:18080/api/geosites | python3 -m json.tool
+# 本地 .srs 可选清单（geosites + geoips 一起拉）
+curl -s -H "$H" 127.0.0.1:18080/api/rule-sets | python3 -m json.tool
 
 # 立即刷新订阅
 curl -s -X POST -H "$H" 127.0.0.1:18080/api/subscribe/refresh

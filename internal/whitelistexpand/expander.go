@@ -47,7 +47,9 @@ var defaultSources = []string{
 // Snapshot is what GET /api/whitelist/domains returns.
 type Snapshot struct {
 	Geosites     []string  `json:"geosites"`
+	Geoips       []string  `json:"geoips"`
 	DomainSuffix []string  `json:"domain_suffix"`
+	IPCIDR       []string  `json:"ip_cidr"`
 	Domains      []string  `json:"domains"`
 	Count        int       `json:"count"`
 	LastBuiltAt  time.Time `json:"last_built_at"`
@@ -112,14 +114,22 @@ func (e *Expander) Snapshot() *Snapshot {
 	cp := *e.snap
 	cp.Domains = append([]string(nil), e.snap.Domains...)
 	cp.Geosites = append([]string(nil), e.snap.Geosites...)
+	cp.Geoips = append([]string(nil), e.snap.Geoips...)
 	cp.DomainSuffix = append([]string(nil), e.snap.DomainSuffix...)
+	cp.IPCIDR = append([]string(nil), e.snap.IPCIDR...)
 	return &cp
 }
 
 // Refresh runs the expansion against the supplied WL inputs and atomically
 // replaces the snapshot. On failure it preserves the previous snapshot but
 // marks it stale + records the error.
-func (e *Expander) Refresh(ctx context.Context, geosites []string, suffix []string) (*Snapshot, error) {
+//
+// Geoips and ipCIDR are NOT expanded — they're passed through into Snapshot
+// so callers see the full whitelist picture, but only domain-side entries
+// (geosites + suffix) actually get walked against v2fly. FeiLian's "极速模式"
+// is domain-only anyway, so the .Domains field still answers what FeiLian
+// needs.
+func (e *Expander) Refresh(ctx context.Context, geosites, geoips []string, suffix, ipCIDR []string) (*Snapshot, error) {
 	e.buildMu.Lock()
 	defer e.buildMu.Unlock()
 
@@ -162,7 +172,9 @@ func (e *Expander) Refresh(ctx context.Context, geosites []string, suffix []stri
 
 	snap := &Snapshot{
 		Geosites:     append([]string(nil), geosites...),
+		Geoips:       append([]string(nil), geoips...),
 		DomainSuffix: append([]string(nil), suffix...),
+		IPCIDR:       append([]string(nil), ipCIDR...),
 		Domains:      out,
 		Count:        len(out),
 		LastBuiltAt:  time.Now().UTC(),

@@ -135,23 +135,60 @@ type RouteConfig struct {
 }
 
 // WhitelistConfig enumerates what's allowed through the airport in whitelist
-// mode. The two lists are unioned at render time.
+// mode. The four lists are unioned at render time:
+//
+//   - Domain-side: Geosites (rule_set refs) ∪ DomainSuffix (literal suffixes).
+//     Hits via DNS / SNI sniff → outbound "out".
+//   - IP-side: Geoips (rule_set refs) ∪ IPCIDR (literal CIDRs/IPs).
+//     Hits via destination IP match → outbound "out". Critical for apps that
+//     bypass DNS by hardcoding IPs (Telegram MTProto, Signal, ProtonVPN
+//     bootstrap). Without these, the IP-direct connection falls through to
+//     route.final=direct and gets GFW'd.
+//
+// Tag conventions:
+//   - Geosites entries must start with "geosite-" (matches sing-geosite repo).
+//   - Geoips entries must start with "geoip-" (matches sing-geoip repo).
+//   - DomainSuffix: bare domains, no scheme/path (e.g. "claude.ai").
+//   - IPCIDR: CIDR or bare IP. Bare IP normalized to /32 (v4) or /128 (v6).
 type WhitelistConfig struct {
-	// Geosites references named sing-box rule_sets — each entry becomes both a
-	// route.rule_set entry (downloaded via the proxy) and a route rule that
-	// hands its hits to outbound "out". Tag must start with "geosite-" by
-	// convention.
-	Geosites []GeositeRef `yaml:"geosites"`
-
-	// DomainSuffix is an ad-hoc list of domain suffixes (e.g. "claude.ai",
-	// "anthropic.com") that don't yet have a geosite entry or that you want to
-	// pin without waiting for the next rule_set update_interval.
-	DomainSuffix []string `yaml:"domain_suffix"`
+	Geosites     StringList `yaml:"geosites"`
+	Geoips       StringList `yaml:"geoips"`
+	DomainSuffix []string   `yaml:"domain_suffix"`
+	IPCIDR       []string   `yaml:"ip_cidr"`
 }
 
-type GeositeRef struct {
-	Name string `yaml:"name"`
-	URL  string `yaml:"url"`
+// StringList is yaml-decoded as []string but tolerates the legacy "list of
+// {name, url}" mapping form so old gateway.yaml files keep loading. The URL
+// field was never read at render time (rule-sets come off disk via stage.sh)
+// and is dropped on first re-write by the configstore.
+type StringList []string
+
+func (s *StringList) UnmarshalYAML(node *yaml.Node) error {
+	if node.Kind != yaml.SequenceNode {
+		return fmt.Errorf("expected list, got kind %d", node.Kind)
+	}
+	out := make([]string, 0, len(node.Content))
+	for _, item := range node.Content {
+		switch item.Kind {
+		case yaml.ScalarNode:
+			out = append(out, item.Value)
+		case yaml.MappingNode:
+			// Legacy {name: X, url: Y} — keep just the name.
+			var m struct {
+				Name string `yaml:"name"`
+			}
+			if err := item.Decode(&m); err != nil {
+				return err
+			}
+			if m.Name != "" {
+				out = append(out, m.Name)
+			}
+		default:
+			return fmt.Errorf("unsupported yaml kind %d in StringList", item.Kind)
+		}
+	}
+	*s = out
+	return nil
 }
 
 // URLTestConfig drives both sing-box's native urltest outbound and the

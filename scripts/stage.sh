@@ -83,29 +83,61 @@ log "deploy/node/* files staged"
 # 5. Rule-set .srs blobs. Fetched into the tarball so sing-box can load them as
 #    type=local at startup — sidesteps the GFW path AND the startup race where
 #    14 parallel remote downloads compete with urltest's first measurement.
-#    Sources merged from gateway.yaml (URLs ending in .srs) AND
-#    scripts/geosite-catalog.txt (operator catalog the API exposes as the
-#    "available" set). Per-URL cache in .cache/rule-sets/. Delete that dir to
-#    force re-fetch.
+#    Sources merged from gateway.yaml (URLs ending in .srs, kept for legacy
+#    yaml that still has explicit url: fields) AND
+#    scripts/rule-set-catalog.txt — one tag per line, prefix decides upstream:
+#      geosite-*  → sing-geosite repo
+#      geoip-*    → sing-geoip repo
+#    Per-URL cache in .cache/rule-sets/. Delete that dir to force re-fetch.
 RULESETS_CACHE="$SINGBOX_CACHE/rule-sets"
 mkdir -p "$RULESETS_CACHE" "$STAGE_DIR/rule-sets"
 
-# Tags requested by gateway.yaml (full URLs).
+# Tags requested by gateway.yaml (full URLs — legacy form). Newer yaml only
+# carries tag names; the catalog is the source of truth.
 RULESET_URLS=()
 while IFS= read -r u; do
   RULESET_URLS+=("$u")
 done < <(grep -oE 'https://[^"[:space:]]+\.srs' "$GATEWAY_YAML" | sort -u)
 
-# Catalog tags — derive their URL from the standard sagernet path.
-CATALOG="$REPO_ROOT/scripts/geosite-catalog.txt"
+# Tags from gateway.yaml's whitelist (post-migration: geosites: [tag, ...]
+# and geoips: [tag, ...] — bare strings, no urls). Pull both and let the
+# prefix branch decide the upstream.
+WL_TAGS=()
+while IFS= read -r tag; do
+  WL_TAGS+=("$tag")
+done < <(awk '
+  /^[[:space:]]*geosites:/  { mode="geo";   next }
+  /^[[:space:]]*geoips:/    { mode="geo";   next }
+  /^[a-zA-Z]/                { mode=""; next }
+  mode=="geo" && /^[[:space:]]*-[[:space:]]/ {
+    sub(/^[[:space:]]*-[[:space:]]*/, "")
+    sub(/[[:space:]]*#.*/, "")
+    gsub(/"|'\''/, "")
+    if ($0 ~ /^(geosite|geoip)-/) print $0
+  }
+' "$GATEWAY_YAML")
+
+# Operator catalog (the API exposes these as the "available" rule-sets).
+CATALOG="$REPO_ROOT/scripts/rule-set-catalog.txt"
+[ -f "$CATALOG" ] || CATALOG="$REPO_ROOT/scripts/geosite-catalog.txt"   # back-compat alias
+CATALOG_TAGS=()
 if [ -f "$CATALOG" ]; then
   while IFS= read -r line; do
     line="${line%%#*}"
     line="$(echo "$line" | tr -d '[:space:]')"
     [ -z "$line" ] && continue
-    RULESET_URLS+=("https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/${line}.srs")
+    CATALOG_TAGS+=("$line")
   done < "$CATALOG"
 fi
+
+# Resolve each tag to a URL by prefix.
+for tag in "${WL_TAGS[@]}" "${CATALOG_TAGS[@]}"; do
+  case "$tag" in
+    geosite-*) RULESET_URLS+=("https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/${tag}.srs") ;;
+    geoip-*)   RULESET_URLS+=("https://raw.githubusercontent.com/SagerNet/sing-geoip/rule-set/${tag}.srs")   ;;
+    *)         log "  skip unknown tag prefix: $tag" ;;
+  esac
+done
 
 # Dedupe (bash 3.2 has no associative arrays — use a sentinel string).
 DEDUPED_URLS=()

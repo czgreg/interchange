@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/netip"
 	"strings"
 	"time"
 
@@ -12,30 +13,38 @@ import (
 )
 
 // whitelistDTO is the on-the-wire shape of GET /api/whitelist and PUT body.
+//
+// Domain side:
+//   - Geosites: rule-set tags (must start with "geosite-", must exist on disk).
+//   - DomainSuffix: bare-domain literals.
+//
+// IP side (added so apps that skip DNS still get whitelisted — see Telegram):
+//   - Geoips: rule-set tags (must start with "geoip-", must exist on disk).
+//   - IPCIDR: CIDR or bare IP literals; bare IPs normalized to /32 or /128.
 type whitelistDTO struct {
 	Mode         string   `json:"mode"`
 	Geosites     []string `json:"geosites"`
+	Geoips       []string `json:"geoips"`
 	DomainSuffix []string `json:"domain_suffix"`
+	IPCIDR       []string `json:"ip_cidr"`
 }
 
 func (s *Server) handleWhitelistGet(w http.ResponseWriter, r *http.Request) {
 	wl := s.deps.Cfg.SingBox.Route.Whitelist
-	geosites := make([]string, 0, len(wl.Geosites))
-	for _, g := range wl.Geosites {
-		geosites = append(geosites, g.Name)
-	}
 	writeJSON(w, http.StatusOK, whitelistDTO{
 		Mode:         s.deps.Cfg.SingBox.Route.Mode,
-		Geosites:     geosites,
+		Geosites:     append([]string{}, wl.Geosites...),
+		Geoips:       append([]string{}, wl.Geoips...),
 		DomainSuffix: append([]string{}, wl.DomainSuffix...),
+		IPCIDR:       append([]string{}, wl.IPCIDR...),
 	})
 }
 
 // handleWhitelistPut replaces the whole whitelist atomically. The PUT body's
 // `mode` is informational — the actual mode comes from current cfg unless
 // explicitly set to "overseas" (which clears the WL match rules at render
-// time). Geosites must all exist locally; otherwise the request fails before
-// any state changes.
+// time). Geosites and geoips must each exist locally; otherwise the request
+// fails before any state changes.
 func (s *Server) handleWhitelistPut(w http.ResponseWriter, r *http.Request) {
 	var dto whitelistDTO
 	if err := json.NewDecoder(r.Body).Decode(&dto); err != nil {
@@ -48,31 +57,17 @@ func (s *Server) handleWhitelistPut(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "cannot scan rule-sets dir: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	availSet := make(map[string]bool, len(available))
-	for _, name := range available {
-		availSet[name] = true
-	}
 
 	// Validation pass — never mutate cfg if validation fails.
-	geosites := make([]config.GeositeRef, 0, len(dto.Geosites))
-	seenG := map[string]bool{}
-	for _, name := range dto.Geosites {
-		name = strings.TrimSpace(name)
-		if name == "" {
-			continue
-		}
-		if !availSet[name] {
-			http.Error(w, fmt.Sprintf("unknown geosite %q (not in %s)", name, s.deps.Cfg.SingBox.RuleSetsDir), http.StatusBadRequest)
-			return
-		}
-		if seenG[name] {
-			continue
-		}
-		seenG[name] = true
-		geosites = append(geosites, config.GeositeRef{
-			Name: name,
-			URL:  guessGeositeURL(name),
-		})
+	geosites, err := validateRuleSetTags(dto.Geosites, "geosite-", available.Geosites, s.deps.Cfg.SingBox.RuleSetsDir)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	geoips, err := validateRuleSetTags(dto.Geoips, "geoip-", available.Geoips, s.deps.Cfg.SingBox.RuleSetsDir)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
 	}
 
 	suffixes := make([]string, 0, len(dto.DomainSuffix))
@@ -93,6 +88,12 @@ func (s *Server) handleWhitelistPut(w http.ResponseWriter, r *http.Request) {
 		suffixes = append(suffixes, sx)
 	}
 
+	cidrs, err := normalizeCIDRs(dto.IPCIDR)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
 	mode := strings.ToLower(strings.TrimSpace(dto.Mode))
 	if mode == "" {
 		mode = s.deps.Cfg.SingBox.Route.Mode
@@ -106,7 +107,9 @@ func (s *Server) handleWhitelistPut(w http.ResponseWriter, r *http.Request) {
 	err = s.deps.Store.Mutate(s.deps.Cfg, func(c *config.Config) error {
 		c.SingBox.Route.Mode = mode
 		c.SingBox.Route.Whitelist.Geosites = geosites
+		c.SingBox.Route.Whitelist.Geoips = geoips
 		c.SingBox.Route.Whitelist.DomainSuffix = suffixes
+		c.SingBox.Route.Whitelist.IPCIDR = cidrs
 		return nil
 	})
 	if err != nil {
@@ -130,6 +133,74 @@ func (s *Server) handleWhitelistPut(w http.ResponseWriter, r *http.Request) {
 	s.handleWhitelistGet(w, r)
 }
 
+// validateRuleSetTags trims, dedups, validates prefix, and confirms each tag
+// exists on disk. The kind parameter ("geosite-" / "geoip-") drives both the
+// prefix check and the error wording.
+func validateRuleSetTags(in []string, prefix string, available []string, dir string) (config.StringList, error) {
+	availSet := make(map[string]bool, len(available))
+	for _, name := range available {
+		availSet[name] = true
+	}
+	out := make(config.StringList, 0, len(in))
+	seen := map[string]bool{}
+	for _, name := range in {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			continue
+		}
+		if !strings.HasPrefix(name, prefix) {
+			return nil, fmt.Errorf("rule-set %q does not start with %q", name, prefix)
+		}
+		if !availSet[name] {
+			return nil, fmt.Errorf("unknown rule-set %q (not in %s)", name, dir)
+		}
+		if seen[name] {
+			continue
+		}
+		seen[name] = true
+		out = append(out, name)
+	}
+	return out, nil
+}
+
+// normalizeCIDRs validates ip_cidr entries and converts bare IPs to /32 (v4)
+// or /128 (v6). Returns canonical form (lowercase IPv6, leading zero stripped)
+// so two equivalent inputs dedupe correctly.
+func normalizeCIDRs(in []string) ([]string, error) {
+	out := make([]string, 0, len(in))
+	seen := map[string]bool{}
+	for _, raw := range in {
+		raw = strings.TrimSpace(raw)
+		if raw == "" {
+			continue
+		}
+		var canonical string
+		if strings.Contains(raw, "/") {
+			p, err := netip.ParsePrefix(raw)
+			if err != nil {
+				return nil, fmt.Errorf("invalid ip_cidr %q: %s", raw, err)
+			}
+			canonical = p.Masked().String()
+		} else {
+			a, err := netip.ParseAddr(raw)
+			if err != nil {
+				return nil, fmt.Errorf("invalid ip_cidr %q: %s", raw, err)
+			}
+			bits := 32
+			if a.Is6() {
+				bits = 128
+			}
+			canonical = netip.PrefixFrom(a, bits).String()
+		}
+		if seen[canonical] {
+			continue
+		}
+		seen[canonical] = true
+		out = append(out, canonical)
+	}
+	return out, nil
+}
+
 // refreshExpander runs the v2fly expansion against the current cfg in a
 // fresh context so it survives the request that triggered it.
 func (s *Server) refreshExpander() {
@@ -139,11 +210,7 @@ func (s *Server) refreshExpander() {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 	wl := s.deps.Cfg.SingBox.Route.Whitelist
-	geosites := make([]string, 0, len(wl.Geosites))
-	for _, g := range wl.Geosites {
-		geosites = append(geosites, g.Name)
-	}
-	if _, err := s.deps.Expander.Refresh(ctx, geosites, wl.DomainSuffix); err != nil {
+	if _, err := s.deps.Expander.Refresh(ctx, wl.Geosites, wl.Geoips, wl.DomainSuffix, wl.IPCIDR); err != nil {
 		// Already logged inside Refresh; nothing else to do here — old
 		// snapshot is preserved and marked stale.
 		_ = err
@@ -164,13 +231,9 @@ func (s *Server) handleWhitelistDomains(w http.ResponseWriter, r *http.Request) 
 		// First-boot: no cache yet. Trigger one inline (best-effort) so the
 		// caller doesn't have to poll. Still bound by request timeout.
 		wl := s.deps.Cfg.SingBox.Route.Whitelist
-		geosites := make([]string, 0, len(wl.Geosites))
-		for _, g := range wl.Geosites {
-			geosites = append(geosites, g.Name)
-		}
 		ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 		defer cancel()
-		built, err := s.deps.Expander.Refresh(ctx, geosites, wl.DomainSuffix)
+		built, err := s.deps.Expander.Refresh(ctx, wl.Geosites, wl.Geoips, wl.DomainSuffix, wl.IPCIDR)
 		if err != nil || built == nil {
 			http.Error(w, "expansion not yet available — try again in a few seconds", http.StatusServiceUnavailable)
 			return
@@ -208,12 +271,4 @@ func validateDomainSuffix(s string) error {
 		return fmt.Errorf("leading/trailing dot")
 	}
 	return nil
-}
-
-// guessGeositeURL infers the official sagernet URL for a geosite tag. Used
-// when the API operator gave us only a name — the URL is still recorded in
-// gateway.yaml for traceability, even though the renderer reads .srs files
-// from disk and never fetches.
-func guessGeositeURL(name string) string {
-	return "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/" + name + ".srs"
 }

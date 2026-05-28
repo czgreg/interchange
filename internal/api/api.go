@@ -49,6 +49,7 @@ func NewServer(deps Deps) *Server {
 	mux.HandleFunc("GET /api/whitelist/domains", s.auth(s.handleWhitelistDomains))
 
 	mux.HandleFunc("GET /api/geosites", s.auth(s.handleGeositesGet))
+	mux.HandleFunc("GET /api/rule-sets", s.auth(s.handleRuleSetsGet))
 
 	mux.HandleFunc("GET /api/subscriptions", s.auth(s.handleSubscriptionsGet))
 	mux.HandleFunc("POST /api/subscriptions", s.auth(s.handleSubscriptionsPost))
