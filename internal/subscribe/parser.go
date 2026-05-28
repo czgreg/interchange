@@ -24,7 +24,7 @@ type Manager struct {
 }
 
 func NewManager(entries []config.SubscriptionEntry) *Manager {
-	return NewManagerWithFetch(entries, 30*time.Second, "sing-box/1.8.0")
+	return NewManagerWithFetch(entries, 30*time.Second, "ClashforWindows/0.20.39")
 }
 
 // NewManagerWithFetch lets callers thread http_timeout and user_agent from

@@ -23,7 +23,7 @@ import (
 func main() {
 	url := flag.String("url", "", "subscription URL")
 	file := flag.String("file", "", "read body from file instead of fetching (offline replay)")
-	ua := flag.String("ua", "sing-box/1.8.0", "User-Agent header")
+	ua := flag.String("ua", "ClashforWindows/0.20.39", "User-Agent header")
 	name := flag.String("name", "selftest", "subscription name (tag prefix)")
 	format := flag.String("format", "auto", "auto | clash | singbox | uri | sip008")
 	timeout := flag.Duration("timeout", 30*time.Second, "fetch timeout")

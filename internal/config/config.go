@@ -272,9 +272,12 @@ func (c *Config) applyDefaults() {
 		c.Subscribe.HTTPTimeout = 30 * time.Second
 	}
 	if c.Subscribe.UserAgent == "" {
-		// Most subscription providers gate format by UA. sing-box UA gets us
-		// native sing-box JSON, which is the format our renderer targets.
-		c.Subscribe.UserAgent = "sing-box/1.8.0"
+		// Most airport subscription providers gate by User-Agent. A Clash UA
+		// is the safe universal default: every provider returns Clash YAML
+		// for it (parser auto-detects). sing-box/* UA used to be reasonable
+		// but some providers (e.g. ash/671234.xyz) actively reject it with
+		// HTTP 500. Don't change without checking against the real fleet.
+		c.Subscribe.UserAgent = "ClashforWindows/0.20.39"
 	}
 	c.SingBox.ApplyDefaults()
 }
