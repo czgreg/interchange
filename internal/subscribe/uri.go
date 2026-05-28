@@ -99,14 +99,37 @@ func vmessJSONToOutbound(v map[string]any) (Outbound, error) {
 	}
 	net, _ := v["net"].(string)
 	if net != "" && net != "tcp" {
-		tr := map[string]any{"type": net}
-		if path := getString(v, "path"); path != "" {
-			tr["path"] = path
+		// sing-box transport types differ from the v2rayN convention:
+		// - vmess JSON's "h2" → sing-box "http"
+		// - grpc takes service_name, NOT path (vmess JSON overloads path for it)
+		// - ws / http take path + Host header
+		// Anything else we don't recognize → drop the transport rather than emit
+		// a config sing-box will refuse at startup.
+		sbType := net
+		if net == "h2" {
+			sbType = "http"
 		}
-		if h := getString(v, "host"); h != "" {
-			tr["headers"] = map[string]any{"Host": h}
+		tr := map[string]any{"type": sbType}
+		path := getString(v, "path")
+		host := getString(v, "host")
+		switch sbType {
+		case "ws", "http":
+			if path != "" {
+				tr["path"] = path
+			}
+			if host != "" {
+				tr["headers"] = map[string]any{"Host": host}
+			}
+		case "grpc":
+			if path != "" {
+				tr["service_name"] = path
+			}
+		default:
+			tr = nil
 		}
-		o["transport"] = tr
+		if tr != nil {
+			o["transport"] = tr
+		}
 	}
 	return o, nil
 }
@@ -192,9 +215,13 @@ func applyURIQueryTransport(o Outbound, q url.Values) {
 	if t == "" || t == "tcp" {
 		return
 	}
-	tr := map[string]any{"type": t}
-	switch t {
-	case "ws":
+	sbType := t
+	if t == "h2" {
+		sbType = "http"
+	}
+	tr := map[string]any{"type": sbType}
+	switch sbType {
+	case "ws", "http":
 		if p := q.Get("path"); p != "" {
 			tr["path"] = p
 		}
@@ -205,6 +232,8 @@ func applyURIQueryTransport(o Outbound, q url.Values) {
 		if n := q.Get("serviceName"); n != "" {
 			tr["service_name"] = n
 		}
+	default:
+		return
 	}
 	o["transport"] = tr
 }
