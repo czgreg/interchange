@@ -51,6 +51,10 @@ func main() {
 		slog.Warn("whitelistexpand: cannot load on-disk cache", "err", err)
 	}
 
+	sched := subscribe.NewScheduler(cfg.Subscribe.RefreshInterval, func(ctx context.Context) error {
+		return api.RunRefresh(ctx, mgr, renderer, sbCtl)
+	})
+
 	if _, err := renderer.Write(nil); err != nil {
 		slog.Error("write bootstrap singbox config", "err", err)
 		os.Exit(1)
@@ -63,6 +67,7 @@ func main() {
 
 	srv := api.NewServer(api.Deps{
 		Subscribe:  mgr,
+		Scheduler:  sched,
 		Renderer:   renderer,
 		Controller: sbCtl,
 		Cfg:        cfg,
@@ -92,20 +97,7 @@ func main() {
 		}()
 	}
 
-	go func() {
-		t := time.NewTicker(cfg.Subscribe.RefreshInterval)
-		defer t.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-t.C:
-				if err := api.RunRefresh(ctx, mgr, renderer, sbCtl); err != nil {
-					slog.Warn("scheduled refresh failed", "err", err)
-				}
-			}
-		}
-	}()
+	go sched.Run(ctx)
 
 	go wd.Run(ctx)
 	go ni.Run(ctx)

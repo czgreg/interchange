@@ -281,9 +281,6 @@ func (c *Config) applyDefaults() {
 		// owns 127.0.0.1:8080.
 		c.API.Listen = "127.0.0.1:18080"
 	}
-	if c.Subscribe.RefreshInterval == 0 {
-		c.Subscribe.RefreshInterval = 30 * time.Minute
-	}
 	if c.Subscribe.HTTPTimeout == 0 {
 		c.Subscribe.HTTPTimeout = 30 * time.Second
 	}

@@ -20,6 +20,7 @@ import (
 
 type Deps struct {
 	Subscribe  *subscribe.Manager
+	Scheduler  *subscribe.Scheduler
 	Renderer   *singbox.Renderer
 	Controller *singbox.Controller
 	Cfg        *config.Config
@@ -41,6 +42,8 @@ func NewServer(deps Deps) *Server {
 	mux.HandleFunc("GET /api/status", s.auth(s.handleStatus))
 	mux.HandleFunc("GET /api/nodes", s.auth(s.handleNodes))
 	mux.HandleFunc("POST /api/subscribe/refresh", s.auth(s.handleRefresh))
+	mux.HandleFunc("GET /api/subscribe/refresh-interval", s.auth(s.handleRefreshIntervalGet))
+	mux.HandleFunc("PUT /api/subscribe/refresh-interval", s.auth(s.handleRefreshIntervalPut))
 
 	mux.HandleFunc("GET /api/proxies/active", s.auth(s.handleProxiesActive))
 
