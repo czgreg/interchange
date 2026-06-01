@@ -6,14 +6,20 @@
 api:
   # 18080 (not 8080) — feilian-sentry on the forwarding node already binds
   # 127.0.0.1:8080. Pick something out of the way.
+  #
+  # 默认 127.0.0.1：API 只接受本机连接。PoC / 内网调试想用 192.168.x.x 直连
+  # 时改成 "0.0.0.0:18080"，并在 token 字段加密钥 + nft 限源。
   listen: "127.0.0.1:18080"
   # token: "change-me"  # uncomment to require Authorization: Bearer <token>
 
 subscribe:
-  refresh_interval: 30m
+  refresh_interval: 30m   # 0 = 关闭周期刷新；只接受 POST /api/subscribe/refresh 手动触发
   refresh_on_startup: true
   http_timeout: 30s
-  user_agent: "sing-box/1.8.0"
+  # 全局默认 user_agent —— Clash UA 覆盖面广（ash 等机场对 sing-box UA 返回 HTTP 500）。
+  # 个别机场（如 yuyun）会按 UA 切换响应内容：sing-box UA → 完整原生 JSON；
+  # Clash UA → "proxies: []" 阉割版。这种就在 subscriptions[*].user_agent 单独覆盖。
+  user_agent: "ClashforWindows/0.20.39"
 
 # At least one subscription. format: auto | clash | singbox | uri | sip008
 # Multiple subscriptions are supported — leap aggregates outbounds across all
@@ -24,6 +30,7 @@ subscriptions:
     url: "https://example.com/your/subscription/url"
     format: "auto"
     enabled: true
+    # user_agent: "sing-box/1.10.7"   # 仅在该机场需要不同 UA 时取消注释
 
 # FeiLian SaaS-assigned values for this forwarding node. The deploy operator
 # must fill these in — they cannot be defaulted.
@@ -71,40 +78,51 @@ singbox:
     #   overseas (default): every non-CN destination → urltest (airport).
     #                       The most transparent option — clients don't need
     #                       to think about which sites are blocked.
-    #   whitelist:          only domains matching `whitelist.*` go to airport;
-    #                       everything else (including non-CN sites that
-    #                       aren't whitelisted) goes direct. Saves airport
+    #   whitelist:          only domains/IPs matching `whitelist.*` go to
+    #                       airport; everything else (including non-CN sites
+    #                       not on the list) goes direct. Saves airport
     #                       bandwidth at the cost of curating the list.
     # CN domains/IPs and private LAN ranges always go direct in both modes.
     mode: overseas
 
-    # whitelist is consulted only when mode == whitelist. The two lists below
+    # whitelist is consulted only when mode == whitelist. The four lists below
     # are unioned at render time. Both DNS fakeip handling and route rules
     # follow the same set, so the WL is the single source of truth.
     #
-    # Switch to mode: whitelist + uncomment this section if you want a curated
-    # split. The list below covers what's typically blocked from CN; team
-    # members are free to add long-tail entries via domain_suffix.
+    # Switch to mode: whitelist + tune this section if you want a curated split.
     whitelist:
+      # Domain-side rule-sets. List entries are sing-geosite tags; the renderer
+      # auto-derives the .srs URL (https://.../sing-geosite/rule-set/<tag>.srs).
       geosites:
-        - {name: geosite-google,     url: "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-google.srs"}
-        - {name: geosite-youtube,    url: "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-youtube.srs"}
-        - {name: geosite-openai,     url: "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-openai.srs"}
-        - {name: geosite-github,     url: "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-github.srs"}
-        - {name: geosite-twitter,    url: "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-twitter.srs"}
-        - {name: geosite-facebook,   url: "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-facebook.srs"}
-        - {name: geosite-telegram,   url: "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-telegram.srs"}
-        - {name: geosite-cloudflare, url: "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-cloudflare.srs"}
-        - {name: geosite-discord,    url: "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-discord.srs"}
-        - {name: geosite-wikimedia,  url: "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-wikimedia.srs"}
-        - {name: geosite-reddit,     url: "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-reddit.srs"}
-        - {name: geosite-linkedin,   url: "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-linkedin.srs"}
+        - geosite-google
+        - geosite-youtube
+        - geosite-openai
+        - geosite-github
+        - geosite-twitter
+        - geosite-facebook
+        - geosite-telegram
+        - geosite-cloudflare
+        - geosite-discord
+        - geosite-wikimedia
+        - geosite-reddit
+        - geosite-linkedin
+      # IP-side rule-sets (sing-geoip tags). 上游 SagerNet/sing-geoip 只发 ISO
+      # 国家码 (geoip-cn / geoip-jp / ...)，没有 geoip-telegram / geoip-google
+      # 这种分类标签。"按国家走机场"在这里加 geoip-jp 之类即可；硬编码 IP 段
+      # 写到下面 ip_cidr。
+      geoips: []
+      # 长尾域名后缀，跟 geosites 求并集。
       domain_suffix:
         - claude.ai
         - anthropic.com
         - cursor.com
         - figma.com
         - quora.com
+      # 硬编码 IP / 不走 DNS 的应用（Telegram MTProto 是典型）。下面两段是
+      # Telegram 的 DC IP 范围；按需追加其它海外 CIDR。
+      ip_cidr:
+        - 149.154.0.0/16
+        - 91.108.0.0/16
 
   # urltest controls the auto-selected proxy outbound that handles overseas
   # traffic. sing-box's native urltest re-tests the pool on `interval`; the
@@ -116,10 +134,11 @@ singbox:
     tolerance: 50                                      # ms hysteresis before switching
     probe_url: "https://www.gstatic.com/generate_204"  # must traverse GFW (that's what we're testing)
     # Filter the urltest pool by node-tag regex. Empty = every airport node is
-    # a candidate. Example below restricts the pool to Singapore + US nodes
-    # (yuyun-style names like "🇸🇬 新加坡01 ..." / "🇺🇸 美国01 ..."); all parsed
-    # outbounds remain queryable via clash-api regardless of this filter.
-    node_pattern: "新加坡|美国"
+    # a candidate.下例只把美国节点喂进 urltest 池。机场命名风格不统一：
+    # 有的用中文（"🇺🇸 美国01 ..."），有的用拉丁（"🇺🇸US-IEPL-01"），所以三
+    # 段并联兼顾：中文 "美国" / 国旗 emoji 🇺🇸 / 词首 "US"（\b 防误伤 Russia 等）。
+    # 0 命中时 leap 会回落到全量节点（renderer.applyNodePattern 兜底）。
+    node_pattern: '美国|🇺🇸|\bUS'
     watchdog:
       enabled: true
       interval: 5s        # how often to probe the live selection
