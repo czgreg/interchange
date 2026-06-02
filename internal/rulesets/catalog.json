@@ -1,0 +1,84 @@
+{
+  "geosites": {
+    "url_template": "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/{name}.srs",
+    "items": [
+      {"name": "geosite-google",       "category": "tech"},
+      {"name": "geosite-youtube",      "category": "tech"},
+      {"name": "geosite-openai",       "category": "tech"},
+      {"name": "geosite-anthropic",    "category": "tech"},
+      {"name": "geosite-github",       "category": "tech"},
+      {"name": "geosite-microsoft",    "category": "tech"},
+      {"name": "geosite-apple",        "category": "tech"},
+      {"name": "geosite-amazon",       "category": "tech"},
+      {"name": "geosite-cloudflare",   "category": "tech"},
+      {"name": "geosite-akamai",       "category": "tech"},
+      {"name": "geosite-jetbrains",    "category": "tech"},
+      {"name": "geosite-docker",       "category": "tech"},
+      {"name": "geosite-npmjs",        "category": "tech"},
+      {"name": "geosite-stackexchange","category": "tech"},
+
+      {"name": "geosite-twitter",      "category": "social"},
+      {"name": "geosite-facebook",     "category": "social"},
+      {"name": "geosite-instagram",    "category": "social"},
+      {"name": "geosite-whatsapp",     "category": "social"},
+      {"name": "geosite-telegram",     "category": "social"},
+      {"name": "geosite-discord",      "category": "social"},
+      {"name": "geosite-slack",        "category": "social"},
+      {"name": "geosite-zoom",         "category": "social"},
+      {"name": "geosite-signal",       "category": "social"},
+      {"name": "geosite-line",         "category": "social"},
+
+      {"name": "geosite-netflix",      "category": "streaming"},
+      {"name": "geosite-spotify",      "category": "streaming"},
+      {"name": "geosite-hbo",          "category": "streaming"},
+      {"name": "geosite-disney",       "category": "streaming"},
+      {"name": "geosite-hulu",         "category": "streaming"},
+      {"name": "geosite-twitch",       "category": "streaming"},
+      {"name": "geosite-vimeo",        "category": "streaming"},
+      {"name": "geosite-soundcloud",   "category": "streaming"},
+      {"name": "geosite-pixiv",        "category": "streaming"},
+      {"name": "geosite-tiktok",       "category": "streaming"},
+
+      {"name": "geosite-reddit",       "category": "reference"},
+      {"name": "geosite-wikimedia",    "category": "reference"},
+      {"name": "geosite-quora",        "category": "reference"},
+      {"name": "geosite-medium",       "category": "reference"},
+      {"name": "geosite-bbc",          "category": "reference"},
+      {"name": "geosite-cnn",          "category": "reference"},
+      {"name": "geosite-nytimes",      "category": "reference"},
+
+      {"name": "geosite-linkedin",     "category": "productivity"},
+      {"name": "geosite-paypal",       "category": "productivity"},
+      {"name": "geosite-stripe",       "category": "productivity"},
+      {"name": "geosite-notion",       "category": "productivity"},
+      {"name": "geosite-figma",        "category": "productivity"},
+      {"name": "geosite-dropbox",      "category": "productivity"},
+      {"name": "geosite-onedrive",     "category": "productivity"},
+      {"name": "geosite-icloud",       "category": "productivity"}
+    ]
+  },
+  "geoips": {
+    "url_template": "https://raw.githubusercontent.com/SagerNet/sing-geoip/rule-set/{name}.srs",
+    "items": [
+      {"name": "geoip-us", "category": "country"},
+      {"name": "geoip-jp", "category": "country"},
+      {"name": "geoip-hk", "category": "country"},
+      {"name": "geoip-sg", "category": "country"},
+      {"name": "geoip-tw", "category": "country"},
+      {"name": "geoip-kr", "category": "country"},
+      {"name": "geoip-gb", "category": "country"},
+      {"name": "geoip-de", "category": "country"},
+      {"name": "geoip-fr", "category": "country"},
+      {"name": "geoip-nl", "category": "country"},
+      {"name": "geoip-ca", "category": "country"},
+      {"name": "geoip-au", "category": "country"},
+      {"name": "geoip-ru", "category": "country"},
+      {"name": "geoip-in", "category": "country"},
+      {"name": "geoip-mo", "category": "country"}
+    ]
+  },
+  "examples": {
+    "domain_suffix": ["anthropic.com", "claude.ai", "cursor.com", "figma.com", "quora.com"],
+    "ip_cidr":       ["149.154.0.0/16", "91.108.0.0/16"]
+  }
+}

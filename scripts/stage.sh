@@ -80,21 +80,28 @@ cp deploy/node/install.sh \
 chmod 0755 "$STAGE_DIR/install.sh" "$STAGE_DIR/iproute.sh"
 log "deploy/node/* files staged"
 
-# 5. Rule-set .srs blobs. Fetched into the tarball so sing-box can load them as
-#    type=local at startup — sidesteps the GFW path AND the startup race where
-#    14 parallel remote downloads compete with urltest's first measurement.
-#    Sources merged from gateway.yaml (URLs ending in .srs, kept for legacy
-#    yaml that still has explicit url: fields) AND
-#    scripts/rule-set-catalog.txt — one tag per line, prefix decides upstream:
-#      geosite-*  → sing-geosite repo
-#      geoip-*    → sing-geoip repo
+# 5. Rule-set .srs blobs. Pre-fetched into the tarball so sing-box can load
+#    geosite-cn / geoip-cn (route infra) and any tags already selected in
+#    gateway.yaml.whitelist.{geosites,geoips} as type=local at startup —
+#    sidesteps the GFW path AND the startup race where parallel remote
+#    downloads compete with urltest's first measurement.
+#
+#    Catalog tags NOT referenced by gateway.yaml are NOT pre-fetched; the
+#    runtime API (PUT /api/whitelist) downloads them on-demand from the
+#    embedded catalog when an operator selects them.
+#
 #    Per-URL cache in .cache/rule-sets/. Delete that dir to force re-fetch.
 RULESETS_CACHE="$SINGBOX_CACHE/rule-sets"
 mkdir -p "$RULESETS_CACHE" "$STAGE_DIR/rule-sets"
 
-# Tags requested by gateway.yaml (full URLs — legacy form). Newer yaml only
-# carries tag names; the catalog is the source of truth.
-RULESET_URLS=()
+# Always pre-fetch the two infra rule-sets used by the route classifier.
+RULESET_URLS=(
+  "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-cn.srs"
+  "https://raw.githubusercontent.com/SagerNet/sing-geoip/rule-set/geoip-cn.srs"
+)
+
+# Tags requested by gateway.yaml as full URLs — legacy form, kept for yaml
+# that still has explicit url: fields under singbox.route.geosite_url etc.
 while IFS= read -r u; do
   RULESET_URLS+=("$u")
 done < <(grep -oE 'https://[^"[:space:]]+\.srs' "$GATEWAY_YAML" | sort -u)
@@ -117,21 +124,8 @@ done < <(awk '
   }
 ' "$GATEWAY_YAML")
 
-# Operator catalog (the API exposes these as the "available" rule-sets).
-CATALOG="$REPO_ROOT/scripts/rule-set-catalog.txt"
-[ -f "$CATALOG" ] || CATALOG="$REPO_ROOT/scripts/geosite-catalog.txt"   # back-compat alias
-CATALOG_TAGS=()
-if [ -f "$CATALOG" ]; then
-  while IFS= read -r line; do
-    line="${line%%#*}"
-    line="$(echo "$line" | tr -d '[:space:]')"
-    [ -z "$line" ] && continue
-    CATALOG_TAGS+=("$line")
-  done < "$CATALOG"
-fi
-
-# Resolve each tag to a URL by prefix.
-for tag in "${WL_TAGS[@]}" "${CATALOG_TAGS[@]}"; do
+# Resolve each WL tag to a URL by prefix.
+for tag in "${WL_TAGS[@]}"; do
   case "$tag" in
     geosite-*) RULESET_URLS+=("https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/${tag}.srs") ;;
     geoip-*)   RULESET_URLS+=("https://raw.githubusercontent.com/SagerNet/sing-geoip/rule-set/${tag}.srs")   ;;
@@ -152,20 +146,13 @@ for u in "${RULESET_URLS[@]}"; do
   esac
 done
 
-if [ "${#DEDUPED_URLS[@]}" -eq 0 ]; then
-  fail "no rule-set URLs found (checked $GATEWAY_YAML and $CATALOG)"
-fi
-log "fetching ${#DEDUPED_URLS[@]} rule-set .srs files (gateway.yaml + catalog)"
+log "fetching ${#DEDUPED_URLS[@]} rule-set .srs files (cn infra + gateway.yaml whitelist)"
 fetched=0
 skipped=0
 for url in "${DEDUPED_URLS[@]}"; do
   fname="$(basename "$url")"
   cached="$RULESETS_CACHE/$fname"
   if [ ! -s "$cached" ]; then
-    # Catalog entries can fail (rare/typo'd categories); skip with warning
-    # rather than abort the whole build. gateway.yaml entries are required —
-    # but with the fail-soft path here, missing yaml entries surface later
-    # at sing-box startup with a clear error instead. Acceptable tradeoff.
     if ! curl -fsSL --retry 2 --max-time 30 "$url" -o "$cached.tmp"; then
       log "  skip $fname (fetch failed)"
       rm -f "$cached.tmp"

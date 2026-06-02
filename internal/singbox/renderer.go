@@ -14,6 +14,16 @@ import (
 	"github.com/leap-gateway/leap-gateway/internal/subscribe"
 )
 
+// LeapInternalProxyPort is the port of the loopback-only HTTP inbound the
+// renderer always emits for leap-gateway's own outbound use (rulesets
+// fetcher transits this so .srs downloads go through the airport instead
+// of hitting GFW-blocked raw.githubusercontent directly).
+const LeapInternalProxyPort = 11080
+
+// LeapInternalProxyURL is the full http:// URL form of LeapInternalProxyPort
+// — passed to rulesets.New as the proxy URL.
+const LeapInternalProxyURL = "http://127.0.0.1:11080"
+
 // Renderer turns a list of subscription outbounds + node config into a
 // complete sing-box config.json. The output is suitable for `sing-box check`
 // and for direct `sing-box run` after the node-side ip rule + nft injection.
@@ -214,6 +224,18 @@ func (r *Renderer) buildInbounds() []map[string]any {
 			"sniff":       true,
 		})
 	}
+
+	// Internal HTTP proxy used by leap-gateway itself for outbound HTTP
+	// fetches (rulesets.Manager downloads .srs blobs through this so they
+	// transit the airport, since raw.githubusercontent is GFW-blocked from
+	// inside CN). Loopback-only. Always present so operators don't have to
+	// configure anything for on-demand rule-set fetching to work.
+	inbounds = append(inbounds, map[string]any{
+		"type":        "http",
+		"tag":         "leap-internal-http-in",
+		"listen":      "127.0.0.1",
+		"listen_port": LeapInternalProxyPort,
+	})
 
 	// Ad-hoc socks/http inbounds — kept for cmd/selftest and for poking the
 	// gateway from the node itself when debugging.

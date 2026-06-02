@@ -43,8 +43,9 @@ func (s *Server) handleWhitelistGet(w http.ResponseWriter, r *http.Request) {
 // handleWhitelistPut replaces the whole whitelist atomically. The PUT body's
 // `mode` is informational — the actual mode comes from current cfg unless
 // explicitly set to "overseas" (which clears the WL match rules at render
-// time). Geosites and geoips must each exist locally; otherwise the request
-// fails before any state changes.
+// time). Every geosite/geoip tag must exist in the embedded catalog; any
+// referenced .srs file that isn't yet on disk is fetched on-demand from
+// upstream (sing-geosite / sing-geoip) before the cfg is mutated.
 func (s *Server) handleWhitelistPut(w http.ResponseWriter, r *http.Request) {
 	var dto whitelistDTO
 	if err := json.NewDecoder(r.Body).Decode(&dto); err != nil {
@@ -52,19 +53,14 @@ func (s *Server) handleWhitelistPut(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	available, err := scanRuleSetsDir(s.deps.Cfg.SingBox.RuleSetsDir)
-	if err != nil {
-		http.Error(w, "cannot scan rule-sets dir: "+err.Error(), http.StatusInternalServerError)
-		return
-	}
-
-	// Validation pass — never mutate cfg if validation fails.
-	geosites, err := validateRuleSetTags(dto.Geosites, "geosite-", available.Geosites, s.deps.Cfg.SingBox.RuleSetsDir)
+	// Validation pass — catalog presence only, no network. Never mutate
+	// cfg if validation fails.
+	geosites, err := s.canonicalizeRuleSetTags(dto.Geosites, "geosite-")
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	geoips, err := validateRuleSetTags(dto.Geoips, "geoip-", available.Geoips, s.deps.Cfg.SingBox.RuleSetsDir)
+	geoips, err := s.canonicalizeRuleSetTags(dto.Geoips, "geoip-")
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
@@ -103,6 +99,19 @@ func (s *Server) handleWhitelistPut(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Fetch any selected rule-sets that aren't on disk yet. EnsureInstalled
+	// is a no-op if <name>.srs is already present, so re-PUTs of the same
+	// list don't re-download. Each tag has its own per-name lock inside the
+	// manager; concurrent PUTs of the same tag coalesce to one HTTP fetch.
+	fetchCtx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
+	defer cancel()
+	for _, name := range append(append([]string{}, geosites...), geoips...) {
+		if err := s.deps.RuleSets.EnsureInstalled(fetchCtx, name); err != nil {
+			http.Error(w, fmt.Sprintf("download %s: %s", name, err), http.StatusBadGateway)
+			return
+		}
+	}
+
 	// Mutate + persist + reload.
 	err = s.deps.Store.Mutate(s.deps.Cfg, func(c *config.Config) error {
 		c.SingBox.Route.Mode = mode
@@ -134,14 +143,11 @@ func (s *Server) handleWhitelistPut(w http.ResponseWriter, r *http.Request) {
 	s.handleWhitelistGet(w, r)
 }
 
-// validateRuleSetTags trims, dedups, validates prefix, and confirms each tag
-// exists on disk. The kind parameter ("geosite-" / "geoip-") drives both the
-// prefix check and the error wording.
-func validateRuleSetTags(in []string, prefix string, available []string, dir string) (config.StringList, error) {
-	availSet := make(map[string]bool, len(available))
-	for _, name := range available {
-		availSet[name] = true
-	}
+// canonicalizeRuleSetTags trims, dedups, validates the prefix, and confirms
+// each tag exists in the embedded catalog. Returns the canonical list (in
+// input order, deduped). The actual on-disk presence is enforced separately
+// by the EnsureInstalled call in the PUT flow.
+func (s *Server) canonicalizeRuleSetTags(in []string, prefix string) (config.StringList, error) {
 	out := make(config.StringList, 0, len(in))
 	seen := map[string]bool{}
 	for _, name := range in {
@@ -152,8 +158,8 @@ func validateRuleSetTags(in []string, prefix string, available []string, dir str
 		if !strings.HasPrefix(name, prefix) {
 			return nil, fmt.Errorf("rule-set %q does not start with %q", name, prefix)
 		}
-		if !availSet[name] {
-			return nil, fmt.Errorf("unknown rule-set %q (not in %s)", name, dir)
+		if _, ok := s.deps.RuleSets.Lookup(name); !ok {
+			return nil, fmt.Errorf("unknown rule-set %q (not in catalog)", name)
 		}
 		if seen[name] {
 			continue

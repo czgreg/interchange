@@ -13,6 +13,7 @@ import (
 	"github.com/leap-gateway/leap-gateway/internal/config"
 	"github.com/leap-gateway/leap-gateway/internal/configstore"
 	"github.com/leap-gateway/leap-gateway/internal/nodeinfo"
+	"github.com/leap-gateway/leap-gateway/internal/rulesets"
 	"github.com/leap-gateway/leap-gateway/internal/singbox"
 	"github.com/leap-gateway/leap-gateway/internal/subscribe"
 	"github.com/leap-gateway/leap-gateway/internal/watchdog"
@@ -51,6 +52,12 @@ func main() {
 		slog.Warn("whitelistexpand: cannot load on-disk cache", "err", err)
 	}
 
+	ruleMgr, err := rulesets.New(cfg.SingBox.RuleSetsDir, cfg.Subscribe.HTTPTimeout, singbox.LeapInternalProxyURL)
+	if err != nil {
+		slog.Error("rulesets: load embedded catalog", "err", err)
+		os.Exit(1)
+	}
+
 	sched := subscribe.NewScheduler(cfg.Subscribe.RefreshInterval, func(ctx context.Context) error {
 		return api.RunRefresh(ctx, mgr, renderer, sbCtl)
 	})
@@ -75,6 +82,7 @@ func main() {
 		NodeInfo:   ni,
 		Watchdog:   wd,
 		Expander:   expander,
+		RuleSets:   ruleMgr,
 	})
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -101,6 +109,24 @@ func main() {
 
 	go wd.Run(ctx)
 	go ni.Run(ctx)
+
+	// Best-effort fetch of the two infra rule-sets (geosite-cn / geoip-cn)
+	// that route classification depends on. Their URLs come from
+	// gateway.yaml singbox.route.{geosite_url,geoip_url}, not the embedded
+	// catalog. No-op when the .srs is already on disk (the common case;
+	// install.sh / make stage drops them there). Just a safety net for
+	// freshly-deployed nodes that haven't been staged.
+	go func() {
+		waitFor(ctx, 3*time.Second)
+		warmCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
+		defer cancel()
+		if err := ruleMgr.EnsureInstalledFromURL(warmCtx, "geosite-cn", cfg.SingBox.Route.GeositeURL); err != nil {
+			slog.Warn("rulesets: geosite-cn warm-up failed", "err", err)
+		}
+		if err := ruleMgr.EnsureInstalledFromURL(warmCtx, "geoip-cn", cfg.SingBox.Route.GeoIPURL); err != nil {
+			slog.Warn("rulesets: geoip-cn warm-up failed", "err", err)
+		}
+	}()
 
 	// Warm the resolved-snapshot cache (geosite domain expansion + geoip
 	// .srs decompile + literal merge) at startup. Doing it async means

@@ -89,40 +89,27 @@ singbox:
     # are unioned at render time. Both DNS fakeip handling and route rules
     # follow the same set, so the WL is the single source of truth.
     #
-    # Switch to mode: whitelist + tune this section if you want a curated split.
+    # 默认四份都空 —— 装机后通过 PUT /api/whitelist 选 catalog 里的 tag /
+    # 加自定义域名 / 加 ip_cidr。GET /api/rule-sets 返回完整 catalog 和提示
+    # 案例（domain_suffix_examples / ip_cidr_examples）供 UI 预填。
     whitelist:
-      # Domain-side rule-sets. List entries are sing-geosite tags; the renderer
-      # auto-derives the .srs URL (https://.../sing-geosite/rule-set/<tag>.srs).
-      geosites:
-        - geosite-google
-        - geosite-youtube
-        - geosite-openai
-        - geosite-github
-        - geosite-twitter
-        - geosite-facebook
-        - geosite-telegram
-        - geosite-cloudflare
-        - geosite-discord
-        - geosite-wikimedia
-        - geosite-reddit
-        - geosite-linkedin
-      # IP-side rule-sets (sing-geoip tags). 上游 SagerNet/sing-geoip 只发 ISO
-      # 国家码 (geoip-cn / geoip-jp / ...)，没有 geoip-telegram / geoip-google
-      # 这种分类标签。"按国家走机场"在这里加 geoip-jp 之类即可；硬编码 IP 段
-      # 写到下面 ip_cidr。
+      # geosite tags from the embedded catalog (GET /api/rule-sets →
+      # geosites.catalog). Selecting a tag here on first PUT triggers an
+      # on-demand fetch from sagernet/sing-geosite into RuleSetsDir.
+      # Examples: geosite-google, geosite-anthropic, geosite-github
+      geosites: []
+      # geoip tags from the embedded catalog. SagerNet/sing-geoip 只发 ISO
+      # 国家码 (geoip-jp / geoip-us / ...)，没有 geoip-telegram / geoip-google
+      # 这种分类。硬编码 IP 段写到下面 ip_cidr。
+      # Examples: geoip-jp, geoip-us, geoip-hk
       geoips: []
       # 长尾域名后缀，跟 geosites 求并集。
-      domain_suffix:
-        - claude.ai
-        - anthropic.com
-        - cursor.com
-        - figma.com
-        - quora.com
-      # 硬编码 IP / 不走 DNS 的应用（Telegram MTProto 是典型）。下面两段是
-      # Telegram 的 DC IP 范围；按需追加其它海外 CIDR。
-      ip_cidr:
-        - 149.154.0.0/16
-        - 91.108.0.0/16
+      # Examples: anthropic.com, claude.ai, cursor.com
+      domain_suffix: []
+      # 硬编码 IP / 不走 DNS 的应用（Telegram MTProto 是典型 —— DC 段在
+      # 149.154.0.0/16 + 91.108.0.0/16）。
+      # Examples: 149.154.0.0/16, 91.108.0.0/16
+      ip_cidr: []
 
   # urltest controls the auto-selected proxy outbound that handles overseas
   # traffic. sing-box's native urltest re-tests the pool on `interval`; the

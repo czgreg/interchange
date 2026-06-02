@@ -12,6 +12,7 @@ import (
 	"github.com/leap-gateway/leap-gateway/internal/config"
 	"github.com/leap-gateway/leap-gateway/internal/configstore"
 	"github.com/leap-gateway/leap-gateway/internal/nodeinfo"
+	"github.com/leap-gateway/leap-gateway/internal/rulesets"
 	"github.com/leap-gateway/leap-gateway/internal/singbox"
 	"github.com/leap-gateway/leap-gateway/internal/subscribe"
 	"github.com/leap-gateway/leap-gateway/internal/watchdog"
@@ -28,6 +29,7 @@ type Deps struct {
 	NodeInfo   *nodeinfo.Reporter
 	Watchdog   *watchdog.Watchdog
 	Expander   *whitelistexpand.Expander
+	RuleSets   *rulesets.Manager
 }
 
 type Server struct {

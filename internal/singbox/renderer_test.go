@@ -72,18 +72,19 @@ func TestRendererProductionMode(t *testing.T) {
 		t.Errorf("dns.final = %v, want remote", dns["final"])
 	}
 
-	// Inbounds: tun-in + dns-in (no socks/http because we didn't set them).
+	// Inbounds: tun-in + dns-in + leap-internal-http-in (always-on for
+	// rulesets fetcher). No socks-in / http-in because we didn't set them.
 	inbounds, _ := doc["inbounds"].([]any)
-	if len(inbounds) != 2 {
-		t.Errorf("want 2 inbounds (tun, dns), got %d", len(inbounds))
+	if len(inbounds) != 3 {
+		t.Errorf("want 3 inbounds (tun, dns, leap-internal-http), got %d", len(inbounds))
 	}
 	tags := make(map[string]bool)
 	for _, ib := range inbounds {
 		m, _ := ib.(map[string]any)
 		tags[m["tag"].(string)] = true
 	}
-	if !tags["tun-in"] || !tags["dns-in"] {
-		t.Errorf("missing tun-in or dns-in: %v", tags)
+	if !tags["tun-in"] || !tags["dns-in"] || !tags["leap-internal-http-in"] {
+		t.Errorf("missing tun-in / dns-in / leap-internal-http-in: %v", tags)
 	}
 
 	// Outbounds: out + urltest + n1 + n2 + direct + dns-out + block = 7.
@@ -155,10 +156,11 @@ func TestRendererLabMode(t *testing.T) {
 	var doc map[string]any
 	_ = json.Unmarshal(data, &doc)
 
-	// Lab mode → no tun-in / dns-in, just socks + http.
+	// Lab mode → no tun-in / dns-in, just socks + http + leap-internal-http
+	// (the renderer always emits the internal proxy inbound).
 	inbounds, _ := doc["inbounds"].([]any)
-	if len(inbounds) != 2 {
-		t.Errorf("want 2 inbounds (socks, http) in lab mode, got %d", len(inbounds))
+	if len(inbounds) != 3 {
+		t.Errorf("want 3 inbounds (socks, http, leap-internal-http) in lab mode, got %d", len(inbounds))
 	}
 	for _, ib := range inbounds {
 		m, _ := ib.(map[string]any)
