@@ -341,7 +341,15 @@ func (e *Expander) decompileGeoip(tag string) ([]string, error) {
 	if _, err := os.Stat(srcPath); err != nil {
 		return nil, err
 	}
-	tmpDir, err := os.MkdirTemp("", "leap-srs-")
+	// Use the cache dir's parent for scratch, NOT $TMPDIR — leap-gateway's
+	// systemd unit sets ProtectSystem=strict with ReadWritePaths limited to
+	// /var/lib/leap and /etc/leap, so /tmp is read-only. cachePath defaults
+	// to /var/lib/leap/whitelist-resolved.json so its parent is writable.
+	tmpParent := filepath.Dir(e.cachePath)
+	if err := os.MkdirAll(tmpParent, 0o755); err != nil {
+		return nil, err
+	}
+	tmpDir, err := os.MkdirTemp(tmpParent, "leap-srs-")
 	if err != nil {
 		return nil, err
 	}
