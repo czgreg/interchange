@@ -6,6 +6,10 @@
       {"name": "geosite-youtube",      "category": "tech"},
       {"name": "geosite-openai",       "category": "tech"},
       {"name": "geosite-anthropic",    "category": "tech"},
+      {"name": "geosite-perplexity",   "category": "tech"},
+      {"name": "geosite-bing",         "category": "tech"},
+      {"name": "geosite-duckduckgo",   "category": "tech"},
+      {"name": "geosite-category-ai-!cn", "category": "tech"},
       {"name": "geosite-github",       "category": "tech"},
       {"name": "geosite-microsoft",    "category": "tech"},
       {"name": "geosite-apple",        "category": "tech"},
@@ -18,8 +22,10 @@
       {"name": "geosite-stackexchange","category": "tech"},
 
       {"name": "geosite-twitter",      "category": "social"},
+      {"name": "geosite-x",            "category": "social"},
       {"name": "geosite-facebook",     "category": "social"},
       {"name": "geosite-instagram",    "category": "social"},
+      {"name": "geosite-bluesky",      "category": "social"},
       {"name": "geosite-whatsapp",     "category": "social"},
       {"name": "geosite-telegram",     "category": "social"},
       {"name": "geosite-discord",      "category": "social"},
@@ -38,14 +44,17 @@
       {"name": "geosite-soundcloud",   "category": "streaming"},
       {"name": "geosite-pixiv",        "category": "streaming"},
       {"name": "geosite-tiktok",       "category": "streaming"},
+      {"name": "geosite-plex",         "category": "streaming"},
 
       {"name": "geosite-reddit",       "category": "reference"},
       {"name": "geosite-wikimedia",    "category": "reference"},
       {"name": "geosite-quora",        "category": "reference"},
       {"name": "geosite-medium",       "category": "reference"},
+      {"name": "geosite-ycombinator",  "category": "reference"},
       {"name": "geosite-bbc",          "category": "reference"},
       {"name": "geosite-cnn",          "category": "reference"},
       {"name": "geosite-nytimes",      "category": "reference"},
+      {"name": "geosite-category-scholar-!cn", "category": "reference"},
 
       {"name": "geosite-linkedin",     "category": "productivity"},
       {"name": "geosite-paypal",       "category": "productivity"},
@@ -54,12 +63,25 @@
       {"name": "geosite-figma",        "category": "productivity"},
       {"name": "geosite-dropbox",      "category": "productivity"},
       {"name": "geosite-onedrive",     "category": "productivity"},
-      {"name": "geosite-icloud",       "category": "productivity"}
+      {"name": "geosite-icloud",       "category": "productivity"},
+      {"name": "geosite-protonmail",   "category": "productivity"},
+      {"name": "geosite-bitwarden",    "category": "productivity"},
+      {"name": "geosite-category-password-management", "category": "productivity"},
+      {"name": "geosite-category-cryptocurrency",      "category": "productivity"}
     ]
   },
   "geoips": {
-    "url_template": "https://raw.githubusercontent.com/SagerNet/sing-geoip/rule-set/{name}.srs",
+    "url_template": "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geoip/{stem}.srs",
     "items": [
+      {"name": "geoip-google",     "category": "app"},
+      {"name": "geoip-facebook",   "category": "app"},
+      {"name": "geoip-twitter",    "category": "app"},
+      {"name": "geoip-netflix",    "category": "app"},
+      {"name": "geoip-telegram",   "category": "app"},
+      {"name": "geoip-cloudflare", "category": "app"},
+      {"name": "geoip-cloudfront", "category": "app"},
+      {"name": "geoip-fastly",     "category": "app"},
+
       {"name": "geoip-us", "category": "country"},
       {"name": "geoip-jp", "category": "country"},
       {"name": "geoip-hk", "category": "country"},

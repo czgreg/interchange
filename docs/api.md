@@ -405,8 +405,9 @@ curl -s http://127.0.0.1:18080/api/whitelist/resolved | jq '.domains_count, .ip_
   },
   "geoips": {
     "catalog": [
-      {"name":"geoip-us","url":"https://raw.githubusercontent.com/SagerNet/sing-geoip/rule-set/geoip-us.srs","category":"country","installed":false,"selected":false},
-      {"name":"geoip-jp","url":"https://raw.githubusercontent.com/SagerNet/sing-geoip/rule-set/geoip-jp.srs","category":"country","installed":false,"selected":false}
+      {"name":"geoip-google","url":"https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geoip/google.srs","category":"app","installed":false,"selected":false},
+      {"name":"geoip-telegram","url":"https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geoip/telegram.srs","category":"app","installed":false,"selected":false},
+      {"name":"geoip-jp","url":"https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geoip/jp.srs","category":"country","installed":false,"selected":false}
     ],
     "ip_cidr_examples": ["149.154.0.0/16","91.108.0.0/16"]
   }
@@ -417,14 +418,31 @@ curl -s http://127.0.0.1:18080/api/whitelist/resolved | jq '.domains_count, .ip_
 |---|---|
 | `geosites.catalog[].name` | 上游 sagernet/sing-geosite 仓库 rule-set 分支里 `<name>.srs` 的 tag 名 |
 | `geosites.catalog[].url` | 该 .srs 的上游 URL（leap-gateway 经内部 HTTP 代理走机场拉，CN 内可达）|
-| `geosites.catalog[].category` | 分组：`tech` / `social` / `streaming` / `reference` / `productivity` |
+| `geosites.catalog[].category` | 分组：`tech` / `social` / `streaming` / `reference` / `productivity`。其中含若干 `geosite-category-*` 聚合 tag（如 `geosite-category-ai-!cn`），一条命中数百域名 |
 | `geosites.catalog[].installed` | `/etc/leap/singbox/rule-sets/<name>.srs` 是否已经在本地 |
 | `geosites.catalog[].selected` | 该 tag 是否在 `whitelist.geosites` 里 |
 | `geosites.domain_suffix_examples` | UI 预填 `whitelist.domain_suffix` 的示例值（不影响实际配置）|
-| `geoips.*` | 同上，对应 sing-geoip。catalog 里只收录了 ISO 国家码（geoip-us / geoip-jp / ...），上游本来就没有 `geoip-telegram` `geoip-google` 这种分类标签 |
+| `geoips.catalog[].name` | 上游 MetaCubeX/meta-rules-dat 仓库 sing 分支 `geo/geoip/<stem>.srs` 的 tag 名（leap-gateway 加上 `geoip-` 前缀作为统一标识）|
+| `geoips.catalog[].url` | 完整 .srs URL —— 注意上游路径里**无** `geoip-` 前缀，由 `{stem}` 替换处理 |
+| `geoips.catalog[].category` | 分组：`app`（公司 / 应用自有 IP 段，如 `geoip-google`）/ `country`（ISO 2 字母国家码，如 `geoip-jp`）|
 | `geoips.ip_cidr_examples` | UI 预填 `whitelist.ip_cidr` 的示例值（默认是 Telegram MTProto 的 DC 段）|
 
-**catalog 的来源**：内嵌进 leap-gateway 二进制（`go:embed catalog.json`）。增删条目走代码 PR + 重新部署，不能在线改。
+**catalog 的来源**：内嵌进 leap-gateway 二进制（`go:embed catalog.json`）。
+
+| 上游 | 项数 | 用途 |
+|---|---|---|
+| `SagerNet/sing-geosite` rule-set 分支 | 62（按 `tech` / `social` / `streaming` / `reference` / `productivity` 五类分组，含若干 `geosite-category-*` 聚合 tag —— 一条命中数百域名） | 按域名路由 |
+| `MetaCubeX/meta-rules-dat` sing 分支 `geo/geoip/` 目录 | 23（8 个 app tag：cloudflare / cloudfront / facebook / fastly / google / netflix / telegram / twitter；15 个 ISO 国家码） | 按 IP 路由 |
+
+> **为什么 geoip 用 MetaCubeX 而不是 SagerNet**：sagernet/sing-geoip rule-set 分支
+> **只发 ISO 国家码**，没有 app tag。MetaCubeX 这条社区线（Clash.Meta / mihomo 也用这个）
+> 维护了 ~10 个常见 app 的 IP CIDR 列表，文件格式跟 sagernet 完全一致（都是 sing-box `.srs`）。
+
+> **慎用大网段 app geoip**：`geoip-google` / `geoip-cloudflare` 命中的是整个 Google /
+> Cloudflare 的 IP 范围（含 8.8.8.8 这种 DNS、所有 Cloudflare-fronted 站点等）。加进
+> 白名单等于把半个互联网走机场。能用 geosite 走 DNS 路径的优先用 geosite —— DNS 解
+> 析回来精确多了。geoip app tag 主要给"硬编码 IP / 不查 DNS"的应用（Telegram MTProto、
+> Signal call、WireGuard endpoint 这种）。
 
 **`geosite-cn` / `geoip-cn` 不在 catalog 里**：它们是路由 infra（命中 cn 直连），由
 `gateway.yaml` 的 `singbox.route.geosite_url` / `geoip_url` 显式指定 URL，安装时由

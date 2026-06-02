@@ -212,22 +212,28 @@ func parseCatalog(blob []byte) (*Catalog, map[string]Item, error) {
 	if err := json.Unmarshal(blob, &raw); err != nil {
 		return nil, nil, err
 	}
-	if !strings.Contains(raw.Geosites.URLTemplate, "{name}") {
-		return nil, nil, fmt.Errorf("geosites.url_template missing {name}")
+	if !strings.Contains(raw.Geosites.URLTemplate, "{name}") && !strings.Contains(raw.Geosites.URLTemplate, "{stem}") {
+		return nil, nil, fmt.Errorf("geosites.url_template missing {name} or {stem}")
 	}
-	if !strings.Contains(raw.Geoips.URLTemplate, "{name}") {
-		return nil, nil, fmt.Errorf("geoips.url_template missing {name}")
+	if !strings.Contains(raw.Geoips.URLTemplate, "{name}") && !strings.Contains(raw.Geoips.URLTemplate, "{stem}") {
+		return nil, nil, fmt.Errorf("geoips.url_template missing {name} or {stem}")
 	}
 
 	items := make(map[string]Item)
 	expand := func(template string, src []rawCatItem) []Item {
 		out := make([]Item, 0, len(src))
 		for _, x := range src {
-			it := Item{
-				Name:     x.Name,
-				URL:      strings.ReplaceAll(template, "{name}", x.Name),
-				Category: x.Category,
+			// {stem} = name with the first "<kind>-" prefix stripped
+			// (e.g. "geoip-google" → "google"). Lets MetaCubeX-style
+			// upstream paths like .../geo/geoip/<stem>.srs work alongside
+			// sagernet-style .../rule-set/<name>.srs.
+			stem := x.Name
+			if i := strings.Index(x.Name, "-"); i >= 0 {
+				stem = x.Name[i+1:]
 			}
+			url := strings.ReplaceAll(template, "{name}", x.Name)
+			url = strings.ReplaceAll(url, "{stem}", stem)
+			it := Item{Name: x.Name, URL: url, Category: x.Category}
 			out = append(out, it)
 			items[x.Name] = it
 		}
