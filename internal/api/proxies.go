@@ -222,13 +222,34 @@ func (s *Server) handleProxiesSelect(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, fmt.Sprintf("invalid selector %q (want urltest-primary | urltest-backup | direct)", dto.Selector), http.StatusBadRequest)
 		return
 	}
-	if err := setOutSelector(r.Context(), s.deps.Cfg.SingBox.ClashAPI, dto.Selector); err != nil {
-		// 404 from clash-api means the selector member doesn't exist on this
-		// node (most common: urltest-backup with only one subscription).
-		if strings.Contains(err.Error(), "status 404") {
-			http.Error(w, fmt.Sprintf("selector %q not registered on sing-box (single-subscription deploys have no urltest-backup)", dto.Selector), http.StatusNotFound)
-			return
+
+	// Pre-check that the selector is registered on this node before issuing
+	// the PUT. clash-api returns 400 (not 404) for unregistered members,
+	// which would surface as an unhelpful 500 here. Reading the "out"
+	// selector's `all` list lets us return a clean 404 with operator-level
+	// context (the most common cause is single-subscription deploys having
+	// no urltest-backup).
+	httpc := &http.Client{Timeout: 2 * time.Second}
+	var sel struct {
+		All []string `json:"all"`
+	}
+	if err := getJSON(r.Context(), httpc, s.deps.Cfg.SingBox.ClashAPI, "/proxies/out", &sel); err != nil {
+		http.Error(w, "clash-api read /proxies/out: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	registered := false
+	for _, m := range sel.All {
+		if m == dto.Selector {
+			registered = true
+			break
 		}
+	}
+	if !registered {
+		http.Error(w, fmt.Sprintf("selector %q not registered on sing-box (registered: %v — single-subscription deploys have no urltest-backup)", dto.Selector, sel.All), http.StatusNotFound)
+		return
+	}
+
+	if err := setOutSelector(r.Context(), s.deps.Cfg.SingBox.ClashAPI, dto.Selector); err != nil {
 		http.Error(w, "clash-api: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
