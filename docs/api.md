@@ -29,11 +29,12 @@ Authorization: Bearer <token>
 
 | 状态 | 含义 |
 |---|---|
-| 400 | 请求体非法 / 字段格式错 |
+| 400 | 请求体非法 / 字段格式错（含 catalog 里没有该 rule-set tag）|
 | 401 | token 缺失或不匹配（仅当 `api.token` 非空时可能出现）|
 | 404 | 资源不存在（订阅名找不到） |
 | 409 | 资源冲突（订阅名已存在） |
 | 500 | 持久化失败 / 渲染失败 / sing-box reload 失败 |
+| 502 | 上游拉取失败（PUT 白名单时按需下载 .srs 失败 —— 网络 / 上游 5xx）|
 
 写操作（PUT/POST/DELETE）的失败语义：**先校验再落盘**。校验失败请求拒绝，
 内存与磁盘均未变；落盘失败时内存已变但磁盘可能未变（重启后恢复一致）。
@@ -63,15 +64,17 @@ chain input {
 | GET | `/api/nodes` | 无 | 当前所有出站节点（扁平化） |
 | GET | `/api/proxies/active` | 无 | 节点全景：node + feilian + leap services + 当前机场 + watchdog |
 | GET | `/api/whitelist` | 无 | 白名单（mode + geosites + geoips + domain_suffix + ip_cidr） |
-| PUT | `/api/whitelist` | 写 yaml + 重启 sing-box + 异步重建展开缓存 | 整体替换白名单 |
+| PUT | `/api/whitelist` | 写 yaml + 必要时拉缺失 .srs + 重启 sing-box + 异步重建展开缓存 | 整体替换白名单；catalog 里的 tag 被选中时按需下载 |
 | GET | `/api/whitelist/resolved` | 无（首次冷启动会同步拉一次） | rule-set tag → 扁平 `domains[]` + `ip_cidrs[]`。飞连"极速模式"用 |
-| GET | `/api/rule-sets` | 无 | `geosites` / `geoips`（本地 .srs 文件）+ `active` 子集 |
-| GET | `/api/geosites` | 无 | 兼容别名：仅返回 geosite，等价于 `/api/rule-sets` 的 geosite 部分 |
+| GET | `/api/rule-sets` | 无 | 内嵌 catalog（geosite + geoip 各一组 name/url/category）+ 每项 installed/selected + 域名 / IP/CIDR 提示案例 |
+| GET | `/api/geosites` | 无 | 兼容别名：仅返回 geosite 部分的 `{available, active}` |
 | GET | `/api/subscriptions` | 无 | 订阅列表，URL token 自动打码 |
 | POST | `/api/subscriptions` | 写 yaml + 拉订阅 + 重启 sing-box | 新增订阅 |
 | PUT | `/api/subscriptions/{name}` | 写 yaml + 拉订阅 + 重启 sing-box | 改 URL |
 | DELETE | `/api/subscriptions/{name}` | 写 yaml + 拉订阅 + 重启 sing-box | 删订阅 |
 | POST | `/api/subscribe/refresh` | 拉订阅 + 重启 sing-box | 立即刷新 |
+| GET | `/api/subscribe/refresh-interval` | 无 | 当前周期刷新间隔（秒） |
+| PUT | `/api/subscribe/refresh-interval` | 写 yaml + 重置调度器 | 改间隔；`seconds=0` 关周期，只手动刷新 |
 
 > "重启 sing-box" 实际是 `systemctl restart leap-singbox`，5–10s 中断。
 > WL / 订阅写操作会原子写回 `/etc/leap/gateway.yaml`，**yaml 注释会丢失**
@@ -166,7 +169,7 @@ curl -s http://192.168.70.92:18080/healthz
     "nft_chains_present": ["FEILIAN_VPN_POSTROUTING_POOL", "FEILIAN_PROXY"]
   },
   "leap": {
-    "gateway_version": "dev",
+    "gateway_version": "f354d04",
     "singbox_version": "1.10.7",
     "services": {
       "leap-gateway": "active",
@@ -247,7 +250,7 @@ curl -s http://192.168.70.92:18080/healthz
 {
   "mode": "whitelist",
   "geosites": ["geosite-google", "geosite-youtube", "geosite-openai"],
-  "geoips": ["geoip-telegram"],
+  "geoips": [],
   "domain_suffix": ["claude.ai", "anthropic.com"],
   "ip_cidr": ["149.154.0.0/16", "91.108.0.0/16"]
 }
@@ -256,10 +259,10 @@ curl -s http://192.168.70.92:18080/healthz
 | 字段 | 说明 |
 |---|---|
 | `mode` | `overseas` 或 `whitelist`。`overseas` = 命中 cn 的直连，其余走机场；`whitelist` = 仅命中白名单走机场，其它直连 |
-| `geosites` | 启用的 geosite tag 数组（必须是本地 .srs 已就位的，从 `/api/rule-sets` 取） |
-| `geoips` | 启用的 geoip tag 数组（同上）。**只对硬编码 IP / 不查 DNS 的应用有意义**（Telegram MTProto 是典型）。**禁止**加 `geoip-google` / `geoip-cloudflare` 这类大段——会把半个互联网扫进白名单 |
+| `geosites` | 启用的 geosite tag 数组（catalog 子集，从 `/api/rule-sets` 取；本地没有的会在 PUT 时按需下载） |
+| `geoips` | 启用的 geoip tag 数组（同上）。catalog 里只有 ISO 国家码（`geoip-jp` / `geoip-us` / ...）。"按国家路由"用这里；硬编码 IP 段（Telegram MTProto 这种）走下面 `ip_cidr` |
 | `domain_suffix` | 额外的域名后缀列表（小写 + bare domain） |
-| `ip_cidr` | 额外的 IP/CIDR 列表（IPv4/IPv6 都接受；裸 IP 自动按 `/32` 或 `/128` 处理）。临时兜底，主用法是上游 `geoip-*.srs` 拉不到时仍能命中 |
+| `ip_cidr` | 额外的 IP/CIDR 列表（IPv4/IPv6 都接受；裸 IP 自动按 `/32` 或 `/128` 处理）。Telegram MTProto 这种硬编码 IP 段的应用必须走这里 |
 
 ## PUT /api/whitelist
 
@@ -271,7 +274,7 @@ curl -s http://192.168.70.92:18080/healthz
 {
   "mode": "whitelist",
   "geosites": ["geosite-google", "geosite-anthropic"],
-  "geoips": ["geoip-telegram"],
+  "geoips": [],
   "domain_suffix": ["claude.ai", "openai.com"],
   "ip_cidr": ["149.154.0.0/16", "91.108.0.0/16"]
 }
@@ -280,11 +283,17 @@ curl -s http://192.168.70.92:18080/healthz
 校验：
 
 - `mode` 缺省 = 不动当前；显式只接受 `overseas` / `whitelist`。
-- `geosites` 必须 ⊆ `/api/rule-sets` 的 `geosites`，否则 400。每条要 `geosite-` 前缀。
-- `geoips` 必须 ⊆ `/api/rule-sets` 的 `geoips`，否则 400。每条要 `geoip-` 前缀。
+- `geosites` 必须 ⊆ `/api/rule-sets` 的 `geosites.catalog[].name`，否则 400 `unknown rule-set "..."（not in catalog)`。每条要 `geosite-` 前缀。
+- `geoips` 必须 ⊆ `/api/rule-sets` 的 `geoips.catalog[].name`，否则 400。每条要 `geoip-` 前缀。
 - `domain_suffix` 每条必须是裸域名（含 `.`、不含 `://` `/` `空白`、首尾无 `.`）。
 - `ip_cidr` 每条必须是合法 CIDR 或裸 IP（裸 IP 落盘前归一化成 `/32` 或 `/128`）。
 - 重复项自动去重，空字符串忽略。
+
+**按需拉取** —— catalog 校验通过后，对每个 tag 检查 `/etc/leap/singbox/rule-sets/<tag>.srs`
+是否存在；不存在的就经 sing-box 内部 HTTP 代理（`127.0.0.1:11080`，自动经机场出网）
+从 `raw.githubusercontent.com/SagerNet/sing-{geosite,geoip}/rule-set/<tag>.srs` 拉一份
+落盘。任一 tag 拉取失败返回 502 + 失败 tag 名 + 上游错误，cfg 与磁盘均未变（写到 .tmp
+的部分文件会清掉）。同一 tag 并发 PUT 只触发一次 HTTP 请求（per-name lock + 双检）。
 
 成功后立即 `systemctl restart leap-singbox`（5–10s 海外业务中断），返回 200 + 新状态（同 GET 结构）。
 
@@ -311,7 +320,7 @@ curl -s -H "$H" 127.0.0.1:18080/api/whitelist \
 把当前白名单里所有规则解析成扁平的具体值——`domains[]` (geosites + domain_suffix
 展开后去重) 和 `ip_cidrs[]` (geoips + ip_cidr 展开后去重)。专门给飞连 SaaS 控制端的
 "极速模式"用：飞连终端只接受具体域名 + IP 段清单，不认 `geosite-google` /
-`geoip-telegram` 这种 tag，所以要把 rule-set 展开喂回去。
+`geoip-jp` 这种 tag，所以要把 rule-set 展开喂回去。
 
 数据源：
 - `domains`：`v2fly/domain-list-community`（这是 `sagernet/sing-geosite` 的上游），
@@ -324,7 +333,7 @@ curl -s -H "$H" 127.0.0.1:18080/api/whitelist \
 {
   "input": {
     "geosites": ["geosite-google", "geosite-openai", "geosite-github"],
-    "geoips": ["geoip-telegram"],
+    "geoips": [],
     "domain_suffix": ["claude.ai", "anthropic.com"],
     "ip_cidr": ["149.154.0.0/16", "91.108.0.0/16"]
   },
@@ -380,38 +389,77 @@ curl -s http://127.0.0.1:18080/api/whitelist/resolved | jq '.domains_count, .ip_
 
 ## GET /api/rule-sets
 
+返回 leap-gateway 内嵌的 rule-set catalog（geosite + geoip 两组），每项含上游 URL、
+分类、本地是否已下载（`installed`）、当前是否在白名单里启用（`selected`）。配套返回
+`domain_suffix` / `ip_cidr` 的提示案例供 UI 预填表单。
+
 ```json
 {
   "geosites": {
-    "available": ["geosite-anthropic", "geosite-discord", "geosite-google", "..."],
-    "active":    ["geosite-google", "geosite-openai"]
+    "catalog": [
+      {"name":"geosite-google","url":"https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-google.srs","category":"tech","installed":true,"selected":true},
+      {"name":"geosite-anthropic","url":"https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-anthropic.srs","category":"tech","installed":true,"selected":false},
+      {"name":"geosite-icloud","url":"https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-icloud.srs","category":"productivity","installed":false,"selected":false}
+    ],
+    "domain_suffix_examples": ["anthropic.com","claude.ai","cursor.com","figma.com","quora.com"]
   },
   "geoips": {
-    "available": ["geoip-telegram"],
-    "active":    ["geoip-telegram"]
+    "catalog": [
+      {"name":"geoip-us","url":"https://raw.githubusercontent.com/SagerNet/sing-geoip/rule-set/geoip-us.srs","category":"country","installed":false,"selected":false},
+      {"name":"geoip-jp","url":"https://raw.githubusercontent.com/SagerNet/sing-geoip/rule-set/geoip-jp.srs","category":"country","installed":false,"selected":false}
+    ],
+    "ip_cidr_examples": ["149.154.0.0/16","91.108.0.0/16"]
   }
 }
 ```
 
 | 字段 | 说明 |
 |---|---|
-| `geosites.available` | 节点上 `/etc/leap/singbox/rule-sets/geosite-*.srs` 实际存在的 tag（去掉 `.srs` 后缀，**排除 `geosite-cn`**——它由路由内置使用） |
-| `geosites.active` | 当前 yaml `whitelist.geosites` 启用的子集 |
-| `geoips.available` | 节点上 `geoip-*.srs` 存在的 tag（**排除 `geoip-cn`**） |
-| `geoips.active` | 当前 yaml `whitelist.geoips` 启用的子集 |
+| `geosites.catalog[].name` | 上游 sagernet/sing-geosite 仓库 rule-set 分支里 `<name>.srs` 的 tag 名 |
+| `geosites.catalog[].url` | 该 .srs 的上游 URL（leap-gateway 经内部 HTTP 代理走机场拉，CN 内可达）|
+| `geosites.catalog[].category` | 分组：`tech` / `social` / `streaming` / `reference` / `productivity` |
+| `geosites.catalog[].installed` | `/etc/leap/singbox/rule-sets/<name>.srs` 是否已经在本地 |
+| `geosites.catalog[].selected` | 该 tag 是否在 `whitelist.geosites` 里 |
+| `geosites.domain_suffix_examples` | UI 预填 `whitelist.domain_suffix` 的示例值（不影响实际配置）|
+| `geoips.*` | 同上，对应 sing-geoip。catalog 里只收录了 ISO 国家码（geoip-us / geoip-jp / ...），上游本来就没有 `geoip-telegram` `geoip-google` 这种分类标签 |
+| `geoips.ip_cidr_examples` | UI 预填 `whitelist.ip_cidr` 的示例值（默认是 Telegram MTProto 的 DC 段）|
 
-PUT `/api/whitelist` 时 geosites/geoips 必须从对应的 `available` 挑。
+**catalog 的来源**：内嵌进 leap-gateway 二进制（`go:embed catalog.json`）。增删条目走代码 PR + 重新部署，不能在线改。
+
+**`geosite-cn` / `geoip-cn` 不在 catalog 里**：它们是路由 infra（命中 cn 直连），由
+`gateway.yaml` 的 `singbox.route.geosite_url` / `geoip_url` 显式指定 URL，安装时由
+`scripts/stage.sh` 预下到 `/etc/leap/singbox/rule-sets/`，不暴露给业务白名单选择。
+
+PUT `/api/whitelist` 时 geosites/geoips 必须从 catalog 里挑；本地没有的会自动按需下载（见 PUT `/api/whitelist`）。
+
+```bash
+# 看完整 catalog 数量 + examples
+curl -s http://192.168.70.92:18080/api/rule-sets \
+  | jq '{
+      geosite_count: (.geosites.catalog | length),
+      geoip_count:   (.geoips.catalog   | length),
+      installed_geosites: [.geosites.catalog[] | select(.installed) | .name],
+      not_installed:      [.geosites.catalog[] | select(.installed | not) | .name],
+      domain_examples: .geosites.domain_suffix_examples,
+      ip_examples:     .geoips.ip_cidr_examples
+    }'
+
+# 拉所有"tech"分类的 tag
+curl -s http://192.168.70.92:18080/api/rule-sets \
+  | jq '.geosites.catalog | map(select(.category=="tech")) | map(.name)'
+```
 
 ## GET /api/geosites（兼容别名）
 
 ```json
 {
-  "available": ["geosite-anthropic", "geosite-discord", "geosite-google", "..."],
-  "active":    ["geosite-google", "geosite-openai"]
+  "available": ["geosite-anthropic","geosite-discord","geosite-google","..."],
+  "active":    ["geosite-google","geosite-openai"]
 }
 ```
 
-只返回 geosite 部分，结构与旧版一致。新代码请用 `/api/rule-sets`。
+只返回 geosite 部分的 `{available, active}` —— `available` 是节点上 `geosite-*.srs` 实际
+存在的 tag（不是 catalog 全集），结构与旧版一致。新代码请用 `/api/rule-sets`。
 
 ---
 
@@ -505,6 +553,47 @@ curl -s -X POST -H "$H" 127.0.0.1:18080/api/subscribe/refresh
 
 ---
 
+## GET /api/subscribe/refresh-interval
+## PUT /api/subscribe/refresh-interval
+
+读 / 改周期刷新的间隔（秒为单位），写盘并实时切换运行时调度器，不需要重启 leap-gateway。
+
+```bash
+curl -s http://192.168.70.92:18080/api/subscribe/refresh-interval
+# {"seconds":1800}
+
+# 改成 5 分钟
+curl -s -X PUT -H 'Content-Type: application/json' \
+  -d '{"seconds":300}' http://192.168.70.92:18080/api/subscribe/refresh-interval
+# {"seconds":300}
+
+# 关掉周期刷新，只接受手动 POST /api/subscribe/refresh
+curl -s -X PUT -H 'Content-Type: application/json' \
+  -d '{"seconds":0}' http://192.168.70.92:18080/api/subscribe/refresh-interval
+# {"seconds":0}
+```
+
+PUT body：
+
+```json
+{"seconds": 60}
+```
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| `seconds` | int64 ≥ 0，必填 | 周期刷新间隔的秒数。`0` ⇒ 关闭周期刷新，仅 `POST /api/subscribe/refresh` 手动触发 |
+
+校验：
+
+- `seconds` 缺失 / 非整数 → 400；
+- `seconds < 0` → 400 `seconds must be >= 0`；
+- 持久化写回 `gateway.yaml` 的 `subscribe.refresh_interval`，重启后保持。
+
+PUT 后**不会**顺手触发一次刷新（避免大量改动密集打上游）。需要立即生效就再调一次
+`POST /api/subscribe/refresh`。
+
+---
+
 ## 主备节点切换语义（watchdog v2 行为）
 
 当 enabled 订阅 ≥ 2 时，渲染器把节点按 `<sub_name>/` 前缀拆成：
@@ -547,11 +636,16 @@ curl -s -H "$H" 127.0.0.1:18080/api/whitelist | python3 -m json.tool
 # 展开后的扁平域名 + IP 段列表（飞连"极速模式"用）
 curl -s -H "$H" 127.0.0.1:18080/api/whitelist/resolved | python3 -m json.tool
 
-# 本地 .srs 可选清单（geosites + geoips 一起拉）
+# Catalog 全集 + 每项 installed/selected + 提示案例（geosite + geoip 一起拉）
 curl -s -H "$H" 127.0.0.1:18080/api/rule-sets | python3 -m json.tool
 
 # 立即刷新订阅
 curl -s -X POST -H "$H" 127.0.0.1:18080/api/subscribe/refresh
+
+# 看 / 改周期刷新间隔
+curl -s -H "$H" 127.0.0.1:18080/api/subscribe/refresh-interval
+curl -s -H "$H" -H "Content-Type: application/json" -X PUT \
+     127.0.0.1:18080/api/subscribe/refresh-interval -d '{"seconds":600}'
 ```
 
 ## 外部平台调用范例（PoC 当前无 token）
