@@ -63,6 +63,7 @@ chain input {
 | GET | `/api/status` | 无 | 订阅 / 节点数 / sing-box 健康 |
 | GET | `/api/nodes` | 无 | 当前所有出站节点（扁平化） |
 | GET | `/api/proxies/active` | 无 | 节点全景：node + feilian + leap services + 当前机场 + watchdog |
+| POST | `/api/proxies/select` | clash-api PUT `/proxies/out` | 手动切换 `out` selector（urltest-primary / urltest-backup / direct）；非 sticky，watchdog 仍在跑 |
 | GET | `/api/whitelist` | 无 | 白名单（mode + geosites + geoips + domain_suffix + ip_cidr） |
 | PUT | `/api/whitelist` | 写 yaml + 必要时拉缺失 .srs + 重启 sing-box + 异步重建展开缓存 | 整体替换白名单；catalog 里的 tag 被选中时按需下载 |
 | GET | `/api/whitelist/resolved` | 无（首次冷启动会同步拉一次） | rule-set tag → 扁平 `domains[]` + `ip_cidrs[]`。飞连"极速模式"用 |
@@ -241,6 +242,61 @@ curl -s http://192.168.70.92:18080/healthz
 | `skipped_due_traffic` | 因为有真实用户流量经过 `out` 而跳过的合成探测累计次数 |
 | `primary_recovery_streak` | 在备用池时，主池连续健康探测计数 |
 | `primary_recovery_threshold` | 需要多少次连续健康才切回主 |
+
+---
+
+## POST /api/proxies/select
+
+手动把 `out` selector 切到指定池。运维场景：watchdog 自动判定还没触发但运维已经知道
+该切了；或者临时 bypass 整条机场链路（`direct`）做对照测试。
+
+请求：
+
+```json
+{"selector": "urltest-backup"}
+```
+
+合法 `selector`：
+
+| 值 | 含义 |
+|---|---|
+| `urltest-primary` | 第一条 enabled 订阅的节点池（默认 / 主池） |
+| `urltest-backup`  | 其余 enabled 订阅合成的节点池（仅在配 ≥ 2 条订阅时存在） |
+| `direct`          | bypass 机场，海外流量直连 |
+
+校验：
+
+- body 缺 `selector` 或值不在上面三选一里 → 400；
+- 选 `urltest-backup` 但当前部署只有 1 条订阅（没渲染备池）→ 404 `selector "urltest-backup" not registered on sing-box`；
+- clash-api 出错 → 500。
+
+成功返回 200 + 同 `GET /api/proxies/active` 的全量结构（看切换后的实际状态）。
+
+**手动 override 不是 sticky** —— watchdog 一直在后台跑：
+
+| 手动切到 | 机场实际状态 | watchdog 后续行为 |
+|---|---|---|
+| `urltest-backup` | primary 健康 | `runPrimaryRecovery` 探测主池，连续 `primary_recovery_threshold`（默认 3）次成功后 ~30m × 3 ≈ 1.5h 自动切回 primary |
+| `urltest-backup` | primary 真坏 | 维持在 backup，跟自动切换结果一致 |
+| `urltest-primary` | primary 真坏 | 探测连续 `fail_threshold`（默认 3）次失败 → 自动切回 backup |
+| `direct` | —— | 走直连，没有 watchdog 干预（`out` 不在 urltest-* 里）；什么时候切回去也得人工 |
+
+```bash
+# 立即切到备池
+curl -sX POST -H 'Content-Type: application/json' \
+  -d '{"selector":"urltest-backup"}' \
+  http://192.168.70.92:18080/api/proxies/select
+
+# 临时 bypass 机场
+curl -sX POST -H 'Content-Type: application/json' \
+  -d '{"selector":"direct"}' \
+  http://192.168.70.92:18080/api/proxies/select
+
+# 立即切回主池（watchdog 也会自己切，但这条更快）
+curl -sX POST -H 'Content-Type: application/json' \
+  -d '{"selector":"urltest-primary"}' \
+  http://192.168.70.92:18080/api/proxies/select
+```
 
 ---
 

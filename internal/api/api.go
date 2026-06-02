@@ -48,6 +48,7 @@ func NewServer(deps Deps) *Server {
 	mux.HandleFunc("PUT /api/subscribe/refresh-interval", s.auth(s.handleRefreshIntervalPut))
 
 	mux.HandleFunc("GET /api/proxies/active", s.auth(s.handleProxiesActive))
+	mux.HandleFunc("POST /api/proxies/select", s.auth(s.handleProxiesSelect))
 
 	mux.HandleFunc("GET /api/whitelist", s.auth(s.handleWhitelistGet))
 	mux.HandleFunc("PUT /api/whitelist", s.auth(s.handleWhitelistPut))

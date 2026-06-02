@@ -1,10 +1,12 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -181,4 +183,81 @@ func getJSON(ctx context.Context, client *http.Client, api config.ClashAPIConfig
 type historyEntry struct {
 	Time  string `json:"time"`
 	Delay int    `json:"delay"`
+}
+
+// proxiesSelectDTO is the body of POST /api/proxies/select.
+type proxiesSelectDTO struct {
+	Selector string `json:"selector"`
+}
+
+// validSelectors is the closed set of names POST /api/proxies/select accepts —
+// matches what the renderer puts into the "out" selector's outbounds list
+// (see internal/singbox/renderer.go:302). "direct" lets operators bypass the
+// airport entirely as an emergency override.
+var validSelectors = map[string]bool{
+	"urltest-primary": true,
+	"urltest-backup":  true,
+	"direct":          true,
+}
+
+// handleProxiesSelect manually flips the "out" selector to the requested pool.
+// Useful as an operator override when the watchdog's automatic primary→backup
+// failover hasn't fired (or shouldn't) but you want to switch right now.
+//
+// The override is NOT sticky — the watchdog keeps running and may flip again:
+//   - manual → urltest-backup, primary healthy: watchdog's recovery goroutine
+//     (see watchdog.runPrimaryRecovery) eventually flips back after
+//     primary_recovery_threshold consecutive healthy probes.
+//   - manual → urltest-primary, primary failing: watchdog will flip to backup
+//     again after fail_threshold consecutive failures.
+//   - manual → direct: stays direct until either side flips it back.
+func (s *Server) handleProxiesSelect(w http.ResponseWriter, r *http.Request) {
+	var dto proxiesSelectDTO
+	if err := json.NewDecoder(r.Body).Decode(&dto); err != nil {
+		http.Error(w, "invalid json: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	dto.Selector = strings.TrimSpace(dto.Selector)
+	if !validSelectors[dto.Selector] {
+		http.Error(w, fmt.Sprintf("invalid selector %q (want urltest-primary | urltest-backup | direct)", dto.Selector), http.StatusBadRequest)
+		return
+	}
+	if err := setOutSelector(r.Context(), s.deps.Cfg.SingBox.ClashAPI, dto.Selector); err != nil {
+		// 404 from clash-api means the selector member doesn't exist on this
+		// node (most common: urltest-backup with only one subscription).
+		if strings.Contains(err.Error(), "status 404") {
+			http.Error(w, fmt.Sprintf("selector %q not registered on sing-box (single-subscription deploys have no urltest-backup)", dto.Selector), http.StatusNotFound)
+			return
+		}
+		http.Error(w, "clash-api: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	// Echo the fresh state so the operator sees the post-switch reality.
+	s.handleProxiesActive(w, r)
+}
+
+// setOutSelector PUTs to clash-api /proxies/out to pin the "out" selector
+// at the named member. Mirrors watchdog.setSelector but lives here so the
+// API package doesn't need to depend on the watchdog package's internals.
+func setOutSelector(ctx context.Context, api config.ClashAPIConfig, member string) error {
+	body, _ := json.Marshal(map[string]string{"name": member})
+	u := "http://" + api.ExternalController + "/proxies/" + url.PathEscape("out")
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, u, bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if api.Secret != "" {
+		req.Header.Set("Authorization", "Bearer "+api.Secret)
+	}
+	client := &http.Client{Timeout: 5 * time.Second}
+	res, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer res.Body.Close()
+	if res.StatusCode/100 != 2 {
+		return fmt.Errorf("PUT /proxies/out: status %d", res.StatusCode)
+	}
+	return nil
 }
