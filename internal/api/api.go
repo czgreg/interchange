@@ -33,13 +33,14 @@ type Deps struct {
 }
 
 type Server struct {
-	deps Deps
-	srv  *http.Server
+	deps    Deps
+	srv     *http.Server
+	egress  *egressCache
 }
 
 func NewServer(deps Deps) *Server {
 	mux := http.NewServeMux()
-	s := &Server{deps: deps}
+	s := &Server{deps: deps, egress: newEgressCache()}
 	mux.HandleFunc("GET /healthz", s.handleHealth)
 	mux.HandleFunc("GET /api/status", s.auth(s.handleStatus))
 	mux.HandleFunc("GET /api/nodes", s.auth(s.handleNodes))

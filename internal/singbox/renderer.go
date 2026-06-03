@@ -24,6 +24,23 @@ const LeapInternalProxyPort = 11080
 // — passed to rulesets.New as the proxy URL.
 const LeapInternalProxyURL = "http://127.0.0.1:11080"
 
+// LeapInternalBackupProxyPort is the port of a second loopback-only HTTP
+// inbound emitted only when the rendered config has both urltest-primary
+// and urltest-backup pools (≥2 enabled subscriptions). A route rule pins
+// traffic from this inbound directly to urltest-backup, bypassing the
+// `out` selector — used by the egress probe in /api/proxies/active so the
+// backup pool's egress IP can be sampled without flipping `out`.
+const LeapInternalBackupProxyPort = 11081
+
+// LeapInternalBackupProxyURL is the full http:// URL form for the backup-
+// pinned probe inbound. Only valid when a backup pool is rendered.
+const LeapInternalBackupProxyURL = "http://127.0.0.1:11081"
+
+// LeapInternalBackupInboundTag is the route-table identifier for the backup-
+// pinned proxy inbound. Used both by the renderer (inbound tag) and the
+// route rule that pins it to urltest-backup.
+const LeapInternalBackupInboundTag = "leap-internal-http-backup-in"
+
 // Renderer turns a list of subscription outbounds + node config into a
 // complete sing-box config.json. The output is suitable for `sing-box check`
 // and for direct `sing-box run` after the node-side ip rule + nft injection.
@@ -237,6 +254,19 @@ func (r *Renderer) buildInbounds() []map[string]any {
 		"listen_port": LeapInternalProxyPort,
 	})
 
+	// Backup-pinned probe inbound — only when a backup pool is rendered.
+	// The egress probe in /api/proxies/active dials through this to sample
+	// urltest-backup's exit IP without flipping the `out` selector. A
+	// matching route rule (see buildRoute) pins it to urltest-backup.
+	if _, hasBackup := r.primarySubscription(); hasBackup {
+		inbounds = append(inbounds, map[string]any{
+			"type":        "http",
+			"tag":         LeapInternalBackupInboundTag,
+			"listen":      "127.0.0.1",
+			"listen_port": LeapInternalBackupProxyPort,
+		})
+	}
+
 	// Ad-hoc socks/http inbounds — kept for cmd/selftest and for poking the
 	// gateway from the node itself when debugging.
 	if r.cfg.SOCKSListen != "" {
@@ -443,9 +473,25 @@ func (r *Renderer) buildRoute() map[string]any {
 
 	rules := []map[string]any{
 		{"protocol": "dns", "outbound": "dns-out"},
-		{"ip_is_private": true, "outbound": "direct"},
-		{"rule_set": []string{"geosite-cn", "geoip-cn"}, "outbound": "direct"},
 	}
+
+	// Backup-pinned probe inbound bypasses CN/private/WL classification
+	// entirely — its only purpose is to sample urltest-backup's egress IP,
+	// so we want the request to actually transit the airport regardless of
+	// destination (typically ipinfo.io / 1.1.1.1, both non-CN, but we don't
+	// want a quirky route table to leak this through `direct` and confuse
+	// the operator). Rule has to come BEFORE the private/CN block.
+	if _, hasBackup := r.primarySubscription(); hasBackup {
+		rules = append(rules, map[string]any{
+			"inbound":  []string{LeapInternalBackupInboundTag},
+			"outbound": "urltest-backup",
+		})
+	}
+
+	rules = append(rules,
+		map[string]any{"ip_is_private": true, "outbound": "direct"},
+		map[string]any{"rule_set": []string{"geosite-cn", "geoip-cn"}, "outbound": "direct"},
+	)
 
 	final := "out"
 	if r.cfg.Route.Mode == "whitelist" {

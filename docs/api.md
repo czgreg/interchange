@@ -191,8 +191,44 @@ curl -s http://192.168.70.92:18080/healthz
     "reachable": true,
     "active_urltest": "urltest-primary",
     "pools": [
-      {"tag": "urltest-primary", "now": "yuyun/🇸🇬 新加坡01 境外中转", "pool_size": 18, "active": true},
-      {"tag": "urltest-backup",  "now": "backup/HK01",                "pool_size": 6,  "active": false}
+      {
+        "tag": "urltest-primary",
+        "now": "yuyun/🇸🇬 新加坡01 境外中转",
+        "pool_size": 18,
+        "active": true,
+        "egress": {
+          "ip": "104.21.x.x",
+          "country": "SG",
+          "region": "Singapore",
+          "city": "Singapore",
+          "org": "AS13335 Cloudflare, Inc.",
+          "checked_at": "2026-05-28T03:55:00Z",
+          "via_node": "yuyun/🇸🇬 新加坡01 境外中转",
+          "stale": false
+        },
+        "nodes": [
+          {"tag": "yuyun/🇸🇬 新加坡01 境外中转", "delay_ms": 154, "last_check": "2026-05-28T03:54:52Z"},
+          {"tag": "yuyun/🇸🇬 新加坡02 境外中转", "delay_ms": 178, "last_check": "2026-05-28T03:54:52Z"},
+          {"tag": "yuyun/🇺🇸 美国01",            "delay_ms": 280, "last_check": "2026-05-28T03:54:52Z"}
+        ]
+      },
+      {
+        "tag": "urltest-backup",
+        "now": "backup/HK01",
+        "pool_size": 6,
+        "active": false,
+        "egress": {
+          "ip": "203.0.x.x",
+          "country": "HK",
+          "checked_at": "2026-05-28T03:54:30Z",
+          "via_node": "backup/HK01",
+          "stale": false
+        },
+        "nodes": [
+          {"tag": "backup/HK01", "delay_ms": 88,  "last_check": "2026-05-28T03:54:50Z"},
+          {"tag": "backup/HK02", "delay_ms": 102, "last_check": "2026-05-28T03:54:50Z"}
+        ]
+      }
     ]
   },
   "watchdog": {
@@ -214,17 +250,52 @@ curl -s http://192.168.70.92:18080/healthz
 
 `active_proxy`：
 
+> **顶层字段**（`now` / `delay_ms` / `last_check` / `pool_size` / `history_len`）镜像当前 active 池里**当前选中的那条节点**的最近一次延迟测速。完整的池/节点信息在 `pools[]` 里，下面分开说明。
+
 | 字段 | 说明 |
 |---|---|
-| `now` | 当前正在路由海外流量的airport节点 tag |
-| `delay_ms` | 最近一次延迟测速（来自 sing-box 的 history） |
+| `now` | 当前正在路由海外流量的 airport 节点 tag（= `pools[active].now`）|
+| `delay_ms` | active 池中当前选中节点的最近一次延迟测速 |
 | `last_check` | 该测速的时间戳 |
-| `pool_size` | 当前活跃 urltest 池里的节点数（可被 NodePattern 过滤） |
+| `pool_size` | active 池中节点数（可被 NodePattern 过滤）|
 | `pool_filter` | `singbox.urltest.node_pattern` 正则 |
 | `history_len` | sing-box 保留的延迟历史长度 |
 | `reachable` | clash-api 是否可达（false 时其它字段是空) |
-| `active_urltest` | `out` 选择器当前指向哪个池：`urltest-primary` 或 `urltest-backup`（或 `direct`） |
-| `pools[]` | 每个 urltest-* 池的概要：tag / 当前选中节点 / 池大小 / 是否激活 |
+| `active_urltest` | `out` 选择器当前指向哪个池：`urltest-primary` / `urltest-backup` / `direct` |
+| `pools[]` | 每个 urltest-* 池的完整信息：见下方 |
+
+`pools[]` 每条：
+
+| 字段 | 说明 |
+|---|---|
+| `tag` | `urltest-primary` 或 `urltest-backup` |
+| `now` | 该池当前选中的节点 tag |
+| `pool_size` | 该池节点数 |
+| `active` | `out` selector 是否指向这个池 |
+| `nodes[]` | 池内每条节点的最近一次延迟测速 —— 见下方 |
+| `egress` | 该池的真实出网信息（IP + 地理）—— 见下方 |
+
+`pools[].nodes[]` 每条：
+
+| 字段 | 说明 |
+|---|---|
+| `tag` | 节点 tag |
+| `delay_ms` | 该节点最近一次 urltest 测速结果（毫秒）；`0` 表示尚无测量 |
+| `last_check` | 该测速的时间戳；空表示尚无测量 |
+
+`pools[].egress`：通过该池的 pinned loopback HTTP 入口拨到 IP echo 服务（默认 `ipinfo.io`，失败回退 `1.1.1.1/cdn-cgi/trace`）拿到的真实出网信息。**懒探测**：每池 60s 缓存，第一次 GET 会异步触发探测、当次返回 `null`；之后的 GET 直接读缓存，缓存到期才再探。
+
+| 字段 | 说明 |
+|---|---|
+| `ip` | 公网 egress IP |
+| `country` / `region` / `city` / `org` | ipinfo.io 返回的地理信息（cf-trace fallback 时只有 `country`）|
+| `checked_at` | 探测完成时间 |
+| `via_node` | 探测瞬间 `pools[].now` 是哪个节点；用来判 stale |
+| `stale` | `true` 表示当前 `pools[].now` 跟 `via_node` 不一致（urltest 已经选了新节点，但缓存还是旧 IP），或者最近一次刷新失败、保留的旧值 |
+
+> **运维用途**：验证 `node_pattern: 美国` 选出来的真的在 US 出口（看 `pools[primary].egress.country == "US"`）；切到 backup 后看 backup 池实际走哪个国家；操作员手动 `select direct` 时 egress 对应节点本身 NAT 后公网 IP（用于"我现在 bypass 了机场"对照）。
+> 
+> **池的 pinned 入口**：`urltest-primary` 走 `127.0.0.1:11080`（一直存在，rule-set 下载也走它）；`urltest-backup` 走 `127.0.0.1:11081`（仅当订阅 ≥ 2 条、备池被渲染时才存在）。这两个 inbound 都是 loopback only，不对外暴露。
 
 `watchdog`：
 

@@ -12,6 +12,7 @@ import (
 
 	"github.com/leap-gateway/leap-gateway/internal/config"
 	"github.com/leap-gateway/leap-gateway/internal/nodeinfo"
+	"github.com/leap-gateway/leap-gateway/internal/singbox"
 	"github.com/leap-gateway/leap-gateway/internal/watchdog"
 )
 
@@ -36,22 +37,38 @@ type leapDTO struct {
 }
 
 type activeProxyDTO struct {
-	Now           string         `json:"now"`             // currently-selected airport node tag
-	DelayMs       int            `json:"delay_ms"`
-	LastCheck     string         `json:"last_check,omitempty"`
-	PoolSize      int            `json:"pool_size"`       // size of the active urltest pool (primary or backup)
-	PoolFilter    string         `json:"pool_filter,omitempty"`
-	HistoryLen    int            `json:"history_len"`
-	Reachable     bool           `json:"reachable"`        // whether clash-api responded
-	ActiveURLTest string         `json:"active_urltest"`   // urltest-primary or urltest-backup
-	Pools         []poolStatusDTO `json:"pools,omitempty"` // visibility into each urltest pool
+	Now           string          `json:"now"`            // currently-selected airport node tag (mirrors active pool's `now`)
+	DelayMs       int             `json:"delay_ms"`       // mirrors active pool's selected node's last delay
+	LastCheck     string          `json:"last_check,omitempty"`
+	PoolSize      int             `json:"pool_size"` // size of the active urltest pool (primary or backup)
+	PoolFilter    string          `json:"pool_filter,omitempty"`
+	HistoryLen    int             `json:"history_len"`
+	Reachable     bool            `json:"reachable"`      // whether clash-api responded
+	ActiveURLTest string          `json:"active_urltest"` // urltest-primary or urltest-backup
+	Pools         []poolStatusDTO `json:"pools,omitempty"`
 }
 
 type poolStatusDTO struct {
-	Tag      string `json:"tag"`       // urltest-primary | urltest-backup
-	Now      string `json:"now"`       // its currently-selected member
-	PoolSize int    `json:"pool_size"`
-	Active   bool   `json:"active"`    // whether "out" selector points at this pool
+	Tag      string          `json:"tag"`       // urltest-primary | urltest-backup
+	Now      string          `json:"now"`       // its currently-selected member
+	PoolSize int             `json:"pool_size"`
+	Active   bool            `json:"active"` // whether "out" selector points at this pool
+	// Egress is the IP+geo seen by the public internet when traffic exits via
+	// this pool's currently-selected member. Sampled lazily through a
+	// pool-pinned HTTP inbound (see internal/singbox/renderer.go's
+	// LeapInternalProxyURL / LeapInternalBackupProxyURL); cached 60s. nil =
+	// no probe has succeeded yet (cold start, or upstream unreachable).
+	Egress *egressInfo `json:"egress,omitempty"`
+	// Nodes is per-member latency from clash-api's last urltest measurement.
+	// One entry per `all` member of the urltest. Empty list = clash-api
+	// unreachable or pool freshly rendered, no measurements yet.
+	Nodes []nodeStatusDTO `json:"nodes,omitempty"`
+}
+
+type nodeStatusDTO struct {
+	Tag       string `json:"tag"`
+	DelayMs   int    `json:"delay_ms"`              // 0 if no measurement available
+	LastCheck string `json:"last_check,omitempty"` // RFC3339 timestamp from clash-api
 }
 
 func (s *Server) handleProxiesActive(w http.ResponseWriter, r *http.Request) {
@@ -96,59 +113,81 @@ func (s *Server) handleProxiesActive(w http.ResponseWriter, r *http.Request) {
 
 // queryActiveProxy walks clash-api selector → urltest → leaf node:
 //
-//  1. GET /proxies/out — which urltest member is currently in use
-//     (urltest-primary, urltest-backup, or "direct")
-//  2. GET /proxies/<that-urltest> — which airport node it's picked
+//  1. GET /proxies — bulk dump of every proxy + its history (1 round-trip)
+//  2. From it: pluck the "out" selector's `now` field (primary | backup | direct)
+//  3. For each urltest-* member, list its `all` and per-node latency from
+//     each member's history
+//  4. Per pool: kick the lazy egress probe through that pool's pinned
+//     loopback HTTP inbound (urltest-primary → 11080, urltest-backup → 11081)
 //
-// Also lists every urltest-* it can find so the operator can see backup pool
-// state. Returns Reachable=false on any error so the rest of the response is
-// still useful.
+// Returns Reachable=false on any clash-api error so the rest of the response
+// is still useful.
 func (s *Server) queryActiveProxy(ctx context.Context) activeProxyDTO {
 	api := s.deps.Cfg.SingBox.ClashAPI
 	pf := s.deps.Cfg.SingBox.URLTest.NodePattern
 
 	client := &http.Client{Timeout: 2 * time.Second}
 
-	// Step 1: read selector "out".
-	var selector struct {
-		Now string   `json:"now"`
-		All []string `json:"all"`
+	var bulk struct {
+		Proxies map[string]struct {
+			Type    string         `json:"type"`
+			Now     string         `json:"now"`
+			All     []string       `json:"all"`
+			History []historyEntry `json:"history"`
+		} `json:"proxies"`
 	}
-	if err := getJSON(ctx, client, api, "/proxies/out", &selector); err != nil {
+	if err := getJSON(ctx, client, api, "/proxies", &bulk); err != nil {
+		return activeProxyDTO{PoolFilter: pf}
+	}
+
+	out, ok := bulk.Proxies["out"]
+	if !ok {
 		return activeProxyDTO{PoolFilter: pf}
 	}
 	dto := activeProxyDTO{
 		PoolFilter:    pf,
 		Reachable:     true,
-		ActiveURLTest: selector.Now,
+		ActiveURLTest: out.Now,
 	}
 
-	// Step 2: enumerate every urltest-* member of the selector and probe each.
-	for _, name := range selector.All {
+	for _, name := range out.All {
 		if !strings.HasPrefix(name, "urltest") {
 			continue
 		}
-		var ut struct {
-			Now     string         `json:"now"`
-			All     []string       `json:"all"`
-			History []historyEntry `json:"history"`
-		}
-		if err := getJSON(ctx, client, api, "/proxies/"+name, &ut); err != nil {
+		pool, ok := bulk.Proxies[name]
+		if !ok {
 			continue
 		}
 		ps := poolStatusDTO{
 			Tag:      name,
-			Now:      ut.Now,
-			PoolSize: len(ut.All),
-			Active:   name == selector.Now,
+			Now:      pool.Now,
+			PoolSize: len(pool.All),
+			Active:   name == out.Now,
+		}
+		// Per-member delay from each node's own history.
+		ps.Nodes = make([]nodeStatusDTO, 0, len(pool.All))
+		for _, member := range pool.All {
+			n := nodeStatusDTO{Tag: member}
+			if mp, ok := bulk.Proxies[member]; ok && len(mp.History) > 0 {
+				h := mp.History[len(mp.History)-1]
+				n.DelayMs = h.Delay
+				n.LastCheck = h.Time
+			}
+			ps.Nodes = append(ps.Nodes, n)
+		}
+		// Egress probe — per-pool pinned proxy URL. Skip if no URL is wired
+		// for this pool tag (defensive; only urltest-primary / urltest-backup
+		// have inbounds today).
+		if proxyURL := proxyURLForPool(name); proxyURL != "" {
+			ps.Egress = s.egress.GetOrRefresh(name, proxyURL, pool.Now)
 		}
 		dto.Pools = append(dto.Pools, ps)
 		if ps.Active {
-			dto.Now = ut.Now
-			dto.PoolSize = len(ut.All)
-			dto.HistoryLen = len(ut.History)
-			if n := len(ut.History); n > 0 {
-				last := ut.History[n-1]
+			dto.Now = pool.Now
+			dto.PoolSize = len(pool.All)
+			dto.HistoryLen = len(pool.History)
+			if n := len(pool.History); n > 0 {
+				last := pool.History[n-1]
 				dto.DelayMs = last.Delay
 				dto.LastCheck = last.Time
 			}
@@ -158,6 +197,20 @@ func (s *Server) queryActiveProxy(ctx context.Context) activeProxyDTO {
 	// Edge case: selector points at "direct" or something not starting with
 	// urltest — Now stays "", PoolSize 0, but ActiveURLTest is informative.
 	return dto
+}
+
+// proxyURLForPool maps an urltest pool tag to the loopback HTTP-proxy URL
+// the renderer pinned to it. Used by queryActiveProxy to feed the egress
+// cache. Returns "" for pools that don't have a pinned inbound, in which
+// case the egress probe is skipped (the cache simply won't populate).
+func proxyURLForPool(poolTag string) string {
+	switch poolTag {
+	case "urltest-primary":
+		return singbox.LeapInternalProxyURL
+	case "urltest-backup":
+		return singbox.LeapInternalBackupProxyURL
+	}
+	return ""
 }
 
 // getJSON is a tiny helper that does the auth+timeout+decode dance once.
