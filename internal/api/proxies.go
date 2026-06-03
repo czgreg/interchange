@@ -203,10 +203,16 @@ func (s *Server) queryActiveProxy(ctx context.Context) activeProxyDTO {
 // the renderer pinned to it. Used by queryActiveProxy to feed the egress
 // cache. Returns "" for pools that don't have a pinned inbound, in which
 // case the egress probe is skipped (the cache simply won't populate).
+//
+// Note: urltest-primary uses LeapInternalPrimaryProxyURL (11082), NOT
+// LeapInternalProxyURL (11080). The latter follows the `out` selector and
+// would silently route the probe via whatever pool is currently selected
+// — defeating the whole point of "what's primary's egress" when watchdog
+// has flipped to backup.
 func proxyURLForPool(poolTag string) string {
 	switch poolTag {
 	case "urltest-primary":
-		return singbox.LeapInternalProxyURL
+		return singbox.LeapInternalPrimaryProxyURL
 	case "urltest-backup":
 		return singbox.LeapInternalBackupProxyURL
 	}

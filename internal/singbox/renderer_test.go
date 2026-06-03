@@ -72,19 +72,26 @@ func TestRendererProductionMode(t *testing.T) {
 		t.Errorf("dns.final = %v, want remote", dns["final"])
 	}
 
-	// Inbounds: tun-in + dns-in + leap-internal-http-in (always-on for
-	// rulesets fetcher). No socks-in / http-in because we didn't set them.
+	// Inbounds (single-sub case): tun + dns + leap-internal-http (rulesets
+	// fetcher) + leap-internal-http-primary (egress probe pinned to
+	// urltest-primary). No backup inbound because we have only one
+	// subscription. No socks/http because we didn't set those.
 	inbounds, _ := doc["inbounds"].([]any)
-	if len(inbounds) != 3 {
-		t.Errorf("want 3 inbounds (tun, dns, leap-internal-http), got %d", len(inbounds))
+	if len(inbounds) != 4 {
+		t.Errorf("want 4 inbounds (tun, dns, leap-internal-http, leap-internal-http-primary), got %d", len(inbounds))
 	}
 	tags := make(map[string]bool)
 	for _, ib := range inbounds {
 		m, _ := ib.(map[string]any)
 		tags[m["tag"].(string)] = true
 	}
-	if !tags["tun-in"] || !tags["dns-in"] || !tags["leap-internal-http-in"] {
-		t.Errorf("missing tun-in / dns-in / leap-internal-http-in: %v", tags)
+	for _, want := range []string{"tun-in", "dns-in", "leap-internal-http-in", "leap-internal-http-primary-in"} {
+		if !tags[want] {
+			t.Errorf("missing inbound %q: have %v", want, tags)
+		}
+	}
+	if tags["leap-internal-http-backup-in"] {
+		t.Errorf("backup inbound should not be present in single-sub case")
 	}
 
 	// Outbounds: out + urltest + n1 + n2 + direct + dns-out + block = 7.
@@ -157,10 +164,10 @@ func TestRendererLabMode(t *testing.T) {
 	_ = json.Unmarshal(data, &doc)
 
 	// Lab mode → no tun-in / dns-in, just socks + http + leap-internal-http
-	// (the renderer always emits the internal proxy inbound).
+	// + leap-internal-http-primary (the latter two are always-on).
 	inbounds, _ := doc["inbounds"].([]any)
-	if len(inbounds) != 3 {
-		t.Errorf("want 3 inbounds (socks, http, leap-internal-http) in lab mode, got %d", len(inbounds))
+	if len(inbounds) != 4 {
+		t.Errorf("want 4 inbounds (socks, http, leap-internal-http, leap-internal-http-primary) in lab mode, got %d", len(inbounds))
 	}
 	for _, ib := range inbounds {
 		m, _ := ib.(map[string]any)

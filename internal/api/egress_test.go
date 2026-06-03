@@ -208,7 +208,7 @@ func TestProxyURLForPool(t *testing.T) {
 	cases := []struct {
 		in, want string
 	}{
-		{"urltest-primary", "http://127.0.0.1:11080"},
+		{"urltest-primary", "http://127.0.0.1:11082"},
 		{"urltest-backup", "http://127.0.0.1:11081"},
 		{"direct", ""},
 		{"urltest-other", ""},

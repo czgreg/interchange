@@ -17,7 +17,9 @@ import (
 // LeapInternalProxyPort is the port of the loopback-only HTTP inbound the
 // renderer always emits for leap-gateway's own outbound use (rulesets
 // fetcher transits this so .srs downloads go through the airport instead
-// of hitting GFW-blocked raw.githubusercontent directly).
+// of hitting GFW-blocked raw.githubusercontent directly). This inbound
+// follows the `out` selector, so .srs fetches use whichever pool the
+// watchdog / operator has currently selected.
 const LeapInternalProxyPort = 11080
 
 // LeapInternalProxyURL is the full http:// URL form of LeapInternalProxyPort
@@ -40,6 +42,22 @@ const LeapInternalBackupProxyURL = "http://127.0.0.1:11081"
 // pinned proxy inbound. Used both by the renderer (inbound tag) and the
 // route rule that pins it to urltest-backup.
 const LeapInternalBackupInboundTag = "leap-internal-http-backup-in"
+
+// LeapInternalPrimaryProxyPort is a third loopback-only HTTP inbound, always
+// emitted, pinned via route rule to urltest-primary. Egress-probe-only —
+// distinct from LeapInternalProxyPort which follows `out` and would
+// transit whichever pool watchdog/operator has currently selected
+// (defeating the purpose of "what's primary's egress IP" if `out` happens
+// to be on backup).
+const LeapInternalPrimaryProxyPort = 11082
+
+// LeapInternalPrimaryProxyURL is the full http:// URL form for the primary-
+// pinned probe inbound.
+const LeapInternalPrimaryProxyURL = "http://127.0.0.1:11082"
+
+// LeapInternalPrimaryInboundTag is the route-table identifier for the
+// primary-pinned proxy inbound.
+const LeapInternalPrimaryInboundTag = "leap-internal-http-primary-in"
 
 // Renderer turns a list of subscription outbounds + node config into a
 // complete sing-box config.json. The output is suitable for `sing-box check`
@@ -252,6 +270,18 @@ func (r *Renderer) buildInbounds() []map[string]any {
 		"tag":         "leap-internal-http-in",
 		"listen":      "127.0.0.1",
 		"listen_port": LeapInternalProxyPort,
+	})
+
+	// Primary-pinned probe inbound — always emitted (urltest-primary always
+	// exists when there's at least one enabled subscription). Egress-probe-
+	// only: pinned to urltest-primary by a route rule so the probe samples
+	// primary's exit IP regardless of which pool watchdog has currently
+	// selected.
+	inbounds = append(inbounds, map[string]any{
+		"type":        "http",
+		"tag":         LeapInternalPrimaryInboundTag,
+		"listen":      "127.0.0.1",
+		"listen_port": LeapInternalPrimaryProxyPort,
 	})
 
 	// Backup-pinned probe inbound — only when a backup pool is rendered.
@@ -475,12 +505,15 @@ func (r *Renderer) buildRoute() map[string]any {
 		{"protocol": "dns", "outbound": "dns-out"},
 	}
 
-	// Backup-pinned probe inbound bypasses CN/private/WL classification
-	// entirely — its only purpose is to sample urltest-backup's egress IP,
-	// so we want the request to actually transit the airport regardless of
-	// destination (typically ipinfo.io / 1.1.1.1, both non-CN, but we don't
-	// want a quirky route table to leak this through `direct` and confuse
-	// the operator). Rule has to come BEFORE the private/CN block.
+	// Egress-probe pinned inbounds bypass CN/private/WL classification
+	// entirely — they only carry traffic to ipinfo.io / 1.1.1.1 to sample
+	// the pool's exit IP. Both rules go BEFORE the private/CN block so the
+	// probe transits the airport even if the destination matched something
+	// like "private" by some quirk.
+	rules = append(rules, map[string]any{
+		"inbound":  []string{LeapInternalPrimaryInboundTag},
+		"outbound": "urltest-primary",
+	})
 	if _, hasBackup := r.primarySubscription(); hasBackup {
 		rules = append(rules, map[string]any{
 			"inbound":  []string{LeapInternalBackupInboundTag},
