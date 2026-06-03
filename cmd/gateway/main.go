@@ -12,6 +12,7 @@ import (
 	"github.com/leap-gateway/leap-gateway/internal/api"
 	"github.com/leap-gateway/leap-gateway/internal/config"
 	"github.com/leap-gateway/leap-gateway/internal/configstore"
+	"github.com/leap-gateway/leap-gateway/internal/dnspreload"
 	"github.com/leap-gateway/leap-gateway/internal/nodeinfo"
 	"github.com/leap-gateway/leap-gateway/internal/rulesets"
 	"github.com/leap-gateway/leap-gateway/internal/singbox"
@@ -130,6 +131,16 @@ func main() {
 	go wd.Run(ctx)
 	go ni.Run(ctx)
 
+	// DNS preloader: keeps overseas-bound DNS records warm in sing-box's
+	// DNS cache so the first FeiLian client to access claude.ai (or any
+	// configured domain) doesn't pay the ~400ms cross-border DoH cold-
+	// resolve cost. Disabled when preload_domains is empty.
+	if dnsAddr := dnsListenAddr(cfg); dnsAddr != "" {
+		if pre := dnspreload.New(dnsAddr, cfg.SingBox.DNS.PreloadDomains, cfg.SingBox.DNS.PreloadInterval); pre != nil {
+			go pre.Run(ctx)
+		}
+	}
+
 	// Best-effort fetch of the two infra rule-sets (geosite-cn / geoip-cn)
 	// that route classification depends on. Their URLs come from
 	// gateway.yaml singbox.route.{geosite_url,geoip_url}, not the embedded
@@ -175,4 +186,19 @@ func waitFor(ctx context.Context, d time.Duration) {
 	case <-ctx.Done():
 	case <-t.C:
 	}
+}
+
+// dnsListenAddr returns the host:port that sing-box's DNS server is bound
+// to. Honors an explicit DNS.Listen override; otherwise falls back to
+// "<tun0_gateway_ip>:53" — the default the renderer wires up. Empty
+// return means we have no idea where DNS is listening (no Tun0GatewayIP,
+// no override) — caller should skip the preloader.
+func dnsListenAddr(cfg *config.Config) string {
+	if v := cfg.SingBox.DNS.Listen; v != "" {
+		return v
+	}
+	if ip := cfg.Node.Tun0GatewayIP; ip != "" {
+		return ip + ":53"
+	}
+	return ""
 }

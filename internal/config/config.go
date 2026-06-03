@@ -126,6 +126,16 @@ type DNSConfig struct {
 	// BootstrapResolver is an IP literal used to resolve any DoH/DoT host
 	// names without chicken-and-egg (e.g. "udp://119.29.29.29").
 	BootstrapResolver string `yaml:"bootstrap_resolver"`
+	// PreloadDomains is the list of overseas domains leap-gateway will
+	// keep warm in sing-box's DNS cache. Set this to your team's frequent
+	// destinations (claude.ai, anthropic.com, github.com, ...) so the
+	// first FeiLian client to access each one doesn't pay the ~400ms
+	// cross-border DoH latency. Empty disables preload.
+	PreloadDomains []string `yaml:"preload_domains,omitempty"`
+	// PreloadInterval is how often each preloaded domain is re-queried.
+	// Should be smaller than the typical DNS TTL so the cache stays warm.
+	// Default 5m. 0 disables preload (regardless of PreloadDomains).
+	PreloadInterval time.Duration `yaml:"preload_interval,omitempty"`
 }
 
 type RouteConfig struct {
@@ -349,6 +359,12 @@ func (c *SingBoxConfig) ApplyDefaults() {
 	}
 	if c.DNS.BootstrapResolver == "" {
 		c.DNS.BootstrapResolver = "udp://119.29.29.29"
+	}
+	if c.DNS.PreloadInterval == 0 && len(c.DNS.PreloadDomains) > 0 {
+		// Default refresh cadence: 5min. Most DoH responses come back with
+		// TTL ≥ 60s; sing-box honors that. Re-querying every 5min keeps
+		// every preloaded domain in cache without burning bandwidth.
+		c.DNS.PreloadInterval = 5 * time.Minute
 	}
 
 	// Route defaults — sagernet's official rule sets.

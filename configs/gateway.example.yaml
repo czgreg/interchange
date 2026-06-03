@@ -70,6 +70,19 @@ singbox:
       - "https://doh.pub/dns-query"
     bootstrap_resolver: "udp://119.29.29.29"
 
+    # DNS preload —— leap-gateway 周期性主动 resolve 这里列的域名，把对应
+    # A 记录灌进 sing-box DNS 缓存。第一个 FeiLian 客户端访问 claude.ai 时
+    # 不再付 ~400ms 跨境 DoH 冷查询的代价。空列表 / 0 间隔 = 关闭。
+    # 默认 interval 5m，比典型 DoH TTL 短，能稳定保温。
+    preload_domains: []
+      # - claude.ai
+      # - anthropic.com
+      # - openai.com
+      # - chatgpt.com
+      # - github.com
+      # - cursor.com
+    # preload_interval: 5m
+
   route:
     geosite_url: "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-cn.srs"
     geoip_url:   "https://raw.githubusercontent.com/SagerNet/sing-geoip/rule-set/geoip-cn.srs"
