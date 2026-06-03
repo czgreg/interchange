@@ -559,7 +559,7 @@ curl -s http://192.168.70.92:18080/api/rule-sets \
 | `url` | URL，但 `token=` `key=` `password=` `auth=` `secret=` 这几个查询参数中部用 `***` 打码 |
 | `enabled` | 是否启用 |
 | `format` | `auto` / `clash` / `singbox` / `uri` / `sip008` |
-| `user_agent` | 拉订阅时用的 UA。空表示用全局 `subscribe.user_agent`。机场对 UA 敏感时用：yuyun 给 Clash UA 返回 `proxies: []` 阉割版（要 `sing-box/1.10.7`）；ash 给 sing-box UA HTTP 500（要 `ClashforWindows/0.20.39`） |
+| `user_agent` | 拉订阅时用的 UA。空表示用全局 `subscribe.user_agent`。机场对 UA 敏感时用：yuyun 给 Clash UA 返回 `proxies: []` 阉割版（要 `sing-box/1.10.7`）；ash 给 sing-box UA HTTP 500（要 `ClashforWindows/0.20.39`）。**留空时 leap-gateway 会自动回退**：首次 fetch 拿到 0 节点 / HTTP 5xx 就换另一族 UA 重试，命中后把发现到的 UA 写回 yaml，下次直奔正确 UA。 |
 | `nodes_count` | 上一次 refresh 该订阅解析出多少节点 |
 | `last_refresh` | 全局最后一次 refresh 时间（不是单条订阅的） |
 

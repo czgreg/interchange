@@ -44,6 +44,26 @@ func main() {
 		WithSubscriptions(cfg.Subscriptions)
 	sbCtl := singbox.NewController(cfg.SingBox.ClashAPI)
 	store := configstore.New(*cfgPath)
+
+	// Persist UA auto-discoveries: when Refresh's fallback finds a working
+	// per-subscription UA (Clash↔sing-box swap), write it back into yaml so
+	// the next refresh hits the right UA on the first try.
+	mgr.WithUADiscoveryCallback(func(name, ua string) {
+		err := store.Mutate(cfg, func(c *config.Config) error {
+			for i := range c.Subscriptions {
+				if c.Subscriptions[i].Name == name {
+					c.Subscriptions[i].UserAgent = ua
+					return nil
+				}
+			}
+			return nil
+		})
+		if err != nil {
+			slog.Warn("subscribe: persist discovered ua failed", "name", name, "ua", ua, "err", err)
+			return
+		}
+		mgr.SetEntries(cfg.Subscriptions)
+	})
 	wd := watchdog.New(cfg.SingBox.ClashAPI, cfg.SingBox.URLTest.Watchdog, cfg.SingBox.URLTest.ProbeURL)
 	ni := nodeinfo.New(cfg.Node, Version)
 	expander := whitelistexpand.New("").

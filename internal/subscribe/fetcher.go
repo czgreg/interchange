@@ -2,11 +2,33 @@ package subscribe
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"time"
 )
+
+// HTTPError is returned by fetcher when the upstream responded with a
+// non-200 status. Lets callers (Refresh) distinguish 5xx — worth retrying
+// with an alternate UA — from 4xx (auth / token issues, retry won't help).
+type HTTPError struct {
+	Status int
+	URL    string
+}
+
+func (e *HTTPError) Error() string {
+	return fmt.Sprintf("http %d from %s", e.Status, e.URL)
+}
+
+// AsHTTPError unwraps err to *HTTPError if present, returning nil otherwise.
+func AsHTTPError(err error) *HTTPError {
+	var herr *HTTPError
+	if errors.As(err, &herr) {
+		return herr
+	}
+	return nil
+}
 
 type fetcher struct {
 	client    *http.Client
@@ -48,7 +70,7 @@ func (f *fetcher) GetWithUA(ctx context.Context, url, ua string) ([]byte, error)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("http %d from %s", resp.StatusCode, url)
+		return nil, &HTTPError{Status: resp.StatusCode, URL: url}
 	}
 	return io.ReadAll(io.LimitReader(resp.Body, 16<<20))
 }
