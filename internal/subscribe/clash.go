@@ -115,6 +115,20 @@ func applyClashTLS(o Outbound, p map[string]any) {
 		}
 		tls["reality"] = r
 	}
+	// uTLS fingerprint. sing-box REQUIRES tls.utls when tls.reality is on
+	// (FATAL "uTLS is required by reality client" otherwise). Clash YAML
+	// carries this as a sibling key `client-fingerprint` of the proxy entry
+	// rather than nested in reality-opts. Always emit utls when reality is
+	// enabled, falling back to "chrome" if the airport didn't specify.
+	fp, _ := p["client-fingerprint"].(string)
+	if _, hasReality := tls["reality"]; hasReality {
+		if fp == "" {
+			fp = "chrome"
+		}
+		tls["utls"] = map[string]any{"enabled": true, "fingerprint": fp}
+	} else if fp != "" {
+		tls["utls"] = map[string]any{"enabled": true, "fingerprint": fp}
+	}
 	o["tls"] = tls
 }
 

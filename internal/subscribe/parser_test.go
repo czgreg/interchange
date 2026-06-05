@@ -62,6 +62,62 @@ proxies:
 	}
 }
 
+func TestParseClash_RealityRequiresUTLS(t *testing.T) {
+	yaml := `
+proxies:
+  - name: "HK-Direct"
+    type: vless
+    server: 172.81.111.224
+    port: 10009
+    uuid: 2e2aa39e-dd37-496e-85e4-fc9689892743
+    flow: xtls-rprx-vision
+    tls: true
+    skip-cert-verify: false
+    client-fingerprint: chrome
+    servername: www.ebay.com
+    reality-opts:
+      public-key: P5WXROxKQWdHF07lxmUXspUuCkoi-l6tR_2iG8NAD2c
+      short-id: ca62d748
+  - name: "TW-NoFP"
+    type: vless
+    server: tw.example.xyz
+    port: 10009
+    uuid: 2e2aa39e-dd37-496e-85e4-fc9689892743
+    flow: xtls-rprx-vision
+    tls: true
+    servername: www.ebay.com
+    reality-opts:
+      public-key: qVSlZCRRCrsSmsVxFrKuPCQZTMdpVszD4nmjKDBnz2c
+      short-id: ae59afcc
+`
+	out, err := parseClash([]byte(yaml))
+	if err != nil {
+		t.Fatalf("parseClash: %v", err)
+	}
+	if len(out) != 2 {
+		t.Fatalf("want 2 outbounds, got %d", len(out))
+	}
+	for i, o := range out {
+		tls := o["tls"].(map[string]any)
+		if _, ok := tls["reality"].(map[string]any); !ok {
+			t.Errorf("outbound[%d] missing tls.reality", i)
+		}
+		utls, ok := tls["utls"].(map[string]any)
+		if !ok {
+			t.Fatalf("outbound[%d] missing tls.utls — sing-box would FATAL", i)
+		}
+		if utls["enabled"] != true {
+			t.Errorf("outbound[%d] tls.utls.enabled = %v", i, utls["enabled"])
+		}
+		if fp, _ := utls["fingerprint"].(string); fp == "" {
+			t.Errorf("outbound[%d] missing tls.utls.fingerprint", i)
+		}
+	}
+	if fp := out[0]["tls"].(map[string]any)["utls"].(map[string]any)["fingerprint"]; fp != "chrome" {
+		t.Errorf("explicit fingerprint dropped: %v", fp)
+	}
+}
+
 func TestParseURIList_Base64(t *testing.T) {
 	lines := []string{
 		"vmess://" + base64.StdEncoding.EncodeToString([]byte(
