@@ -1,828 +1,693 @@
 # Leap Gateway 管理 API
 
-控制面 HTTP API。
+控制面 HTTP API —— 覆盖节点健康、订阅管理、白名单维护、UX 遥测四大功能域。
 
-| 部署 | base URL |
+| 节点 | base URL |
 |---|---|
-| **PoC 节点（192.168.70.92）当前** | `http://192.168.70.92:18080` |
-| 节点本机 | `http://127.0.0.1:18080` |
+| 89（mihomo，当前进化版） | `http://192.168.70.89:18080` |
+| 92（sing-box，旧版） | `http://192.168.70.92:18080` |
+| 节点本机调用 | `http://127.0.0.1:18080` |
 
-监听由 `gateway.yaml` 的 `api.listen` 控制；PoC 阶段是 `0.0.0.0:18080`，对内网开放。
-所有端点均为 JSON。
+监听由 `gateway.yaml` 的 `api.listen` 控制；生产前应收回 `127.0.0.1:18080` 并在前置 nginx 终端 TLS。
+
+---
 
 ## 认证
 
-> **PoC 阶段未启用 token 鉴权** —— 任何能到达 `192.168.70.92:18080` 的内网设备都可以
-> 直接调用，包括写操作（`PUT /api/whitelist`、`POST /api/subscribe/refresh`、订阅 CRUD）。
-> 切生产前必须做：把 `api.listen` 收回 `127.0.0.1:18080`，并在 `gateway.yaml` 设
-> `api.token: "<32+ char random>"`，前置 nginx 终端 TLS。
-
-如果 `gateway.yaml` 里 `api.token` 非空，所有 `/api/*` 请求必须带：
+`gateway.yaml` 设 `api.token: "<token>"` 后，除 `/healthz` 和 `POST /api/ux-telemetry` 外，所有端点需要：
 
 ```
 Authorization: Bearer <token>
 ```
 
-`/healthz` 永远不需要认证（用于 LB / 监控可达性探测）。
+`/healthz` 不需要认证（LB / 监控探测用）。`POST /api/ux-telemetry` 不需要认证（员工浏览器批量上报，加 token 成本过高）。
 
-错误响应：
+---
+
+## 通用错误码
 
 | 状态 | 含义 |
 |---|---|
-| 400 | 请求体非法 / 字段格式错（含 catalog 里没有该 rule-set tag）|
-| 401 | token 缺失或不匹配（仅当 `api.token` 非空时可能出现）|
-| 404 | 资源不存在（订阅名找不到） |
+| 400 | 请求体非法 / 字段格式错 / catalog 里无该 rule-set tag |
+| 401 | token 缺失或不匹配 |
+| 404 | 资源不存在（如订阅名找不到） |
 | 409 | 资源冲突（订阅名已存在） |
-| 500 | 持久化失败 / 渲染失败 / sing-box reload 失败 |
-| 502 | 上游拉取失败（PUT 白名单时按需下载 .srs 失败 —— 网络 / 上游 5xx）|
-
-写操作（PUT/POST/DELETE）的失败语义：**先校验再落盘**。校验失败请求拒绝，
-内存与磁盘均未变；落盘失败时内存已变但磁盘可能未变（重启后恢复一致）。
-
-## 网络可达性
-
-PoC 节点 `192.168.70.92` 的 nft `table inet leap` 在 install 时会渲染：
-
-```
-chain input {
-  type filter hook input priority filter; policy accept;
-  tcp dport 18080 accept            # 不限源 IP（PoC）
-}
-```
-
-模板在 `deploy/node/nft.conf.tmpl`，端口由 `gateway.yaml` 的 `api.listen` 自动注入。
-`leap-nft.service` 重启后规则会从模板 reload，不会丢。
+| 500 | 持久化 / 渲染 / 数据面 reload 失败 |
+| 502 | 上游按需拉取 .srs/.mrs 失败 |
+| 503 | 功能未启用（如 engine=sing-box 时访问节点健康评分） |
 
 ---
 
 ## 端点速览
 
-| 方法 | 路径 | 副作用 | 说明 |
+| 方法 | 路径 | 功能 | 认证 |
 |---|---|---|---|
-| GET | `/healthz` | 无 | 存活检查 |
-| GET | `/api/status` | 无 | 订阅 / 节点数 / sing-box 健康 |
-| GET | `/api/nodes` | 无 | 当前所有出站节点（扁平化） |
-| GET | `/api/proxies/active` | 无 | 节点全景：node + feilian + leap services + 当前机场 + watchdog |
-| POST | `/api/proxies/select` | clash-api PUT `/proxies/out` | 手动切换 `out` selector（urltest-primary / urltest-backup / direct）；非 sticky，watchdog 仍在跑 |
-| GET | `/api/whitelist` | 无 | 白名单（mode + geosites + geoips + domain_suffix + ip_cidr） |
-| PUT | `/api/whitelist` | 写 yaml + 必要时拉缺失 .srs + 重启 sing-box + 异步重建展开缓存 | 整体替换白名单；catalog 里的 tag 被选中时按需下载 |
-| GET | `/api/whitelist/resolved` | 无（首次冷启动会同步拉一次） | rule-set tag → 扁平 `domains[]` + `ip_cidrs[]`。飞连"极速模式"用 |
-| GET | `/api/rule-sets` | 无 | 内嵌 catalog（geosite + geoip 各一组 name/url/category）+ 每项 installed/selected + 域名 / IP/CIDR 提示案例 |
-| GET | `/api/geosites` | 无 | 兼容别名：仅返回 geosite 部分的 `{available, active}` |
-| GET | `/api/subscriptions` | 无 | 订阅列表，URL token 自动打码 |
-| POST | `/api/subscriptions` | 写 yaml + 拉订阅 + 重启 sing-box | 新增订阅 |
-| PUT | `/api/subscriptions/{name}` | 写 yaml + 拉订阅 + 重启 sing-box | 改 URL |
-| DELETE | `/api/subscriptions/{name}` | 写 yaml + 拉订阅 + 重启 sing-box | 删订阅 |
-| POST | `/api/subscribe/refresh` | 拉订阅 + 重启 sing-box | 立即刷新 |
-| GET | `/api/subscribe/refresh-interval` | 无 | 当前周期刷新间隔（秒） |
-| PUT | `/api/subscribe/refresh-interval` | 写 yaml + 重置调度器 | 改间隔；`seconds=0` 关周期，只手动刷新 |
-
-> "重启 sing-box" 实际是 `systemctl restart leap-singbox`，5–10s 中断。
-> WL / 订阅写操作会原子写回 `/etc/leap/gateway.yaml`，**yaml 注释会丢失**
-> （go-yaml v3 round-trip 限制）。
+| GET | `/healthz` | LB 可达性探测 | 无 |
+| GET | `/api/status` | 节点总体状态 | ✓ |
+| GET | `/api/nodes` | 全量已解析节点列表 | ✓ |
+| GET | `/api/nodes/health` | 节点健康评分 + 动态入池状态（mihomo） | ✓ |
+| GET | `/api/proxies/active` | 数据面当前活跃代理详情 + watchdog | ✓ |
+| POST | `/api/proxies/select` | 手动指定活跃节点 | ✓ |
+| GET | `/api/subscriptions` | 订阅列表 | ✓ |
+| POST | `/api/subscriptions` | 新增订阅 | ✓ |
+| PUT | `/api/subscriptions/{name}` | 修改订阅 URL / UA | ✓ |
+| DELETE | `/api/subscriptions/{name}` | 删除订阅 | ✓ |
+| POST | `/api/subscribe/refresh` | 立即触发订阅刷新 | ✓ |
+| GET | `/api/subscribe/refresh-interval` | 查看刷新间隔 | ✓ |
+| PUT | `/api/subscribe/refresh-interval` | 修改刷新间隔 | ✓ |
+| GET | `/api/whitelist` | 白名单当前配置 | ✓ |
+| PUT | `/api/whitelist` | 整体替换白名单 | ✓ |
+| GET | `/api/whitelist/resolved` | 展开为域名 + IP 清单（飞连极速模式） | ✓ |
+| GET | `/api/rule-sets` | rule-set catalog（geosite + geoip） | ✓ |
+| GET | `/api/geosites` | 同 /api/rule-sets（兼容别名） | ✓ |
+| POST | `/api/ux-telemetry` | 客户端上报 UX 事件 | 无 |
+| GET | `/api/ux-telemetry` | 查询原始事件 | ✓ |
+| GET | `/api/ux-telemetry/summary` | 按域名聚合（p50/p95 TTFB、错误率） | ✓ |
 
 ---
 
 ## GET /healthz
 
-存活检查，无认证。
+LB / 监控可达性探测。
 
-```bash
-# 节点本机
-curl -s http://127.0.0.1:18080/healthz
-
-# 内网其它机器（PoC 直连）
-curl -s http://192.168.70.92:18080/healthz
 ```
-
-```json
-{"ok": true}
+HTTP 200
+{"ok":true}
 ```
 
 ---
 
 ## GET /api/status
 
-订阅与 sing-box 健康概要。
+节点总体快照。
 
 ```json
 {
-  "last_refresh": "2026-05-28T03:54:31.123456789Z",
-  "node_count": 66,
-  "subscriptions": 1,
-  "singbox_ok": true
+  "last_refresh": "2026-06-05T12:28:25Z",
+  "node_count": 155,
+  "singbox_ok": true,
+  "subscriptions": 5
 }
 ```
 
-| 字段 | 类型 | 说明 |
-|---|---|---|
-| `last_refresh` | RFC3339 时间 / 零值 | 最近一次订阅刷新；从未刷新时为 `"0001-01-01T00:00:00Z"` |
-| `node_count` | int | 全部订阅解析出来的节点总数（含被 NodePattern 过滤掉的） |
-| `subscriptions` | int | 当前 enabled 的订阅数（与配置里 `subscriptions[*].enabled=true` 数量一致） |
-| `singbox_ok` | bool | clash-api `/version` 是否 200 |
+| 字段 | 说明 |
+|---|---|
+| `node_count` | 所有已解析的代理节点总数（跨全部订阅） |
+| `singbox_ok` | 数据面（sing-box 或 mihomo）clash-api 可达 |
+| `subscriptions` | 当前已配置的订阅数 |
 
 ---
 
 ## GET /api/nodes
 
-扁平化的所有解析出来的节点。
+返回所有已解析节点的扁平列表，含 tag、协议类型、server 域名、来源订阅。
 
 ```json
 [
-  {"tag": "yuyun/SG01", "type": "vless", "server": "sg.example.net", "source": "yuyun"},
-  {"tag": "yuyun/US02", "type": "trojan", "server": "us.example.net", "source": "yuyun"}
+  {"tag": "ctc-02/US-C30-01-DMIT", "type": "vless", "server": "us01.c30.example.xyz", "source": "ctc-02"},
+  {"tag": "ash/🇺🇸US-IEPL-01",      "type": "trojan", "server": "t7m2.example.org",   "source": "ash"}
 ]
+```
+
+**注**：此端点输出全量（含非 US 节点）。配合 `node_qualify.node_pattern` 筛选实际入池的节点。
+
+---
+
+## GET /api/nodes/health
+
+**engine=mihomo 专用**。NodeScorer 的动态评分结果：每 `node_qualify.scoring_interval`（默认 60s）对 us-pool 候选集打一次分，按 RTT 稳定性 + 探测失败率 + 被动吞吐决定是否入池，变化时热重载 mihomo（无重启）。
+
+engine=sing-box 时返回 `503 {"error":"..."}`。
+
+```json
+{
+  "qualified": 17,
+  "total": 26,
+  "last_pool_update": "2026-06-05T12:33:25Z",
+  "last_scored_at":   "2026-06-05T12:36:25Z",
+  "thresholds": {
+    "MaxRTTP50Ms": 500,
+    "MaxRTTP95Ms": 800,
+    "MaxJitterMs": 300,
+    "MaxFailRate": 0.25,
+    "MinProbes":   2,
+    "EvictStrikes":   2,
+    "ReadmitStrikes": 1
+  },
+  "nodes": [
+    {
+      "name":           "ctc-02/US-C30-01-DMIT",
+      "sub":            "ctc-02",
+      "alive":          true,
+      "rtt_last_ms":    154,
+      "rtt_p50_ms":     157,
+      "rtt_p95_ms":     169,
+      "jitter_ms":      12,
+      "fail_rate":      0.0,
+      "probe_count":    8,
+      "throughput_bps": 0,
+      "qualified":      true,
+      "in_pool":        true,
+      "strikes":        0,
+      "ok_rounds":      9,
+      "reason":         ""
+    },
+    {
+      "name":       "ash/🇺🇸US-IEPL-03",
+      "sub":        "ash",
+      "alive":      true,
+      "rtt_p50_ms": 198,
+      "jitter_ms":  511,
+      "fail_rate":  0.0,
+      "qualified":  false,
+      "in_pool":    false,
+      "strikes":    2,
+      "reason":     "jitter=511ms > 300ms"
+    }
+  ]
+}
 ```
 
 | 字段 | 说明 |
 |---|---|
-| `tag` | 在 sing-box 里的全名，前缀是订阅名 |
-| `type` | sing-box outbound type（vless / trojan / shadowsocks / ...） |
-| `server` | 目标节点 hostname / IP |
-| `source` | 该节点来源订阅的 `name` |
+| `qualified` / `total` | 当前入池数 / 候选集总数 |
+| `last_pool_update` | 最近一次 us-pool 成员变化的时间 |
+| `rtt_p50_ms` | 最近 8 次探测的中位延迟 |
+| `rtt_p95_ms` | 95 分位延迟（防尖刺） |
+| `jitter_ms` | p95 - p50（稳定性指标） |
+| `fail_rate` | delay=0（探测失败）占比 |
+| `throughput_bps` | 过去 60s 被动推算的真实吞吐（无活跃流量时为 0） |
+| `in_pool` | 当前是否在 us-pool 中承载流量 |
+| `strikes` | 连续不达标轮次（达到 EvictStrikes 才真正踢出） |
+| `ok_rounds` | 连续达标轮次 |
+| `reason` | 不入池原因（空 = 入池） |
+
+**评分规则**：
+
+- `fail_rate > MaxFailRate` → 剔除
+- `rtt_p50_ms > MaxRTTP50Ms` → 剔除
+- `rtt_p95_ms > MaxRTTP95Ms` → 剔除
+- `jitter_ms > MaxJitterMs` → 剔除
+- `probe_count < MinProbes` → 暂时保留（历史不足，给 benefit of doubt）
+- 连续 `EvictStrikes` 次不达标 → 从 us-pool 移除 + 热重载
+- 恢复后连续 `ReadmitStrikes` 次达标 → 重新加入 + 热重载
 
 ---
 
 ## GET /api/proxies/active
 
-节点全景，**最常用**。一次拉就能看到节点本身、飞连服务、leap 服务、当前机场节点、watchdog 状态。
+数据面活跃状态的完整快照，含节点、池子、watchdog、egress IP 等信息。
 
 ```json
 {
-  "node": {
-    "hostname": "dianweiserver",
-    "kernel": "5.15.0-179-generic",
-    "os": "Ubuntu 22.04.5 LTS",
-    "uptime_seconds": 78398,
-    "interfaces": [
-      {"name": "ens18", "ipv4": "192.168.70.92"},
-      {"name": "tun0", "ipv4": "10.8.12.1"},
-      {"name": "utun-leap", "ipv4": "172.19.0.1"}
-    ],
-    "client_subnet": "10.8.12.0/24",
-    "egress_iface": "ens18"
-  },
-  "feilian": {
-    "tun0_active": true,
-    "vpn_active": true,
-    "proxy_active": true,
-    "sentry_active": true,
-    "nft_chains_present": ["FEILIAN_VPN_POSTROUTING_POOL", "FEILIAN_PROXY"]
-  },
+  "node": { "hostname": "...", "ipv4": "192.168.70.89", ... },
+  "feilian": { "tun0_active": true, "vpn_active": true, ... },
   "leap": {
-    "gateway_version": "f354d04",
-    "singbox_version": "1.10.7",
-    "services": {
-      "leap-gateway": "active",
-      "leap-nft": "active",
-      "leap-singbox": "active"
-    },
-    "subscriptions_count": 1,
-    "nodes_parsed": 66,
-    "last_refresh": "2026-05-28T03:54:31Z"
+    "gateway_version": "dev",
+    "singbox_version": "v1.19.26",
+    "services": { "leap-mihomo": "active", "leap-gateway": "active", "leap-nft": "active" },
+    "subscriptions_count": 5,
+    "nodes_parsed": 155,
+    "last_refresh": "2026-06-05T12:28:25Z"
   },
   "active_proxy": {
-    "now": "yuyun/🇸🇬 新加坡01 境外中转",
-    "delay_ms": 154,
-    "last_check": "2026-05-28T03:54:52Z",
-    "pool_size": 18,
-    "pool_filter": "新加坡|美国",
-    "history_len": 1,
-    "reachable": true,
-    "active_urltest": "urltest-primary",
+    "reachable":     true,
+    "active_urltest": "us-pool",
     "pools": [
       {
-        "tag": "urltest-primary",
-        "now": "yuyun/🇸🇬 新加坡01 境外中转",
-        "pool_size": 18,
-        "active": true,
-        "egress": {
-          "ip": "104.21.x.x",
-          "country": "SG",
-          "region": "Singapore",
-          "city": "Singapore",
-          "org": "AS13335 Cloudflare, Inc.",
-          "checked_at": "2026-05-28T03:55:00Z",
-          "via_node": "yuyun/🇸🇬 新加坡01 境外中转",
-          "stale": false
-        },
+        "tag":       "us-pool",
+        "pool_size": 17,
+        "active":    true,
         "nodes": [
-          {"tag": "yuyun/🇸🇬 新加坡01 境外中转", "delay_ms": 154, "last_check": "2026-05-28T03:54:52Z"},
-          {"tag": "yuyun/🇸🇬 新加坡02 境外中转", "delay_ms": 178, "last_check": "2026-05-28T03:54:52Z"},
-          {"tag": "yuyun/🇺🇸 美国01",            "delay_ms": 280, "last_check": "2026-05-28T03:54:52Z"}
-        ]
-      },
-      {
-        "tag": "urltest-backup",
-        "now": "backup/HK01",
-        "pool_size": 6,
-        "active": false,
-        "egress": {
-          "ip": "203.0.x.x",
-          "country": "HK",
-          "checked_at": "2026-05-28T03:54:30Z",
-          "via_node": "backup/HK01",
-          "stale": false
-        },
-        "nodes": [
-          {"tag": "backup/HK01", "delay_ms": 88,  "last_check": "2026-05-28T03:54:50Z"},
-          {"tag": "backup/HK02", "delay_ms": 102, "last_check": "2026-05-28T03:54:50Z"}
+          {"tag": "ctc-02/US-C30-01-DMIT", "delay_ms": 154, "last_check": "..."}
         ]
       }
     ]
   },
   "watchdog": {
-    "enabled": true,
-    "interval_seconds": 5,
-    "fail_threshold": 3,
-    "consecutive_fails": 0,
-    "consecutive_healthy": 4,
-    "last_probe": "2026-05-28T03:55:01Z",
-    "current_node": "yuyun/🇸🇬 新加坡01 境外中转",
-    "current_selector": "urltest-primary",
-    "on_backup": false,
-    "skipped_due_traffic": 12,
-    "primary_recovery_streak": 0,
-    "primary_recovery_threshold": 3
+    "enabled": false,
+    "current_node": "ctc-02/US-C30-01-DMIT",
+    "consecutive_healthy": 4
   }
 }
 ```
 
-`active_proxy`：
-
-> **顶层字段**（`now` / `delay_ms` / `last_check` / `pool_size` / `history_len`）镜像当前 active 池里**当前选中的那条节点**的最近一次延迟测速。完整的池/节点信息在 `pools[]` 里，下面分开说明。
-
-| 字段 | 说明 |
-|---|---|
-| `now` | 当前正在路由海外流量的 airport 节点 tag（= `pools[active].now`）|
-| `delay_ms` | active 池中当前选中节点的最近一次延迟测速 |
-| `last_check` | 该测速的时间戳 |
-| `pool_size` | active 池中节点数（可被 NodePattern 过滤）|
-| `pool_filter` | `singbox.urltest.node_pattern` 正则 |
-| `history_len` | sing-box 保留的延迟历史长度 |
-| `reachable` | clash-api 是否可达（false 时其它字段是空) |
-| `active_urltest` | `out` 选择器当前指向哪个池：`urltest-primary` / `urltest-backup` / `direct` |
-| `pools[]` | 每个 urltest-* 池的完整信息：见下方 |
-
-`pools[]` 每条：
-
-| 字段 | 说明 |
-|---|---|
-| `tag` | `urltest-primary` 或 `urltest-backup` |
-| `now` | 该池当前选中的节点 tag |
-| `pool_size` | 该池节点数 |
-| `active` | `out` selector 是否指向这个池 |
-| `nodes[]` | 池内每条节点的最近一次延迟测速 —— 见下方 |
-| `egress` | 该池的真实出网信息（IP + 地理）—— 见下方 |
-
-`pools[].nodes[]` 每条：
-
-| 字段 | 说明 |
-|---|---|
-| `tag` | 节点 tag |
-| `delay_ms` | 该节点最近一次 urltest 测速结果（毫秒）；`0` 表示尚无测量 |
-| `last_check` | 该测速的时间戳；空表示尚无测量 |
-
-`pools[].egress`：通过该池的 pinned loopback HTTP 入口拨到 IP echo 服务（默认 `ipinfo.io`，失败回退 `1.1.1.1/cdn-cgi/trace`）拿到的真实出网信息。**懒探测**：每池 60s 缓存，第一次 GET 会异步触发探测、当次返回 `null`；之后的 GET 直接读缓存，缓存到期才再探。
-
-| 字段 | 说明 |
-|---|---|
-| `ip` | 公网 egress IP |
-| `country` / `region` / `city` / `org` | ipinfo.io 返回的地理信息（cf-trace fallback 时只有 `country`）|
-| `checked_at` | 探测完成时间 |
-| `via_node` | 探测瞬间 `pools[].now` 是哪个节点；用来判 stale |
-| `stale` | `true` 表示当前 `pools[].now` 跟 `via_node` 不一致（urltest 已经选了新节点，但缓存还是旧 IP），或者最近一次刷新失败、保留的旧值 |
-
-> **运维用途**：验证 `node_pattern: 美国` 选出来的真的在 US 出口（看 `pools[primary].egress.country == "US"`）；切到 backup 后看 backup 池实际走哪个国家；操作员手动 `select direct` 时 egress 对应节点本身 NAT 后公网 IP（用于"我现在 bypass 了机场"对照）。
-> 
-> **池的 pinned 入口**：`urltest-primary` 走 `127.0.0.1:11080`（一直存在，rule-set 下载也走它）；`urltest-backup` 走 `127.0.0.1:11081`（仅当订阅 ≥ 2 条、备池被渲染时才存在）。这两个 inbound 都是 loopback only，不对外暴露。
-
-`watchdog`：
-
-| 字段 | 说明 |
-|---|---|
-| `enabled` | 是否启用了主动健康检查 |
-| `interval_seconds` | 基础探测周期（5s 默认） |
-| `fail_threshold` | 连续失败几次触发切换 |
-| `consecutive_fails` | 当前连续失败计数 |
-| `consecutive_healthy` | 当前连续健康计数（影响 backoff） |
-| `last_probe` | 最近一次探测时间 |
-| `current_node` | watchdog 看到的当前 urltest 选中节点 |
-| `current_selector` | `out` 当前指向（`urltest-primary` / `urltest-backup`） |
-| `on_backup` | 是否已切到备用池 |
-| `skipped_due_traffic` | 因为有真实用户流量经过 `out` 而跳过的合成探测累计次数 |
-| `primary_recovery_streak` | 在备用池时，主池连续健康探测计数 |
-| `primary_recovery_threshold` | 需要多少次连续健康才切回主 |
+**说明**：
+- engine=mihomo 时，`active_urltest` 为 `"us-pool"`（load-balance 组），`pools` 列出的是该组的所有成员节点及其最近 RTT
+- engine=sing-box 时，`active_urltest` 为 `"urltest-primary"` 或 `"urltest-backup"`
+- `watchdog.enabled=false` 是 mihomo 模式的正常状态（mihomo 内置 url-test 管理，watchdog 不再需要）
 
 ---
 
 ## POST /api/proxies/select
 
-手动把 `out` selector 切到指定池。运维场景：watchdog 自动判定还没触发但运维已经知道
-该切了；或者临时 bypass 整条机场链路（`direct`）做对照测试。
-
-请求：
+手动指定 `out` selector 指向的成员（用于运维调试，不影响 NodeScorer 自动管理）。
 
 ```json
-{"selector": "urltest-backup"}
+// 请求体
+{ "selector": "out", "name": "us-pool" }
+// 或者直接指定某个节点（通过 pin selector）
+{ "selector": "pin", "name": "ctc-02/US-C30-01-DMIT" }
 ```
 
-合法 `selector`：
-
-| 值 | 含义 |
-|---|---|
-| `urltest-primary` | 第一条 enabled 订阅的节点池（默认 / 主池） |
-| `urltest-backup`  | 其余 enabled 订阅合成的节点池（仅在配 ≥ 2 条订阅时存在） |
-| `direct`          | bypass 机场，海外流量直连 |
-
-校验：
-
-- body 缺 `selector` 或值不在上面三选一里 → 400；
-- 选 `urltest-backup` 但当前部署只有 1 条订阅（没渲染备池）→ 404 `selector "urltest-backup" not registered on sing-box`；
-- clash-api 出错 → 500。
-
-成功返回 200 + 同 `GET /api/proxies/active` 的全量结构（看切换后的实际状态）。
-
-**手动 override 不是 sticky** —— watchdog 一直在后台跑：
-
-| 手动切到 | 机场实际状态 | watchdog 后续行为 |
-|---|---|---|
-| `urltest-backup` | primary 健康 | `runPrimaryRecovery` 探测主池，连续 `primary_recovery_threshold`（默认 3）次成功后 ~30m × 3 ≈ 1.5h 自动切回 primary |
-| `urltest-backup` | primary 真坏 | 维持在 backup，跟自动切换结果一致 |
-| `urltest-primary` | primary 真坏 | 探测连续 `fail_threshold`（默认 3）次失败 → 自动切回 backup |
-| `direct` | —— | 走直连，没有 watchdog 干预（`out` 不在 urltest-* 里）；什么时候切回去也得人工 |
-
-```bash
-# 立即切到备池
-curl -sX POST -H 'Content-Type: application/json' \
-  -d '{"selector":"urltest-backup"}' \
-  http://192.168.70.92:18080/api/proxies/select
-
-# 临时 bypass 机场
-curl -sX POST -H 'Content-Type: application/json' \
-  -d '{"selector":"direct"}' \
-  http://192.168.70.92:18080/api/proxies/select
-
-# 立即切回主池（watchdog 也会自己切，但这条更快）
-curl -sX POST -H 'Content-Type: application/json' \
-  -d '{"selector":"urltest-primary"}' \
-  http://192.168.70.92:18080/api/proxies/select
+```json
+// 响应
+{ "ok": true }
 ```
+
+---
+
+## GET /api/subscriptions
+
+返回所有订阅，含 UA、节点数、上次刷新时间。token 值被脱敏（中间 `***`）。
+
+```json
+[
+  {
+    "name":         "ctc-02",
+    "url":          "https://47.x.x.x:9999/...?token=c85b***0f02",
+    "enabled":      true,
+    "format":       "auto",
+    "user_agent":   "sing-box/1.10.7",
+    "nodes_count":  6,
+    "last_refresh": "2026-06-05T12:28:25Z"
+  },
+  {
+    "name":       "ash",
+    "url":        "https://kejalrnx.671234.xyz/...?token=728a***5b95",
+    "enabled":    true,
+    "user_agent": "clash.meta/v1.19.26",
+    "nodes_count": 34
+  }
+]
+```
+
+---
+
+## POST /api/subscriptions
+
+新增订阅。立即触发一次 refresh + 数据面 reload（约 5-10s 海外业务中断）。
+
+```json
+// 请求体
+{
+  "name":       "yuyun",
+  "url":        "https://yuyun.mhlnf.cn/yuyunsvip?token=...",
+  "format":     "auto",
+  "user_agent": "clash.meta/v1.19.26"
+}
+```
+
+- `format`：`auto`（默认） | `clash` | `singbox` | `uri` | `sip008`
+- `user_agent`：大多数机场用 `clash.meta/v1.19.26` 可拿到最多节点；`ClashforWindows/0.20.39` 兼容性最广但节点数较少；`sing-box/1.10.x` 适用于原生返回 sing-box JSON 的机场
+
+成功返回 201 + 当前完整订阅列表（同 GET /api/subscriptions）。
+
+---
+
+## PUT /api/subscriptions/{name}
+
+修改已有订阅的 URL 或 UA。请求体必须包含完整 URL（非脱敏版）。
+
+```json
+{
+  "url":        "https://kejalrnx.671234.xyz/...?token=<真实token>",
+  "user_agent": "clash.meta/v1.19.26"
+}
+```
+
+成功返回 200 + 当前完整订阅列表。
+
+---
+
+## DELETE /api/subscriptions/{name}
+
+删除订阅，立即触发 refresh + reload。成功返回 204。
+
+---
+
+## POST /api/subscribe/refresh
+
+立即触发一次完整的 订阅拉取 → 渲染 → 数据面 reload 流程。
+
+```json
+// 响应
+{"ok": true}
+```
+
+**注**：订阅 fetch 经由数据面 HTTP 代理（`127.0.0.1:11080`）路由，避免 fakeip 污染 host 解析器。数据面宕机时自动回退直连。
+
+---
+
+## GET /api/subscribe/refresh-interval
+
+```json
+{"refresh_interval": "30m0s"}
+```
+
+---
+
+## PUT /api/subscribe/refresh-interval
+
+```json
+// 请求体
+{"refresh_interval": "15m"}
+```
+
+接受 Go duration 格式：`30m`、`1h`、`0`（禁用定期刷新）。
 
 ---
 
 ## GET /api/whitelist
 
+返回当前白名单配置。
+
 ```json
 {
   "mode": "whitelist",
-  "geosites": ["geosite-google", "geosite-youtube", "geosite-openai"],
-  "geoips": [],
-  "domain_suffix": ["claude.ai", "anthropic.com"],
-  "ip_cidr": ["149.154.0.0/16", "91.108.0.0/16"]
+  "geosites": [
+    "geosite-google", "geosite-anthropic", "geosite-openai",
+    "geosite-github", "geosite-cloudflare", "geosite-category-ai-!cn"
+  ],
+  "geoips": ["geoip-google", "geoip-telegram"],
+  "domain_suffix": ["ipinfo.io", "ip.me", "claude.ai"],
+  "ip_cidr": ["149.154.0.0/16"]
 }
 ```
 
-| 字段 | 说明 |
-|---|---|
-| `mode` | `overseas` 或 `whitelist`。`overseas` = 命中 cn 的直连，其余走机场；`whitelist` = 仅命中白名单走机场，其它直连 |
-| `geosites` | 启用的 geosite tag 数组（catalog 子集，从 `/api/rule-sets` 取；本地没有的会在 PUT 时按需下载） |
-| `geoips` | 启用的 geoip tag 数组（同上）。catalog 里只有 ISO 国家码（`geoip-jp` / `geoip-us` / ...）。"按国家路由"用这里；硬编码 IP 段（Telegram MTProto 这种）走下面 `ip_cidr` |
-| `domain_suffix` | 额外的域名后缀列表（小写 + bare domain） |
-| `ip_cidr` | 额外的 IP/CIDR 列表（IPv4/IPv6 都接受；裸 IP 自动按 `/32` 或 `/128` 处理）。Telegram MTProto 这种硬编码 IP 段的应用必须走这里 |
+**mode 说明**：
+
+| mode | 未命中白名单的流量 | 适用场景 |
+|---|---|---|
+| `whitelist` | → DIRECT（走直连，GFW 可能拦截） | 节省机场流量，员工只有 WL 内的站需翻墙 |
+| `overseas` | → out（走代理） | 透明翻墙，所有海外站走机场 |
+
+---
 
 ## PUT /api/whitelist
 
-**整体替换语义**。改一项也要先 GET 拿现状、改完整体 PUT。
-
-请求：
+整体替换白名单（语义：PUT，非 PATCH；先 GET 拿当前值再修改再 PUT）。
 
 ```json
 {
   "mode": "whitelist",
-  "geosites": ["geosite-google", "geosite-anthropic"],
-  "geoips": [],
-  "domain_suffix": ["claude.ai", "openai.com"],
-  "ip_cidr": ["149.154.0.0/16", "91.108.0.0/16"]
+  "geosites": ["geosite-google", "geosite-anthropic", "geosite-category-ai-!cn"],
+  "geoips":   ["geoip-telegram"],
+  "domain_suffix": ["claude.ai", "cursor.com"],
+  "ip_cidr":  ["149.154.0.0/16", "91.108.0.0/16"]
 }
 ```
 
-校验：
+**校验**：
+- `geosites` / `geoips` 中的每个 tag 必须在 `/api/rule-sets` 的 catalog 里
+- 不在磁盘上的 tag 会按需从 MetaCubeX 拉取（mihomo: `.mrs`；sing-box: `.srs`），失败返回 502
+- `domain_suffix`：裸域名，无 `://`
+- `ip_cidr`：有效 CIDR 或裸 IP（自动补 /32 / /128）
 
-- `mode` 缺省 = 不动当前；显式只接受 `overseas` / `whitelist`。
-- `geosites` 必须 ⊆ `/api/rule-sets` 的 `geosites.catalog[].name`，否则 400 `unknown rule-set "..."（not in catalog)`。每条要 `geosite-` 前缀。
-- `geoips` 必须 ⊆ `/api/rule-sets` 的 `geoips.catalog[].name`，否则 400。每条要 `geoip-` 前缀。
-- `domain_suffix` 每条必须是裸域名（含 `.`、不含 `://` `/` `空白`、首尾无 `.`）。
-- `ip_cidr` 每条必须是合法 CIDR 或裸 IP（裸 IP 落盘前归一化成 `/32` 或 `/128`）。
-- 重复项自动去重，空字符串忽略。
-
-**按需拉取** —— catalog 校验通过后，对每个 tag 检查 `/etc/leap/singbox/rule-sets/<tag>.srs`
-是否存在；不存在的就经 sing-box 内部 HTTP 代理（`127.0.0.1:11080`，自动经机场出网）
-从 `raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/{geosite,geoip}/<stem>.srs`
-拉一份落盘（`<stem>` 是去掉 `geosite-`/`geoip-` 前缀的部分）。任一 tag 拉取失败返回
-502 + 失败 tag 名 + 上游错误，cfg 与磁盘均未变（写到 .tmp 的部分文件会清掉）。同一
-tag 并发 PUT 只触发一次 HTTP 请求（per-name lock + 双检）。
-
-成功后立即 `systemctl restart leap-singbox`（5–10s 海外业务中断），返回 200 + 新状态（同 GET 结构）。
+成功触发 **数据面 reload**（mihomo: PUT /configs 热重载；sing-box: systemctl restart，约 5-10s 中断）。
 
 ```bash
-# 加 / 删一条 domain_suffix —— 整体替换语义，要先 GET 拿现状再 PUT
-TOK=...
-H="Authorization: Bearer $TOK"
-curl -s -H "$H" 127.0.0.1:18080/api/whitelist \
-  | jq '.domain_suffix += ["new-site.com"]' \
-  | curl -s -H "$H" -H "Content-Type: application/json" -X PUT \
-      127.0.0.1:18080/api/whitelist -d @-
-
-# 加一条 ip_cidr (例如某 App 自己回报的 IP 段)
-curl -s -H "$H" 127.0.0.1:18080/api/whitelist \
-  | jq '.ip_cidr += ["203.0.113.0/24"]' \
-  | curl -s -H "$H" -H "Content-Type: application/json" -X PUT \
-      127.0.0.1:18080/api/whitelist -d @-
+# 加一条 domain_suffix：先 GET，jq 追加，再 PUT
+curl -s http://127.0.0.1:18080/api/whitelist \
+  | jq '.domain_suffix += ["paigod.work"]' \
+  | curl -s -H "Content-Type: application/json" -X PUT \
+      http://127.0.0.1:18080/api/whitelist -d @-
 ```
 
 ---
 
 ## GET /api/whitelist/resolved
 
-把当前白名单里所有规则解析成扁平的具体值——`domains[]` (geosites + domain_suffix
-展开后去重) 和 `ip_cidrs[]` (geoips + ip_cidr 展开后去重)。专门给飞连 SaaS 控制端的
-"极速模式"用：飞连终端只接受具体域名 + IP 段清单，不认 `geosite-google` /
-`geoip-jp` 这种 tag，所以要把 rule-set 展开喂回去。
-
-数据源：
-- `domains`：`v2fly/domain-list-community`（这是 `MetaCubeX/meta-rules-dat` geosite 的最终上游之一），
-  通过 jsdelivr CDN 拉（`cdn.jsdelivr.net`，CN 内可达），失败回退 `raw.githubusercontent.com`。
-- `ip_cidrs`：节点上本地 `/etc/leap/singbox/rule-sets/<geoip-tag>.srs`，由
-  `sing-box rule-set decompile` 解出 `rules[].ip_cidr` 合并去重。完全离线，
-  不依赖任何上游网络。
+将白名单展开为扁平的域名列表 + IP CIDR 列表，供飞连 SaaS「极速模式」消费。
 
 ```json
 {
   "input": {
-    "geosites": ["geosite-google", "geosite-openai", "geosite-github"],
-    "geoips": [],
-    "domain_suffix": ["claude.ai", "anthropic.com"],
-    "ip_cidr": ["149.154.0.0/16", "91.108.0.0/16"]
+    "geosites":      ["geosite-google", "geosite-anthropic"],
+    "geoips":        ["geoip-telegram"],
+    "domain_suffix": ["claude.ai"],
+    "ip_cidr":       []
   },
-  "domains": ["0emm.com", "1e100.net", "abc.xyz", "...", "youtube.com"],
-  "ip_cidrs": ["91.108.0.0/16", "149.154.0.0/16"],
-  "domains_count": 1754,
-  "ip_cidrs_count": 2,
-  "last_built_at": "2026-05-28T09:12:06.622561162Z",
-  "source": "https://cdn.jsdelivr.net/gh/v2fly/domain-list-community@master/data/"
+  "domains":        ["0emm.com", "1e100.net", "anthropic.com", "claude.ai", "..."],
+  "ip_cidrs":       ["91.108.0.0/16", "149.154.0.0/16", "..."],
+  "domains_count":  2196,
+  "ip_cidrs_count": 6694,
+  "last_built_at":  "2026-06-05T12:15:16Z",
+  "source":         "https://cdn.jsdelivr.net/gh/v2fly/domain-list-community@master/data/"
 }
 ```
 
-| 字段 | 说明 |
-|---|---|
-| `input.geosites` / `input.geoips` / `input.domain_suffix` / `input.ip_cidr` | 这次展开用的原始 yaml 输入（与 `/api/whitelist` 同步），便于消费方确认快照对应当前配置 |
-| `domains` | 由 geosites + domain_suffix 展开。小写、字典序、去重。`include:` 递归跟、`regex:` `keyword:` 跳过、`@attribute` 剥掉、`full:` `domain:` 前缀去掉 |
-| `ip_cidrs` | 由 geoips（.srs decompile）+ 字面 ip_cidr 合并。字典序、去重 |
-| `domains_count` | `len(domains)` |
-| `ip_cidrs_count` | `len(ip_cidrs)` |
-| `last_built_at` | 本快照的构建时间（UTC，RFC3339） |
-| `source` | 实际成功拉到 v2fly 数据的 base URL（geosite 失败时为空） |
-| `stale` | （仅当存在）`true` 表示最近一次刷新失败、当前返回的是上一次的旧快照 |
-| `last_error` | （仅当存在）最近一次失败的错误描述 |
+**数据来源**：
+- `domains`：v2fly/domain-list-community（经 jsdelivr CDN，CN 内可达；失败回退 raw.githubusercontent）
+- `ip_cidrs`：本地 `.srs` / `.mrs` 文件经 `sing-box rule-set decompile` 解出；mihomo 模式下 scorer 会在首次使用时按需从 MetaCubeX 拉取私有 `.srs` 缓存至 `/var/lib/leap/whitelist-srs-cache/`
 
-**行为**：
-
-- 启动时从 `/var/lib/leap/whitelist-resolved.json` 加载上次的快照（避免首启返回空），
-  然后在后台跑一次 8s 后启动的 warm refresh 把快照更新到当前 yaml 的内容。
-  老路径 `/var/lib/leap/whitelist-domains.json` 会作为 fallback 读取并升级到新结构。
-- `PUT /api/whitelist` 写完后**异步**触发一次 refresh（不阻塞 PUT 响应）。
-- 如果调用时还从来没有任何快照（首次部署刚起来、warm 还没跑完），会**同步**触发一次
-  上限 30s 的 refresh；超时 / 失败 → 503 `expansion not yet available — try again in a few seconds`。
-- 上游周期性失败时**不会**用空覆盖旧快照，会把旧快照标记 `stale=true` 继续返回。
-- expander 进程内串行（同一时刻只跑一次 refresh），多次连发 PUT 不会打爆上游。
-- geoip 展开是本地 op，几十毫秒就完成，不会影响 latency。
+**刷新时机**：`PUT /api/whitelist` 后异步触发；不阻塞 PUT 响应。快照有效期内多次 GET 返回缓存。
 
 ```bash
-# PoC 直接拉（无 token）
-curl -s http://192.168.70.92:18080/api/whitelist/resolved | jq .
-
-# 飞连"极速模式"配置：分别取 domains / ip_cidrs，每行一个
-curl -s http://192.168.70.92:18080/api/whitelist/resolved | jq -r '.domains[]'
-curl -s http://192.168.70.92:18080/api/whitelist/resolved | jq -r '.ip_cidrs[]'
-
-# 节点本机摘要
-curl -s http://127.0.0.1:18080/api/whitelist/resolved | jq '.domains_count, .ip_cidrs_count, .last_built_at'
+# 飞连极速模式集成：取域名和 IP 各一份
+curl -s http://127.0.0.1:18080/api/whitelist/resolved | jq -r '.domains[]'
+curl -s http://127.0.0.1:18080/api/whitelist/resolved | jq -r '.ip_cidrs[]'
 ```
-
-> 同样的展开逻辑也有一个 CLI 版本：`scripts/expand-whitelist.py`，但只展开 domain
-> （不做 geoip decompile，因为本地没装 sing-box）。需要 IP CIDR 时直接打 API。
 
 ---
 
 ## GET /api/rule-sets
 
-返回 leap-gateway 内嵌的 rule-set catalog（geosite + geoip 两组），每项含上游 URL、
-分类、本地是否已下载（`installed`）、当前是否在白名单里启用（`selected`）。配套返回
-`domain_suffix` / `ip_cidr` 的提示案例供 UI 预填表单。
+返回内嵌 catalog 中所有可选的 geosite + geoip tag，含 URL、分类、本地是否已安装、当前是否已启用。
 
 ```json
 {
   "geosites": {
     "catalog": [
-      {"name":"geosite-google","url":"https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geosite/google.srs","category":"tech","installed":true,"selected":true},
-      {"name":"geosite-anthropic","url":"https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geosite/anthropic.srs","category":"tech","installed":true,"selected":false},
-      {"name":"geosite-icloud","url":"https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geosite/icloud.srs","category":"productivity","installed":false,"selected":false}
+      {
+        "name":      "geosite-google",
+        "url":       "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geosite/google.srs",
+        "category":  "tech",
+        "installed": true,
+        "selected":  true
+      },
+      {
+        "name":      "geosite-category-ai-!cn",
+        "url":       "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geosite/category-ai-!cn.srs",
+        "category":  "tech",
+        "installed": true,
+        "selected":  true
+      }
     ],
-    "domain_suffix_examples": ["anthropic.com","claude.ai","cursor.com","figma.com","quora.com"]
+    "domain_suffix_examples": ["anthropic.com", "claude.ai", "cursor.com"]
   },
   "geoips": {
     "catalog": [
-      {"name":"geoip-google","url":"https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geoip/google.srs","category":"app","installed":false,"selected":false},
-      {"name":"geoip-telegram","url":"https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geoip/telegram.srs","category":"app","installed":false,"selected":false},
-      {"name":"geoip-jp","url":"https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geoip/jp.srs","category":"country","installed":false,"selected":false}
+      {
+        "name":      "geoip-google",
+        "url":       "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geoip/google.srs",
+        "category":  "app",
+        "installed": false,
+        "selected":  false
+      }
     ],
-    "ip_cidr_examples": ["149.154.0.0/16","91.108.0.0/16"]
+    "ip_cidr_examples": ["149.154.0.0/16", "91.108.0.0/16"]
   }
 }
 ```
 
-| 字段 | 说明 |
-|---|---|
-| `geosites.catalog[].name` | leap-gateway 内部 tag 名，前缀固定 `geosite-`；上游 URL 取 `<stem>` 部分（去前缀）拼到 MetaCubeX 路径 |
-| `geosites.catalog[].url` | 该 .srs 的上游 URL（leap-gateway 经内部 HTTP 代理走机场拉，CN 内可达）|
-| `geosites.catalog[].category` | 分组：`tech` / `social` / `streaming` / `reference` / `productivity`。其中含若干 `geosite-category-*` 聚合 tag（如 `geosite-category-ai-!cn`），一条命中数百域名 |
-| `geosites.catalog[].installed` | `/etc/leap/singbox/rule-sets/<name>.srs` 是否已经在本地 |
-| `geosites.catalog[].selected` | 该 tag 是否在 `whitelist.geosites` 里 |
-| `geosites.domain_suffix_examples` | UI 预填 `whitelist.domain_suffix` 的示例值（不影响实际配置）|
-| `geoips.catalog[].name` | leap-gateway 内部 tag 名，前缀固定 `geoip-`；上游 URL 同样取 `<stem>` 拼到 MetaCubeX 路径 |
-| `geoips.catalog[].url` | 完整 .srs URL —— 注意上游路径里**无** `geoip-` 前缀，由 `{stem}` 替换处理 |
-| `geoips.catalog[].category` | 分组：`app`（公司 / 应用自有 IP 段，如 `geoip-google`）/ `country`（ISO 2 字母国家码，如 `geoip-jp`）|
-| `geoips.ip_cidr_examples` | UI 预填 `whitelist.ip_cidr` 的示例值（默认是 Telegram MTProto 的 DC 段）|
-
-**catalog 的来源**：内嵌进 leap-gateway 二进制（`go:embed catalog.json`）。
-
-| 上游 | 项数 | 用途 |
-|---|---|---|
-| `MetaCubeX/meta-rules-dat` sing 分支 `geo/geosite/` 目录 | 62（按 `tech` / `social` / `streaming` / `reference` / `productivity` 五类分组，含若干 `geosite-category-*` 聚合 tag —— 一条命中数百域名） | 按域名路由 |
-| `MetaCubeX/meta-rules-dat` sing 分支 `geo/geoip/` 目录 | 23（8 个 app tag：cloudflare / cloudfront / facebook / fastly / google / netflix / telegram / twitter；15 个 ISO 国家码） | 按 IP 路由 |
-
-> **为什么统一在 MetaCubeX**：MetaCubeX/meta-rules-dat 每天 06:30 CST 自动构建（vs sagernet 周更），
-> 同时同时承载 geosite 和 geoip，上游聚合 v2fly + Loyalsoldier-enhanced，CN 域名/IP
-> 覆盖比 sagernet 单一 v2fly 上游更全。geosite 的 app tag 也都在那 —— 单一上游、统一节奏。
-
-> **慎用大网段 app geoip**：`geoip-google` / `geoip-cloudflare` 命中的是整个 Google /
-> Cloudflare 的 IP 范围（含 8.8.8.8 这种 DNS、所有 Cloudflare-fronted 站点等）。加进
-> 白名单等于把半个互联网走机场。能用 geosite 走 DNS 路径的优先用 geosite —— DNS 解
-> 析回来精确多了。geoip app tag 主要给"硬编码 IP / 不查 DNS"的应用（Telegram MTProto、
-> Signal call、WireGuard endpoint 这种）。
-
-**`geosite-cn` / `geoip-cn` 不在 catalog 里**：它们是路由 infra（命中 cn 直连），由
-`gateway.yaml` 的 `singbox.route.geosite_url` / `geoip_url` 显式指定 URL，安装时由
-`scripts/stage.sh` 预下到 `/etc/leap/singbox/rule-sets/`，不暴露给业务白名单选择。
-
-PUT `/api/whitelist` 时 geosites/geoips 必须从 catalog 里挑；本地没有的会自动按需下载（见 PUT `/api/whitelist`）。
-
-```bash
-# 看完整 catalog 数量 + examples
-curl -s http://192.168.70.92:18080/api/rule-sets \
-  | jq '{
-      geosite_count: (.geosites.catalog | length),
-      geoip_count:   (.geoips.catalog   | length),
-      installed_geosites: [.geosites.catalog[] | select(.installed) | .name],
-      not_installed:      [.geosites.catalog[] | select(.installed | not) | .name],
-      domain_examples: .geosites.domain_suffix_examples,
-      ip_examples:     .geoips.ip_cidr_examples
-    }'
-
-# 拉所有"tech"分类的 tag
-curl -s http://192.168.70.92:18080/api/rule-sets \
-  | jq '.geosites.catalog | map(select(.category=="tech")) | map(.name)'
-```
-
-## GET /api/geosites（兼容别名）
-
-```json
-{
-  "available": ["geosite-anthropic","geosite-discord","geosite-google","..."],
-  "active":    ["geosite-google","geosite-openai"]
-}
-```
-
-只返回 geosite 部分的 `{available, active}` —— `available` 是节点上 `geosite-*.srs` 实际
-存在的 tag（不是 catalog 全集），结构与旧版一致。新代码请用 `/api/rule-sets`。
+**上游**：MetaCubeX/meta-rules-dat（每日 06:30 CST 自动构建，Loyalsoldier-enhanced）。`geosite-cn` / `geoip-cn` 不在 catalog 里（它们是路由基建，由 `gateway.yaml` 固定 URL 控制）。
 
 ---
 
-## GET /api/subscriptions
+## GET /api/geosites
+
+`GET /api/rule-sets` 的兼容别名，仅返回 geosites 部分（老版本客户端使用）。
+
+---
+
+## POST /api/ux-telemetry
+
+**不需要认证**。员工浏览器扩展 / IDE 插件向 gateway 上报 UX 指标。接受单个 event 对象或 event 数组。
 
 ```json
+// 单个
+{"domain":"claude.ai","event_type":"ttfb","duration_ms":280,"client_id":"emp-007"}
+
+// 批量（推荐）
 [
-  {
-    "name": "yuyun",
-    "url": "https://yuyun.example/sub?token=3f18***8960",
-    "enabled": true,
-    "format": "auto",
-    "user_agent": "sing-box/1.10.7",
-    "nodes_count": 66,
-    "last_refresh": "2026-05-28T03:54:31Z"
-  }
+  {"domain":"claude.ai","event_type":"ttfb","duration_ms":280,"client_id":"emp-007"},
+  {"domain":"chatgpt.com","event_type":"request_error","duration_ms":5000,"detail":"connect timeout"}
 ]
 ```
 
 | 字段 | 说明 |
 |---|---|
-| `name` | 订阅名（在 sing-box 里也作为 tag 前缀：`<name>/...`） |
-| `url` | URL，但 `token=` `key=` `password=` `auth=` `secret=` 这几个查询参数中部用 `***` 打码 |
-| `enabled` | 是否启用 |
-| `format` | `auto` / `clash` / `singbox` / `uri` / `sip008` |
-| `user_agent` | 拉订阅时用的 UA。空表示用全局 `subscribe.user_agent`。机场对 UA 敏感时用：yuyun 给 Clash UA 返回 `proxies: []` 阉割版（要 `sing-box/1.10.7`）；ash 给 sing-box UA HTTP 500（要 `ClashforWindows/0.20.39`）。**留空时 leap-gateway 会自动回退**：首次 fetch 拿到 0 节点 / HTTP 5xx 就换另一族 UA 重试，命中后把发现到的 UA 写回 yaml，下次直奔正确 UA。 |
-| `nodes_count` | 上一次 refresh 该订阅解析出多少节点 |
-| `last_refresh` | 全局最后一次 refresh 时间（不是单条订阅的） |
-
-## POST /api/subscriptions
-
-请求：
+| `domain` | 目标域名，必填，会被 lowercase |
+| `event_type` | `ttfb` / `page_load` / `ws_disconnect` / `stream_stall` / `request_error` |
+| `duration_ms` | 数值语义随 event_type 变：ttfb=首字节延迟；ws_disconnect=掉线前存活时间；request_error=超时前等待时间 |
+| `client_id` | 可选，员工匿名 UUID（客户端本地生成并复用） |
+| `detail` | 可选，自由文本，最长 256 字节 |
 
 ```json
-{
-  "name": "backup",
-  "url":  "https://other-airport.example/sub?token=...",
-  "format": "auto",
-  "user_agent": "ClashforWindows/0.20.39"
-}
+// 响应 202
+{"accepted": 2}
 ```
 
-校验：
-
-- `name` 必填、非空。重复名 409。
-- `url` 必填、scheme 必须是 `http` / `https`、host 非空。
-- `format` 缺省 `auto`。
-- `user_agent` 可选，缺省走全局 `subscribe.user_agent`。机场拉不到节点时优先怀疑 UA。
-- 新增订阅默认 `enabled: true`。
-
-成功：写 yaml → SetEntries → Refresh → render → restart sing-box → 201 + 同 GET 结构（含新订阅）。
-
-> **新增第二条订阅会触发主备分流**：第一条 enabled 的为主池（`urltest-primary`），其余 enabled 的为备池（`urltest-backup`）。watchdog 会自动启用 primary→backup 故障切换。
-
-## PUT /api/subscriptions/{name}
-
-支持改 `url` 和 `user_agent`。请求：
-
-```json
-{
-  "url": "https://yuyun.example/sub?token=NEW_TOKEN",
-  "user_agent": "sing-box/1.10.7"
-}
-```
-
-`user_agent` 缺省（空字符串）= 清除该订阅的 override，走全局默认。
-未找到 404。校验通过后写 yaml + 全链刷新，返回 200 + 完整列表。
-
-## DELETE /api/subscriptions/{name}
-
-未找到 404。成功 204（无 body），背后写 yaml + 全链刷新（如果删后 enabled 为 0，refresh 会因 "no subscription produced any nodes" 报错——这种情况要先加新的再删旧的）。
+**环形缓冲区**：内存保存最近 5000 条事件（约数小时的繁忙流量），重启清零。
 
 ---
 
-## POST /api/subscribe/refresh
+## GET /api/ux-telemetry
 
-```bash
-curl -s -X POST -H "$H" 127.0.0.1:18080/api/subscribe/refresh
-```
+查询原始事件（newest-first）。
 
-成功：
+**Query params**：
+- `limit`：返回条数，默认 100，最大 1000
+- `since_sec`：只看最近 N 秒内的事件，默认 3600
 
 ```json
-{"ok": true}
+{
+  "count": 3,
+  "events": [
+    {
+      "time":        "2026-06-05T12:28:19Z",
+      "domain":      "anthropic.com",
+      "event_type":  "ttfb",
+      "duration_ms": 190,
+      "client_id":   "emp-007"
+    },
+    {
+      "time":        "2026-06-05T12:28:19Z",
+      "domain":      "claude.ai",
+      "event_type":  "ws_disconnect",
+      "duration_ms": 12000,
+      "client_id":   "emp-008",
+      "detail":      "code 1006"
+    }
+  ]
+}
 ```
-
-副作用：拉所有 enabled 订阅 → 重渲染 sing-box config → restart leap-singbox。
-失败：500 + `{"error": "..."}`。
-
-> 改 yaml 文件之后用这个，立即生效。订阅 CRUD 端点已经自动走过这条流程，无需再调一次。
 
 ---
 
-## GET /api/subscribe/refresh-interval
-## PUT /api/subscribe/refresh-interval
+## GET /api/ux-telemetry/summary
 
-读 / 改周期刷新的间隔（秒为单位），写盘并实时切换运行时调度器，不需要重启 leap-gateway。
+按域名聚合统计，适合 ops 看板。
 
-```bash
-curl -s http://192.168.70.92:18080/api/subscribe/refresh-interval
-# {"seconds":1800}
-
-# 改成 5 分钟
-curl -s -X PUT -H 'Content-Type: application/json' \
-  -d '{"seconds":300}' http://192.168.70.92:18080/api/subscribe/refresh-interval
-# {"seconds":300}
-
-# 关掉周期刷新，只接受手动 POST /api/subscribe/refresh
-curl -s -X PUT -H 'Content-Type: application/json' \
-  -d '{"seconds":0}' http://192.168.70.92:18080/api/subscribe/refresh-interval
-# {"seconds":0}
-```
-
-PUT body：
+**Query param**：
+- `window_sec`：统计时间窗口（秒），默认 3600
 
 ```json
-{"seconds": 60}
+{
+  "window_sec": 3600,
+  "domains": [
+    {
+      "domain":       "claude.ai",
+      "event_count":  47,
+      "ttfb_p50_ms":  285,
+      "ttfb_p95_ms":  520,
+      "error_rate":   0.04
+    },
+    {
+      "domain":      "chatgpt.com",
+      "event_count": 12,
+      "ttfb_p50_ms": 310,
+      "ttfb_p95_ms": 680,
+      "error_rate":  0.08
+    }
+  ]
+}
 ```
 
-| 字段 | 类型 | 说明 |
+| 字段 | 说明 |
+|---|---|
+| `ttfb_p50_ms` | 首字节延迟中位值（仅统计 event_type=ttfb） |
+| `ttfb_p95_ms` | 首字节延迟 95 分位 |
+| `error_rate` | request_error 事件占比（0~1） |
+
+---
+
+## 常用操作速查
+
+```bash
+BASE=http://192.168.70.89:18080
+
+# 整体状态
+curl -s $BASE/api/status | jq .
+
+# 查看动态节点评分
+curl -s $BASE/api/nodes/health | jq '{qualified,total,last_scored_at}'
+
+# 哪些节点在池子里 / 谁被踢出
+curl -s $BASE/api/nodes/health | jq '.nodes[] | select(.in_pool) | .name'
+curl -s $BASE/api/nodes/health | jq '.nodes[] | select(.qualified|not) | {name,reason}'
+
+# 活跃代理详情（出口 IP、RTT、池子）
+curl -s $BASE/api/proxies/active | jq '{active_proxy:.active_proxy}' 
+
+# 添加订阅
+curl -s -X POST -H 'Content-Type: application/json' $BASE/api/subscriptions \
+  -d '{"name":"new-airport","url":"https://...","user_agent":"clash.meta/v1.19.26"}'
+
+# 加一个域名进白名单
+curl -s $BASE/api/whitelist | jq '.domain_suffix += ["paigod.work"]' \
+  | curl -s -H 'Content-Type: application/json' -X PUT $BASE/api/whitelist -d @-
+
+# 查看 UX 遥测摘要（过去 1h）
+curl -s "$BASE/api/ux-telemetry/summary" | jq '.domains[:5]'
+
+# 飞连极速模式：取域名列表
+curl -s $BASE/api/whitelist/resolved | jq -r '.domains[]' | head -20
+```
+
+---
+
+## 控制面建议（管理 UI 方案）
+
+当前 gateway 提供了足够的 API 来支持一个完整的 **Web 控制台**。如果要做，以下是推荐的页面和数据来源：
+
+### 首页 Dashboard
+
+| 卡片 | 数据来源 | 刷新频率 |
 |---|---|---|
-| `seconds` | int64 ≥ 0，必填 | 周期刷新间隔的秒数。`0` ⇒ 关闭周期刷新，仅 `POST /api/subscribe/refresh` 手动触发 |
+| 节点总数 / qualified 数 | `/api/status` + `/api/nodes/health` | 30s |
+| 当前活跃出口 IP | `/api/proxies/active.active_proxy` | 30s |
+| 最近 1h UX 错误率 TOP 3 域名 | `/api/ux-telemetry/summary` | 60s |
+| 订阅 fetch 状态（最后刷新时间 + 节点数变化） | `/api/subscriptions` | 60s |
 
-校验：
+### 节点健康页
 
-- `seconds` 缺失 / 非整数 → 400；
-- `seconds < 0` → 400 `seconds must be >= 0`；
-- 持久化写回 `gateway.yaml` 的 `subscribe.refresh_interval`，重启后保持。
+实时表格，每列：`name / sub / p50 / p95 / jitter / fail_rate / throughput / in_pool / strikes / reason`。
 
-PUT 后**不会**顺手触发一次刷新（避免大量改动密集打上游）。需要立即生效就再调一次
-`POST /api/subscribe/refresh`。
+- 颜色标记：green=in_pool, yellow=qualified but high strikes, red=not qualified
+- 顶部指标：qualified/total + 最近 pool 变化时间
+- 数据来源：`GET /api/nodes/health`，30s 轮询
+
+### 白名单管理页
+
+- 左侧：已选 rule-set tags（checkbox 树，按 tech/social/streaming/reference/productivity 分组）
+- 右侧：domain_suffix 和 ip_cidr 自由输入框
+- 底部：当前 mode 切换（whitelist / overseas）
+- 数据：`GET /api/rule-sets` 渲染 catalog，`GET /api/whitelist` 回填选中态，`PUT /api/whitelist` 保存
+- 飞连集成：「复制极速模式域名/IP」按钮，调 `/api/whitelist/resolved`
+
+### 订阅管理页
+
+- 表格：name / url(脱敏) / ua / nodes_count / last_refresh / 操作按钮
+- 新增对话框：name/url/ua 三字段
+- 修改对话框：同上（编辑 url/ua）
+- 「立即刷新」按钮：`POST /api/subscribe/refresh`
+- 数据：全 CRUD 走 `/api/subscriptions*`
+
+### UX 遥测页
+
+- 折线图：过去 24h 各主要域名的 ttfb_p50 趋势（需要定时采样 `/api/ux-telemetry/summary` 保存到本地 timeseries）
+- 错误率热力表：域名 × 时段
+- 原始事件日志：`GET /api/ux-telemetry?limit=100&since_sec=3600`
+- **需要客户端侧配套**（浏览器扩展 / IDE 插件）向 `POST /api/ux-telemetry` 上报；无上报则页面无数据
+
+### 分发实测（开发者工具页）
+
+- 输入 N 个目标域名 → 并发请求（走 11080 proxy）→ 分析 chain，展示每个 dst 落到哪个节点
+- 数据：前端发请求 + 抓 `/connections` 差分
+- 价值：快速验证负载分散是否正常
 
 ---
 
-## 主备节点切换语义（watchdog v2 行为）
-
-当 enabled 订阅 ≥ 2 时，渲染器把节点按 `<sub_name>/` 前缀拆成：
-- `urltest-primary`：第一条 enabled 订阅的节点
-- `urltest-backup`：其余 enabled 订阅的节点
-
-`out` selector 默认指向 `urltest-primary`。
-
-主→备切换：
-
-1. watchdog 每 5s（±20% jitter）探测 `out` 当前选中的具体节点；
-2. 若过去 5s 有真实用户流量经过 `out`（`/connections` 字节增量 > 0），跳过合成探测——`skipped_due_traffic` 计数 +1；
-3. 连续 `fail_threshold` 次失败：
-   - 有备池 → `PUT /proxies/out` 切到 `urltest-backup`
-   - 单池 → 触发 `urltest-primary/delay` 强制全池重选
-
-备→主回切：
-
-1. 独立 goroutine 每 30 分钟探测 `urltest-primary` 当前选中节点；
-2. 连续 `primary_recovery_threshold`（默认 3）次成功 → `PUT /proxies/out` 切回；
-3. 任一次失败重置计数，重新等 30 分钟。
-
-健康时 watchdog 探测周期会自适应回退：5 → 10 → 20 → 40 → 60s（任何失败 / 选择变化 / 切换都重置回 5s）。这部分参数都在 `singbox.urltest.watchdog` 段，如需调整改 yaml + 重启 leap-gateway。
-
----
-
-## 节点上常用 curl 一键查
-
-```bash
-# 不配 token 时 H 留空即可
-TOK=$(grep -oE 'token: "\S+"' /etc/leap/gateway.yaml | head -1 | awk -F'"' '{print $2}')
-H="Authorization: Bearer $TOK"
-
-# 节点全景（最常用）
-curl -s -H "$H" 127.0.0.1:18080/api/proxies/active | python3 -m json.tool
-
-# 当前白名单
-curl -s -H "$H" 127.0.0.1:18080/api/whitelist | python3 -m json.tool
-
-# 展开后的扁平域名 + IP 段列表（飞连"极速模式"用）
-curl -s -H "$H" 127.0.0.1:18080/api/whitelist/resolved | python3 -m json.tool
-
-# Catalog 全集 + 每项 installed/selected + 提示案例（geosite + geoip 一起拉）
-curl -s -H "$H" 127.0.0.1:18080/api/rule-sets | python3 -m json.tool
-
-# 立即刷新订阅
-curl -s -X POST -H "$H" 127.0.0.1:18080/api/subscribe/refresh
-
-# 看 / 改周期刷新间隔
-curl -s -H "$H" 127.0.0.1:18080/api/subscribe/refresh-interval
-curl -s -H "$H" -H "Content-Type: application/json" -X PUT \
-     127.0.0.1:18080/api/subscribe/refresh-interval -d '{"seconds":600}'
-```
-
-## 外部平台调用范例（PoC 当前无 token）
-
-```bash
-LEAP=http://192.168.70.92:18080
-
-# 健康
-curl -s $LEAP/healthz
-
-# 节点全景
-curl -s $LEAP/api/proxies/active | jq .
-
-# 加一条 domain_suffix 进白名单（先 GET 再整体 PUT）
-curl -s $LEAP/api/whitelist | \
-  jq '.domain_suffix += ["new-site.com"]' | \
-  curl -s -H "Content-Type: application/json" \
-       -X PUT $LEAP/api/whitelist -d @-
-
-# 拉展开后的飞连"极速模式"清单（domains 一行一个；ip_cidrs 同理）
-curl -s $LEAP/api/whitelist/resolved | jq -r '.domains[]'
-curl -s $LEAP/api/whitelist/resolved | jq -r '.ip_cidrs[]'
-
-# 加一条订阅（自动触发主备分流）
-curl -s -H "Content-Type: application/json" \
-     -X POST $LEAP/api/subscriptions \
-     -d '{"name":"backup","url":"https://backup.example/sub?token=..."}'
-
-# 立即刷新所有订阅 + 重渲染 + 重启 sing-box
-curl -s -X POST $LEAP/api/subscribe/refresh
-```
-
-> 一旦切生产并启用 token，把 `LEAP=...` 后加一行 `H="Authorization: Bearer $TOK"`，每个
-> curl 加 `-H "$H"` 即可。
+*最后更新：2026-06-05，基于 commit b1ff1df，engine=mihomo 版本*
