@@ -1,22 +1,24 @@
 [Unit]
 Description=Inject leap nft table inet leap + fwmark policy routing
-After=feilian-tun@tun0.service leap-singbox.service
+# Engine-agnostic: list both possible data-plane units in After/PartOf.
+# Whichever one is actually enabled (per cfg.SingBox.Engine) drives the
+# restart cascade — when that engine restarts the kernel destroys utun-leap
+# along with our `default dev utun-leap` route in table 100, and leap-nft
+# must re-inject. The other unit is never running, so listing it is a no-op.
+After=feilian-tun@tun0.service leap-singbox.service leap-mihomo.service
 BindsTo=feilian-tun@tun0.service
-Wants=leap-singbox.service
-# Restart with leap-singbox: when sing-box restarts, the kernel destroys
-# utun-leap (along with our `default dev utun-leap` route in table 100), so
-# we must re-run iproute.sh up after sing-box recreates the interface.
-PartOf=leap-singbox.service
-# Don't let systemd give up on us during a sing-box crash-loop.
+PartOf=leap-singbox.service leap-mihomo.service
+# Don't auto-pull either engine; install.sh enables exactly one.
+# Don't let systemd give up on us during a data-plane crash-loop.
 StartLimitIntervalSec=0
 
 [Service]
 Type=oneshot
 RemainAfterExit=yes
 
-# Wait up to 60s for sing-box to create the utun-leap interface. Longer than
-# the previous 30s because a sing-box config error sends it into a 5-10s
-# restart loop, and we should outlast a transient one.
+# Wait up to 60s for the active data-plane unit to create utun-leap. Longer
+# than 30s because a config error sends the engine into a 5-10s restart
+# loop and we should outlast a transient one.
 ExecStartPre=/bin/bash -c 'for i in $(seq 1 60); do ip link show utun-leap >/dev/null 2>&1 && exit 0; sleep 1; done; echo "utun-leap not present after 60s" >&2; exit 1'
 
 ExecStart=/usr/sbin/nft -f /etc/leap/nft.conf
@@ -27,9 +29,9 @@ ExecStart=/etc/leap/iproute.sh up
 ExecStop=-/usr/sbin/nft delete table inet leap
 ExecStop=-/etc/leap/iproute.sh down
 
-# Self-heal when utun-leap was unavailable on first start (sing-box was
+# Self-heal when utun-leap was unavailable on first start (engine was
 # crash-looping). Without this, oneshot units stay in failed state forever
-# even after sing-box recovers.
+# even after the engine recovers.
 Restart=on-failure
 RestartSec=15s
 

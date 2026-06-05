@@ -7,20 +7,57 @@
 # Inputs (must be present in working directory or fetched):
 #   - leap-gateway       Linux binary (built with `GOOS=linux go build ./cmd/gateway`)
 #   - sing-box           1.10.x binary (downloaded by --bootstrap-singbox if missing)
-#   - gateway.yaml       Filled-in config (subscription URL + node.{client_subnet,tun0_gateway_ip,egress_iface})
+#   - mihomo             1.19.x binary (optional; required only if engine=mihomo)
+#   - gateway.yaml       Filled-in config (subscription URL + node values + optional engine)
 #
 # Companion files (same directory as this script):
-#   leap-singbox.service / leap-gateway.service / leap-nft.service / nft.conf.tmpl /
-#   iproute.sh / logrotate-leap.conf
+#   leap-singbox.service / leap-mihomo.service / leap-gateway.service /
+#   leap-nft.service / nft.conf.tmpl / iproute.sh / logrotate-leap.conf
+#
+# Engine selection is read from gateway.yaml's `singbox.engine` field
+# (default "sing-box"; valid: "sing-box" | "mihomo"). Both engines' binaries
+# and unit files are installed; only the active one is enabled. Switching
+# engines later: edit /etc/leap/gateway.yaml singbox.engine, run install.sh
+# again — it stops the old engine, enables the new one, restarts leap-nft.
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SINGBOX_VERSION="${SINGBOX_VERSION:-1.10.7}"
+MIHOMO_VERSION="${MIHOMO_VERSION:-1.19.26}"
 SKIP_PRECHECK="${SKIP_PRECHECK:-0}"
 
 log()  { printf '[install] %s\n' "$*"; }
 fail() { printf '[install][FAIL] %s\n' "$*" >&2; exit 1; }
+
+# Read the active engine from gateway.yaml. Defaults to sing-box for the
+# preflight stage when /etc/leap/gateway.yaml doesn't exist yet (first
+# install). Read both from $SCRIPT_DIR (incoming) and /etc/leap (existing)
+# in that order so re-runs after operator edits pick up the new value.
+detect_engine() {
+  local f
+  for f in "$SCRIPT_DIR/gateway.yaml" /etc/leap/gateway.yaml; do
+    [ -f "$f" ] || continue
+    local e
+    e=$(awk '/^[[:space:]]*engine:[[:space:]]/{
+      gsub(/^[[:space:]]*engine:[[:space:]]*/, "")
+      gsub(/[[:space:]"'\''#].*$/, "")
+      print; exit
+    }' "$f")
+    if [ -n "$e" ]; then
+      echo "$e"
+      return
+    fi
+  done
+  echo "sing-box"
+}
+
+ENGINE=$(detect_engine)
+log "active engine: $ENGINE"
+case "$ENGINE" in
+  sing-box|mihomo) ;;
+  *) fail "invalid engine '$ENGINE' in gateway.yaml — must be sing-box | mihomo" ;;
+esac
 
 # ---------------------------------------------------------------------------
 # 0. Root check
@@ -64,9 +101,9 @@ precheck() {
   # The DNS port we want to bind must be free.
   if [ -n "${expected_gw:-}" ]; then
     if ss -tulnp 2>/dev/null | grep -E "(${expected_gw}|0\.0\.0\.0):53\b" \
-                              | grep -v 'sing-box' >/dev/null; then
+                              | grep -v -E 'sing-box|mihomo' >/dev/null; then
       ss -tulnp 'sport = :53' >&2
-      fail "$expected_gw:53 already bound by something other than sing-box"
+      fail "$expected_gw:53 already bound by something other than the proxy engine"
     fi
     log "preflight: $expected_gw:53 free"
   fi
@@ -96,15 +133,19 @@ precheck() {
 }
 
 # ---------------------------------------------------------------------------
-# 2. Install sing-box
+# 2. Install proxy-engine binary (sing-box and/or mihomo)
+#
+# Both binaries can coexist on disk. Only the active one (per ENGINE)
+# is installed when its package is missing; the other is best-effort.
+# Service unit selection at start_services time decides which is enabled.
 
 install_singbox() {
   if [ -x "$SCRIPT_DIR/sing-box" ]; then
     install -m 0755 "$SCRIPT_DIR/sing-box" /usr/local/bin/sing-box
     log "sing-box installed from $SCRIPT_DIR/sing-box"
-  elif command -v sing-box >/dev/null 2>&1 && [ "$(command -v sing-box)" = "/usr/local/bin/sing-box" ]; then
+  elif [ -x /usr/local/bin/sing-box ]; then
     log "sing-box already installed at /usr/local/bin/sing-box"
-  else
+  elif [ "$ENGINE" = "sing-box" ]; then
     log "downloading sing-box ${SINGBOX_VERSION} (set SINGBOX_VERSION to override)"
     arch=$(uname -m)
     case "$arch" in
@@ -121,12 +162,48 @@ install_singbox() {
     tar -xzf "$tmp/sb.tgz" -C "$tmp"
     install -m 0755 "$tmp/$pkg/sing-box" /usr/local/bin/sing-box
     rm -rf "$tmp"
+  else
+    log "sing-box not present; engine=$ENGINE so we don't need it now"
+    return
   fi
   v=$(/usr/local/bin/sing-box version | head -1)
   case "$v" in
     *"version 1.10."*) log "sing-box: $v" ;;
-    *) fail "sing-box version $v is not 1.10.x — set SINGBOX_VERSION=1.10.7 and rerun" ;;
+    *) [ "$ENGINE" = "sing-box" ] && fail "sing-box version $v is not 1.10.x — set SINGBOX_VERSION=1.10.7 and rerun" || log "(non-active) sing-box: $v" ;;
   esac
+}
+
+install_mihomo() {
+  if [ -x "$SCRIPT_DIR/mihomo" ]; then
+    install -m 0755 "$SCRIPT_DIR/mihomo" /usr/local/bin/mihomo
+    log "mihomo installed from $SCRIPT_DIR/mihomo"
+  elif [ -x /usr/local/bin/mihomo ]; then
+    log "mihomo already installed at /usr/local/bin/mihomo"
+  elif [ "$ENGINE" = "mihomo" ]; then
+    log "downloading mihomo ${MIHOMO_VERSION} compatible build (set MIHOMO_VERSION to override)"
+    arch=$(uname -m)
+    case "$arch" in
+      x86_64)  go_arch=amd64 ;;
+      aarch64) go_arch=arm64 ;;
+      *) fail "unsupported arch: $arch" ;;
+    esac
+    # Use the "compatible" variant — works on CPUs without AMD64-v3 (avx2),
+    # which several FeiLian forwarding-node hardware classes lack.
+    pkg="mihomo-linux-${go_arch}-compatible-v${MIHOMO_VERSION}"
+    url="https://github.com/MetaCubeX/mihomo/releases/download/v${MIHOMO_VERSION}/${pkg}.gz"
+    tmp=$(mktemp -d)
+    log "fetching $url"
+    curl -fsSL "$url" -o "$tmp/m.gz" \
+      || fail "could not download mihomo; place a binary at $SCRIPT_DIR/mihomo and rerun"
+    gunzip "$tmp/m.gz"
+    install -m 0755 "$tmp/m" /usr/local/bin/mihomo
+    rm -rf "$tmp"
+  else
+    log "mihomo not present; engine=$ENGINE so we don't need it now"
+    return
+  fi
+  v=$(/usr/local/bin/mihomo -v 2>&1 | head -1)
+  log "mihomo: $v"
 }
 
 # ---------------------------------------------------------------------------
@@ -138,7 +215,11 @@ install_leap() {
   install -m 0755 "$SCRIPT_DIR/leap-gateway" /usr/local/bin/leap-gateway
   log "leap-gateway installed"
 
-  install -d -m 0755 /etc/leap /etc/leap/singbox /etc/leap/singbox/rule-sets /var/lib/leap
+  # Create dirs for BOTH engines so a future engine swap doesn't need a
+  # second install.sh pass. Engine-irrelevant dirs grouped first.
+  install -d -m 0755 /etc/leap /var/lib/leap
+  install -d -m 0755 /etc/leap/singbox /etc/leap/singbox/rule-sets
+  install -d -m 0755 /var/lib/leap/mihomo /var/lib/leap/mihomo/rule-sets
 
   if [ -f "$SCRIPT_DIR/gateway.yaml" ]; then
     install -m 0640 "$SCRIPT_DIR/gateway.yaml" /etc/leap/gateway.yaml
@@ -149,15 +230,46 @@ install_leap() {
     log "keeping existing /etc/leap/gateway.yaml (no gateway.yaml in $SCRIPT_DIR)"
   fi
 
-  # rule-sets — baked into the tarball by stage.sh. sing-box loads these as
-  # type=local so startup is deterministic regardless of urltest readiness.
-  if [ -d "$SCRIPT_DIR/rule-sets" ] && compgen -G "$SCRIPT_DIR/rule-sets/*.srs" >/dev/null; then
-    install -m 0644 "$SCRIPT_DIR"/rule-sets/*.srs /etc/leap/singbox/rule-sets/
-    n=$(find "$SCRIPT_DIR/rule-sets" -name '*.srs' | wc -l | tr -d ' ')
-    log "rule-sets installed ($n .srs files in /etc/leap/singbox/rule-sets/)"
-  else
-    fail "no rule-sets/*.srs in $SCRIPT_DIR — re-run scripts/stage.sh on operator workstation"
+  # rule-sets — baked into the tarball by stage.sh. The active engine reads
+  # from its own directory:
+  #   sing-box → /etc/leap/singbox/rule-sets/<tag>.srs
+  #   mihomo   → /var/lib/leap/mihomo/rule-sets/<tag>.mrs
+  # Install whichever is present in $SCRIPT_DIR/rule-sets/.
+  if [ -d "$SCRIPT_DIR/rule-sets" ]; then
+    if compgen -G "$SCRIPT_DIR/rule-sets/*.srs" >/dev/null; then
+      install -m 0644 "$SCRIPT_DIR"/rule-sets/*.srs /etc/leap/singbox/rule-sets/
+      n=$(find "$SCRIPT_DIR/rule-sets" -name '*.srs' | wc -l | tr -d ' ')
+      log "rule-sets installed ($n .srs in /etc/leap/singbox/rule-sets/)"
+    fi
+    if compgen -G "$SCRIPT_DIR/rule-sets/*.mrs" >/dev/null; then
+      install -m 0644 "$SCRIPT_DIR"/rule-sets/*.mrs /var/lib/leap/mihomo/rule-sets/
+      n=$(find "$SCRIPT_DIR/rule-sets" -name '*.mrs' | wc -l | tr -d ' ')
+      log "rule-sets installed ($n .mrs in /var/lib/leap/mihomo/rule-sets/)"
+    fi
   fi
+
+  # mihomo's geoip.metadb (used by mihomo's dns fallback-filter geoip:CN
+  # check). If staged, drop in the working dir; otherwise leave for mihomo
+  # to download on first start (works only when leap-gateway has already
+  # routed mihomo's HTTP fetches through itself, chicken-and-egg).
+  if [ -f "$SCRIPT_DIR/geoip.metadb" ]; then
+    install -m 0644 "$SCRIPT_DIR/geoip.metadb" /var/lib/leap/mihomo/geoip.metadb
+    log "geoip.metadb installed for mihomo"
+  fi
+
+  # Engine sanity: the active engine must have its required deliverables.
+  case "$ENGINE" in
+    sing-box)
+      compgen -G "/etc/leap/singbox/rule-sets/*.srs" >/dev/null \
+        || fail "engine=sing-box but no .srs files in /etc/leap/singbox/rule-sets/ — re-run scripts/stage.sh"
+      ;;
+    mihomo)
+      compgen -G "/var/lib/leap/mihomo/rule-sets/*.mrs" >/dev/null \
+        || fail "engine=mihomo but no .mrs files in /var/lib/leap/mihomo/rule-sets/ — re-run scripts/stage.sh"
+      [ -f /var/lib/leap/mihomo/geoip.metadb ] \
+        || log "WARNING: mihomo geoip.metadb missing; mihomo will fail to start until it downloads one"
+      ;;
+  esac
 }
 
 # ---------------------------------------------------------------------------
@@ -183,7 +295,11 @@ install_nft() {
 # 5. Install systemd units + logrotate, enable, start
 
 install_units() {
-  for unit in leap-singbox.service leap-gateway.service leap-nft.service; do
+  # Install ALL data-plane unit files; only the active engine's gets
+  # enabled at start_services. Lets cutover happen via gateway.yaml edit
+  # + install.sh re-run, no manual cp+sed.
+  for unit in leap-singbox.service leap-mihomo.service leap-gateway.service leap-nft.service; do
+    [ -f "$SCRIPT_DIR/$unit" ] || continue
     install -m 0644 "$SCRIPT_DIR/$unit" "/etc/systemd/system/$unit"
   done
   install -m 0644 "$SCRIPT_DIR/logrotate-leap.conf" /etc/logrotate.d/leap
@@ -191,22 +307,48 @@ install_units() {
   log "systemd units installed"
 }
 
-# 6. Pre-render the sing-box config so leap-singbox.service's first start
-# finds a valid file. Without this, sing-box check (ExecStartPre) fails on
-# first boot and the unit fail-restarts for ~5s until leap-gateway has had
-# a chance to write the bootstrap config — harmless but noisy in logs.
+# 6. Pre-render the data-plane config so the active engine's first start
+# finds a valid file. Without this, sing-box's check (ExecStartPre) /
+# mihomo's parse fails on first boot and the unit fail-restarts for ~5s
+# until leap-gateway has had a chance to write the bootstrap config —
+# harmless but noisy in logs.
 prerender_config() {
   /usr/local/bin/leap-gateway --config /etc/leap/gateway.yaml --render-once \
     || fail "leap-gateway --render-once failed; check gateway.yaml"
-  log "bootstrap singbox config rendered at /etc/leap/singbox/config.json"
+  case "$ENGINE" in
+    sing-box) log "bootstrap sing-box config rendered at /etc/leap/singbox/config.json" ;;
+    mihomo)   log "bootstrap mihomo config rendered at /var/lib/leap/mihomo/config.yaml" ;;
+  esac
 }
 
 start_services() {
-  # Start order: leap-singbox -> leap-nft (waits for utun-leap) -> leap-gateway.
-  # systemd handles ordering via After= / Requires=, but enabling all three is
-  # explicit so they auto-start on reboot.
-  systemctl enable --now leap-singbox.service leap-gateway.service leap-nft.service
-  systemctl --no-pager status leap-singbox.service leap-gateway.service leap-nft.service \
+  # Two engine units exist; only one is enabled per ENGINE. Re-running this
+  # function with a different ENGINE value (operator edited gateway.yaml +
+  # ran install.sh again) cleanly switches: stop+disable inactive, start
+  # active, restart leap-nft so its PartOf attachment recreates utun-leap
+  # routes against the new engine.
+  local active inactive
+  case "$ENGINE" in
+    sing-box) active=leap-singbox.service; inactive=leap-mihomo.service ;;
+    mihomo)   active=leap-mihomo.service;  inactive=leap-singbox.service ;;
+  esac
+
+  if systemctl is-enabled --quiet "$inactive" 2>/dev/null; then
+    log "switching engine: stopping + disabling $inactive"
+    systemctl disable --now "$inactive" || true
+  fi
+
+  log "enabling + starting $active"
+  systemctl enable --now "$active"
+  systemctl enable --now leap-gateway.service
+
+  # leap-nft must come up AFTER active engine creates utun-leap (its
+  # ExecStartPre waits up to 60s for that), and restart whenever the engine
+  # restarts (PartOf chain). Always (re)start it last.
+  systemctl enable leap-nft.service
+  systemctl restart leap-nft.service
+
+  systemctl --no-pager status "$active" leap-gateway.service leap-nft.service \
     | head -30 || true
 }
 
@@ -218,12 +360,13 @@ main() {
     log "SKIP_PRECHECK=1 — skipping preflight"
   fi
   install_singbox
+  install_mihomo
   install_leap
   install_nft
   install_units
   prerender_config
   start_services
-  log "DONE — verify with 'systemctl status leap-*' and 'journalctl -fu leap-singbox'"
+  log "DONE — verify with 'systemctl status leap-*' and 'journalctl -fu leap-${ENGINE}'"
 }
 
 main "$@"

@@ -40,8 +40,25 @@ node:
   egress_iface:     "ens18"          # public-internet egress NIC
 
 singbox:
-  config_path: "/etc/leap/singbox/config.json"
-  log_level:   "info"
+  # engine: which proxy data plane to render + control.
+  #   sing-box (default): single-active urltest. Stable, conservative.
+  #   mihomo            : multi-active load-balance (consistent-hashing).
+  #                       Better US-pool utilization across multiple
+  #                       subscriptions; recommended for ≥2 subs.
+  #
+  # Both engines coexist on disk after install.sh; only the listed one
+  # is enabled. Switch via this field + `install.sh` re-run (or just
+  # `systemctl restart leap-gateway`).
+  engine: mihomo
+
+  # Engine-aware paths. install.sh + leap-gateway pick defaults per engine
+  # if these are blank. Setting them explicitly is fine but not required.
+  # config_path:    "/etc/leap/singbox/config.json"   # for engine=sing-box
+  # config_path:    "/var/lib/leap/mihomo/config.yaml"  # for engine=mihomo
+  # rule_sets_dir:  "/etc/leap/singbox/rule-sets"     # for engine=sing-box
+  # rule_sets_dir:  "/var/lib/leap/mihomo/rule-sets"  # for engine=mihomo
+  # binary_path:    "/usr/local/bin/sing-box"  |  "/usr/local/bin/mihomo"
+  log_level: "info"
 
   # Clash-API HTTP endpoint sing-box exposes for hot reload + observability.
   clash_api:
@@ -58,7 +75,15 @@ singbox:
   dns:
     # Override default <tun0_gateway_ip>:53 if needed.
     # listen: "10.8.11.1:53"
-    fakeip_range: "198.18.0.0/15"   # sing-box-internal pool; do NOT put this in FeiLian SaaS
+    fakeip_range: "198.18.0.0/15"   # internal fakeip pool; do NOT put this in FeiLian SaaS
+    # fake_ip_skip_suffixes — internal/private hostnames that must NOT be
+    # fakeip'd. Required when employees access intranet services whose
+    # hostnames resolve to CN/LAN IPs but aren't on geosite-cn (private
+    # *.work / *.feilian.cn etc.). Without this, mihomo/sing-box hand out
+    # 198.18.x.x and DIRECT outbound dials the unreachable fake IP.
+    # Format: any of "+.example.com" / ".example.com" / "example.com" —
+    # all normalized to "+." prefix internally.
+    fake_ip_skip_suffixes: []
     # Resolution paths. Defaults match docs/dns.md §6 with measured FeiLian
     # node connectivity (Cloudflare DoT reachable, doh.pub un-poisoned for
     # overseas).

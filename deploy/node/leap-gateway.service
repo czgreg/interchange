@@ -1,7 +1,12 @@
 [Unit]
-Description=leap-gateway control plane (subscription fetch + sing-box render + clash-api reload)
-After=leap-singbox.service
-Wants=leap-singbox.service
+Description=leap-gateway control plane (subscription fetch + data-plane render + clash-api reload)
+# Control plane is independent of which proxy engine is active. install.sh
+# enables exactly one of leap-singbox.service / leap-mihomo.service at deploy
+# time based on cfg.SingBox.Engine; leap-gateway re-renders + reloads via
+# clash-api regardless. Avoid hard Wants= to prevent the wrong engine from
+# being auto-started by systemd when this unit comes up.
+After=network-online.target
+Wants=network-online.target
 
 [Service]
 Type=simple
