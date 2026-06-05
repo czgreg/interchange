@@ -46,13 +46,25 @@ func (s *Scorer) loadState() {
 	slog.Info("nodescorer: restored state", "nodes", len(raw))
 }
 
-// saveState persists scorer counters to disk. Called after each scoring
-// round. Failures are logged but not fatal.
-func (s *Scorer) saveState() {
+// saveStateLocked persists scorer counters to disk. **CALLER MUST HOLD
+// s.mu** (write lock — read won't satisfy because the caller has typically
+// just mutated s.state). Failures are logged but not fatal.
+//
+// Why no internal locking: this is called from score() which already holds
+// s.mu.Lock(). A naive RLock here self-deadlocks because Go's RWMutex
+// blocks RLock when readerCount has been negated by a Lock — even if the
+// Lock is held by the same goroutine. Caught in production 2026-06-06:
+// every nodescorer goroutine on 89 / 92 had been hung at saveState.RLock
+// for 70+ minutes since the previous deploy, blocking every caller of
+// GetSnapshot (handleStatus, handleNodesHealth) by extension.
+//
+// The disk write happens while the caller's write lock is still held.
+// JSON marshal + atomic write of a small map is sub-millisecond on local
+// disk — acceptable lock-hold time for our scoring cadence.
+func (s *Scorer) saveStateLocked() {
 	if s.renderer == nil {
 		return
 	}
-	s.mu.RLock()
 	raw := make(map[string]persistedState, len(s.state))
 	for tag, st := range s.state {
 		raw[tag] = persistedState{
@@ -60,7 +72,6 @@ func (s *Scorer) saveState() {
 			OkRounds: st.okRuns,
 		}
 	}
-	s.mu.RUnlock()
 
 	data, err := json.MarshalIndent(raw, "", "  ")
 	if err != nil {

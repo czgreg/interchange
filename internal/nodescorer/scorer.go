@@ -303,7 +303,10 @@ func (s *Scorer) score(ctx context.Context) {
 		"total", len(nodes),
 		"pool_changed", poolChanged,
 	)
-	s.saveState()
+	// Persist counters while still holding s.mu.Lock(). saveStateLocked
+	// does NOT re-take the mutex (would self-deadlock on RWMutex semantics
+	// — see persist.go).
+	s.saveStateLocked()
 
 	if poolChanged {
 		go s.hotReload(context.Background(), newPoolSet)
