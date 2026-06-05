@@ -91,12 +91,16 @@ func (r *Renderer) SetSubscriptions(subs []config.SubscriptionEntry) {
 }
 
 // SetWhitelist re-seats the renderer's route mode + whitelist snapshot.
-// Required because Renderer holds cfg by value: mutations to the live
-// *config.Config don't propagate. Call this from API handlers right
-// before re-rendering after a whitelist edit.
 func (r *Renderer) SetWhitelist(mode string, wl config.WhitelistConfig) {
 	r.cfg.Route.Mode = mode
 	r.cfg.Route.Whitelist = wl
+}
+
+// SetFakeIPSkip re-seats the DNS fake-ip-filter skip-list. Called by the
+// API layer after PUT /api/whitelist so the updated fake-ip-filter is
+// emitted in the next Write without needing a full config reload.
+func (r *Renderer) SetFakeIPSkip(suffixes []string) {
+	r.cfg.DNS.FakeIPSkipSuffixes = append([]string(nil), suffixes...)
 }
 
 // RenderWithQualifiedNodes produces a Clash YAML where us-pool contains

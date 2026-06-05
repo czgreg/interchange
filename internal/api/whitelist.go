@@ -21,12 +21,21 @@ import (
 // IP side (added so apps that skip DNS still get whitelisted — see Telegram):
 //   - Geoips: rule-set tags (must start with "geoip-", must exist on disk).
 //   - IPCIDR: CIDR or bare IP literals; bare IPs normalized to /32 or /128.
+//
+// DNS side:
+//   - FakeIPSkip: domains that must not receive a fakeip from the engine's
+//     DNS server. Required for internal services whose hostnames resolve to
+//     CN/LAN IPs but aren't on geosite-cn (paigod.work, feilian.cn, …).
+//     Accepted formats: "+.example.com" / ".example.com" / "example.com"
+//     — all normalised to "+." prefix. Synced to
+//     cfg.SingBox.DNS.FakeIPSkipSuffixes on every successful PUT.
 type whitelistDTO struct {
 	Mode         string   `json:"mode"`
 	Geosites     []string `json:"geosites"`
 	Geoips       []string `json:"geoips"`
 	DomainSuffix []string `json:"domain_suffix"`
 	IPCIDR       []string `json:"ip_cidr"`
+	FakeIPSkip   []string `json:"fake_ip_skip"`
 }
 
 func (s *Server) handleWhitelistGet(w http.ResponseWriter, r *http.Request) {
@@ -37,6 +46,7 @@ func (s *Server) handleWhitelistGet(w http.ResponseWriter, r *http.Request) {
 		Geoips:       append([]string{}, wl.Geoips...),
 		DomainSuffix: append([]string{}, wl.DomainSuffix...),
 		IPCIDR:       append([]string{}, wl.IPCIDR...),
+		FakeIPSkip:   append([]string{}, wl.FakeIPSkip...),
 	})
 }
 
@@ -90,6 +100,27 @@ func (s *Server) handleWhitelistPut(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Normalise fake_ip_skip entries to "+.<suffix>" form (mihomo/sing-box
+	// require this prefix; we accept bare / leading-dot forms for convenience).
+	fakeSkip := make([]string, 0, len(dto.FakeIPSkip))
+	seenFS := map[string]bool{}
+	for _, raw := range dto.FakeIPSkip {
+		s := strings.TrimSpace(strings.ToLower(raw))
+		if s == "" {
+			continue
+		}
+		if s[0] == '.' {
+			s = "+" + s
+		} else if len(s) < 2 || s[:2] != "+." {
+			s = "+." + s
+		}
+		if seenFS[s] {
+			continue
+		}
+		seenFS[s] = true
+		fakeSkip = append(fakeSkip, s)
+	}
+
 	mode := strings.ToLower(strings.TrimSpace(dto.Mode))
 	if mode == "" {
 		mode = s.deps.Cfg.SingBox.Route.Mode
@@ -119,6 +150,10 @@ func (s *Server) handleWhitelistPut(w http.ResponseWriter, r *http.Request) {
 		c.SingBox.Route.Whitelist.Geoips = geoips
 		c.SingBox.Route.Whitelist.DomainSuffix = suffixes
 		c.SingBox.Route.Whitelist.IPCIDR = cidrs
+		c.SingBox.Route.Whitelist.FakeIPSkip = fakeSkip
+		// Sync fake_ip_skip to the DNS config layer so the renderer
+		// picks it up without a separate config update.
+		c.SingBox.DNS.FakeIPSkipSuffixes = fakeSkip
 		return nil
 	})
 	if err != nil {
@@ -250,14 +285,18 @@ func (s *Server) handleWhitelistResolved(w http.ResponseWriter, r *http.Request)
 	writeJSON(w, http.StatusOK, snap)
 }
 
-// rerenderAndReload re-renders the sing-box config from the cached subscription
-// state and triggers a sing-box reload. Used by mutating API endpoints
+// rerenderAndReload re-renders the data-plane config from the cached subscription
+// state and triggers a data-plane reload. Used by mutating API endpoints
 // (whitelist PUT, refresh-interval PUT) where the cfg has changed without
 // touching subscriptions. Subscription writes use RunRefresh instead.
 func (s *Server) rerenderAndReload(ctx context.Context) error {
 	// Renderer holds cfg.SingBox by value — must reseed engine-relevant
 	// fields after a Mutate before Write reads stale state.
-	s.deps.Renderer.SetWhitelist(s.deps.Cfg.SingBox.Route.Mode, s.deps.Cfg.SingBox.Route.Whitelist)
+	wl := s.deps.Cfg.SingBox.Route.Whitelist
+	s.deps.Renderer.SetWhitelist(s.deps.Cfg.SingBox.Route.Mode, wl)
+	// Sync fake_ip_skip to the renderer's DNS config layer so the updated
+	// fake-ip-filter is emitted without requiring a full config reload.
+	s.deps.Renderer.SetFakeIPSkip(s.deps.Cfg.SingBox.DNS.FakeIPSkipSuffixes)
 	out := s.deps.Subscribe.AllOutbounds()
 	if _, err := s.deps.Renderer.Write(out); err != nil {
 		return fmt.Errorf("render: %w", err)

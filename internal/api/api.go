@@ -56,6 +56,10 @@ type Renderer interface {
 	// whitelist must call this before triggering a re-render — otherwise
 	// rendered config is stale (rule-providers / rules drop new tags).
 	SetWhitelist(mode string, wl config.WhitelistConfig)
+	// SetFakeIPSkip re-seats the DNS fake-ip-filter skip-list.
+	// Synced on every PUT /api/whitelist so the renderer emits the updated
+	// fake-ip-filter without a separate config reload.
+	SetFakeIPSkip(suffixes []string)
 }
 
 type Server struct {

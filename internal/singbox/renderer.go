@@ -102,13 +102,16 @@ func (r *Renderer) SetSubscriptions(subs []config.SubscriptionEntry) {
 }
 
 // SetWhitelist re-seats the renderer's route mode + whitelist snapshot.
-// Required because Renderer holds cfg by value: mutations to the live
-// *config.Config don't propagate. Call from API handlers right before
-// re-rendering after a whitelist edit, otherwise rule-set / route entries
-// will drop newly added tags.
 func (r *Renderer) SetWhitelist(mode string, wl config.WhitelistConfig) {
 	r.cfg.Route.Mode = mode
 	r.cfg.Route.Whitelist = wl
+}
+
+// SetFakeIPSkip re-seats the DNS fake-ip-filter skip-list.
+// sing-box doesn't have a direct fake-ip-filter config but the list is used
+// by the mihomo renderer; the method is on both to satisfy the interface.
+func (r *Renderer) SetFakeIPSkip(suffixes []string) {
+	r.cfg.DNS.FakeIPSkipSuffixes = append([]string(nil), suffixes...)
 }
 
 // Path is the on-disk path of the rendered config.

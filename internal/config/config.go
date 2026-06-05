@@ -182,7 +182,7 @@ type RouteConfig struct {
 }
 
 // WhitelistConfig enumerates what's allowed through the airport in whitelist
-// mode. The four lists are unioned at render time:
+// mode. The four routing lists are unioned at render time:
 //
 //   - Domain-side: Geosites (rule_set refs) ∪ DomainSuffix (literal suffixes).
 //     Hits via DNS / SNI sniff → outbound "out".
@@ -198,11 +198,23 @@ type RouteConfig struct {
 //   - Geoips entries must start with "geoip-" (same convention).
 //   - DomainSuffix: bare domains, no scheme/path (e.g. "claude.ai").
 //   - IPCIDR: CIDR or bare IP. Bare IP normalized to /32 (v4) or /128 (v6).
+//
+// FakeIPSkip controls the DNS layer: domains listed here are exempted from
+// fakeip and get a real IP answer from cn-doh instead. This is the correct
+// fix for internal services (paigod.work, feilian.cn, …) whose hostnames
+// are not on geosite-cn but resolve to CN/LAN IPs — without this exemption
+// mihomo hands out 198.18.x.x for those domains and DIRECT outbound fails.
+// Entries are normalized to "+.<suffix>" form (leading-dot and bare-suffix
+// forms are also accepted and converted).
 type WhitelistConfig struct {
 	Geosites     StringList `yaml:"geosites"`
 	Geoips       StringList `yaml:"geoips"`
 	DomainSuffix []string   `yaml:"domain_suffix"`
 	IPCIDR       []string   `yaml:"ip_cidr"`
+	// FakeIPSkip is surfaced via PUT /api/whitelist as the `fake_ip_skip`
+	// field. On mutation it is synced to cfg.SingBox.DNS.FakeIPSkipSuffixes
+	// so the renderer picks it up without a separate API call.
+	FakeIPSkip []string `yaml:"fake_ip_skip"`
 }
 
 // StringList is yaml-decoded as []string but tolerates the legacy "list of
