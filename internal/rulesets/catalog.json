@@ -1,6 +1,6 @@
 {
   "geosites": {
-    "url_template": "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/{name}.srs",
+    "url_template": "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geosite/{stem}.srs",
     "items": [
       {"name": "geosite-google",       "category": "tech"},
       {"name": "geosite-youtube",      "category": "tech"},

@@ -122,7 +122,7 @@ sing-box `route.rules` 按"先匹配先生效"评估：
 
 `final: "out"` → selector，selector 默认 `urltest` → 节点池里延迟最低的机场节点。
 
-`rule_set` 用 sing-box 官方 `geosite-cn.srs` / `geoip-cn.srs`，远程加载，每周自动更新。
+`rule_set` 用 MetaCubeX/meta-rules-dat 的 `geosite-cn.srs` / `geoip-cn.srs`（每天 06:30 CST 自动构建，上游聚合 v2fly + Loyalsoldier-enhanced），远程加载，每周自动更新。
 
 判定优先级"先域名后 IP"在 fake-IP 模式下尤其关键：fake-IP 给客户端的 IP 永远在 198.18.0.0/15，sing-box TUN 反查回原域名后按域名分流，**绕过 GFW 污染、CDN 边缘错配两个老问题**。
 

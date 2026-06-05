@@ -94,16 +94,24 @@ log "deploy/node/* files staged"
 RULESETS_CACHE="$SINGBOX_CACHE/rule-sets"
 mkdir -p "$RULESETS_CACHE" "$STAGE_DIR/rule-sets"
 
+# Rule-set entries are "<save_name>|<url>" tuples. MetaCubeX URL paths use
+# stem-only filenames (no "geosite-" / "geoip-" prefix), but the renderer
+# loads each rule-set by tag — so we must save to <tag>.srs on disk.
 # Always pre-fetch the two infra rule-sets used by the route classifier.
-RULESET_URLS=(
-  "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-cn.srs"
-  "https://raw.githubusercontent.com/SagerNet/sing-geoip/rule-set/geoip-cn.srs"
+RULESET_ENTRIES=(
+  "geosite-cn.srs|https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geosite/cn.srs"
+  "geoip-cn.srs|https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geoip/cn.srs"
 )
 
 # Tags requested by gateway.yaml as full URLs — legacy form, kept for yaml
 # that still has explicit url: fields under singbox.route.geosite_url etc.
+# These now point to MetaCubeX stem URLs; map back to <tag>.srs by category.
 while IFS= read -r u; do
-  RULESET_URLS+=("$u")
+  case "$u" in
+    *"/geo/geosite/"*) RULESET_ENTRIES+=("geosite-$(basename "$u")|$u") ;;
+    *"/geo/geoip/"*)   RULESET_ENTRIES+=("geoip-$(basename "$u")|$u")   ;;
+    *)                 RULESET_ENTRIES+=("$(basename "$u")|$u") ;;
+  esac
 done < <(grep -oE 'https://[^"[:space:]]+\.srs' "$GATEWAY_YAML" | sort -u)
 
 # Tags from gateway.yaml's whitelist (post-migration: geosites: [tag, ...]
@@ -124,37 +132,42 @@ done < <(awk '
   }
 ' "$GATEWAY_YAML")
 
-# Resolve each WL tag to a URL by prefix.
+# Resolve each WL tag to a URL by prefix. MetaCubeX paths use stem-only
+# filenames; we save to <tag>.srs locally to match the renderer's
+# rule_set path lookup.
 for tag in "${WL_TAGS[@]}"; do
   case "$tag" in
-    geosite-*) RULESET_URLS+=("https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/${tag}.srs") ;;
-    geoip-*)   RULESET_URLS+=("https://raw.githubusercontent.com/SagerNet/sing-geoip/rule-set/${tag}.srs")   ;;
+    geosite-*) stem="${tag#geosite-}"
+               RULESET_ENTRIES+=("${tag}.srs|https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geosite/${stem}.srs") ;;
+    geoip-*)   stem="${tag#geoip-}"
+               RULESET_ENTRIES+=("${tag}.srs|https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geoip/${stem}.srs") ;;
     *)         log "  skip unknown tag prefix: $tag" ;;
   esac
 done
 
-# Dedupe (bash 3.2 has no associative arrays — use a sentinel string).
-DEDUPED_URLS=()
+# Dedupe by save_name|url tuple (bash 3.2 has no associative arrays).
+DEDUPED_ENTRIES=()
 SEEN=$'\n'
-for u in "${RULESET_URLS[@]}"; do
+for e in "${RULESET_ENTRIES[@]}"; do
   case "$SEEN" in
-    *$'\n'"$u"$'\n'*) ;;
+    *$'\n'"$e"$'\n'*) ;;
     *)
-      DEDUPED_URLS+=("$u")
-      SEEN="$SEEN$u"$'\n'
+      DEDUPED_ENTRIES+=("$e")
+      SEEN="$SEEN$e"$'\n'
       ;;
   esac
 done
 
-log "fetching ${#DEDUPED_URLS[@]} rule-set .srs files (cn infra + gateway.yaml whitelist)"
+log "fetching ${#DEDUPED_ENTRIES[@]} rule-set .srs files (cn infra + gateway.yaml whitelist)"
 fetched=0
 skipped=0
-for url in "${DEDUPED_URLS[@]}"; do
-  fname="$(basename "$url")"
+for entry in "${DEDUPED_ENTRIES[@]}"; do
+  fname="${entry%%|*}"
+  url="${entry#*|}"
   cached="$RULESETS_CACHE/$fname"
   if [ ! -s "$cached" ]; then
     if ! curl -fsSL --retry 2 --max-time 30 "$url" -o "$cached.tmp"; then
-      log "  skip $fname (fetch failed)"
+      log "  skip $fname (fetch failed: $url)"
       rm -f "$cached.tmp"
       skipped=$((skipped+1))
       continue

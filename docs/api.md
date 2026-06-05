@@ -418,9 +418,10 @@ curl -sX POST -H 'Content-Type: application/json' \
 
 **按需拉取** —— catalog 校验通过后，对每个 tag 检查 `/etc/leap/singbox/rule-sets/<tag>.srs`
 是否存在；不存在的就经 sing-box 内部 HTTP 代理（`127.0.0.1:11080`，自动经机场出网）
-从 `raw.githubusercontent.com/SagerNet/sing-{geosite,geoip}/rule-set/<tag>.srs` 拉一份
-落盘。任一 tag 拉取失败返回 502 + 失败 tag 名 + 上游错误，cfg 与磁盘均未变（写到 .tmp
-的部分文件会清掉）。同一 tag 并发 PUT 只触发一次 HTTP 请求（per-name lock + 双检）。
+从 `raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/{geosite,geoip}/<stem>.srs`
+拉一份落盘（`<stem>` 是去掉 `geosite-`/`geoip-` 前缀的部分）。任一 tag 拉取失败返回
+502 + 失败 tag 名 + 上游错误，cfg 与磁盘均未变（写到 .tmp 的部分文件会清掉）。同一
+tag 并发 PUT 只触发一次 HTTP 请求（per-name lock + 双检）。
 
 成功后立即 `systemctl restart leap-singbox`（5–10s 海外业务中断），返回 200 + 新状态（同 GET 结构）。
 
@@ -450,7 +451,7 @@ curl -s -H "$H" 127.0.0.1:18080/api/whitelist \
 `geoip-jp` 这种 tag，所以要把 rule-set 展开喂回去。
 
 数据源：
-- `domains`：`v2fly/domain-list-community`（这是 `sagernet/sing-geosite` 的上游），
+- `domains`：`v2fly/domain-list-community`（这是 `MetaCubeX/meta-rules-dat` geosite 的最终上游之一），
   通过 jsdelivr CDN 拉（`cdn.jsdelivr.net`，CN 内可达），失败回退 `raw.githubusercontent.com`。
 - `ip_cidrs`：节点上本地 `/etc/leap/singbox/rule-sets/<geoip-tag>.srs`，由
   `sing-box rule-set decompile` 解出 `rules[].ip_cidr` 合并去重。完全离线，
@@ -524,9 +525,9 @@ curl -s http://127.0.0.1:18080/api/whitelist/resolved | jq '.domains_count, .ip_
 {
   "geosites": {
     "catalog": [
-      {"name":"geosite-google","url":"https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-google.srs","category":"tech","installed":true,"selected":true},
-      {"name":"geosite-anthropic","url":"https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-anthropic.srs","category":"tech","installed":true,"selected":false},
-      {"name":"geosite-icloud","url":"https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-icloud.srs","category":"productivity","installed":false,"selected":false}
+      {"name":"geosite-google","url":"https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geosite/google.srs","category":"tech","installed":true,"selected":true},
+      {"name":"geosite-anthropic","url":"https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geosite/anthropic.srs","category":"tech","installed":true,"selected":false},
+      {"name":"geosite-icloud","url":"https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geosite/icloud.srs","category":"productivity","installed":false,"selected":false}
     ],
     "domain_suffix_examples": ["anthropic.com","claude.ai","cursor.com","figma.com","quora.com"]
   },
@@ -543,13 +544,13 @@ curl -s http://127.0.0.1:18080/api/whitelist/resolved | jq '.domains_count, .ip_
 
 | 字段 | 说明 |
 |---|---|
-| `geosites.catalog[].name` | 上游 sagernet/sing-geosite 仓库 rule-set 分支里 `<name>.srs` 的 tag 名 |
+| `geosites.catalog[].name` | leap-gateway 内部 tag 名，前缀固定 `geosite-`；上游 URL 取 `<stem>` 部分（去前缀）拼到 MetaCubeX 路径 |
 | `geosites.catalog[].url` | 该 .srs 的上游 URL（leap-gateway 经内部 HTTP 代理走机场拉，CN 内可达）|
 | `geosites.catalog[].category` | 分组：`tech` / `social` / `streaming` / `reference` / `productivity`。其中含若干 `geosite-category-*` 聚合 tag（如 `geosite-category-ai-!cn`），一条命中数百域名 |
 | `geosites.catalog[].installed` | `/etc/leap/singbox/rule-sets/<name>.srs` 是否已经在本地 |
 | `geosites.catalog[].selected` | 该 tag 是否在 `whitelist.geosites` 里 |
 | `geosites.domain_suffix_examples` | UI 预填 `whitelist.domain_suffix` 的示例值（不影响实际配置）|
-| `geoips.catalog[].name` | 上游 MetaCubeX/meta-rules-dat 仓库 sing 分支 `geo/geoip/<stem>.srs` 的 tag 名（leap-gateway 加上 `geoip-` 前缀作为统一标识）|
+| `geoips.catalog[].name` | leap-gateway 内部 tag 名，前缀固定 `geoip-`；上游 URL 同样取 `<stem>` 拼到 MetaCubeX 路径 |
 | `geoips.catalog[].url` | 完整 .srs URL —— 注意上游路径里**无** `geoip-` 前缀，由 `{stem}` 替换处理 |
 | `geoips.catalog[].category` | 分组：`app`（公司 / 应用自有 IP 段，如 `geoip-google`）/ `country`（ISO 2 字母国家码，如 `geoip-jp`）|
 | `geoips.ip_cidr_examples` | UI 预填 `whitelist.ip_cidr` 的示例值（默认是 Telegram MTProto 的 DC 段）|
@@ -558,12 +559,12 @@ curl -s http://127.0.0.1:18080/api/whitelist/resolved | jq '.domains_count, .ip_
 
 | 上游 | 项数 | 用途 |
 |---|---|---|
-| `SagerNet/sing-geosite` rule-set 分支 | 62（按 `tech` / `social` / `streaming` / `reference` / `productivity` 五类分组，含若干 `geosite-category-*` 聚合 tag —— 一条命中数百域名） | 按域名路由 |
+| `MetaCubeX/meta-rules-dat` sing 分支 `geo/geosite/` 目录 | 62（按 `tech` / `social` / `streaming` / `reference` / `productivity` 五类分组，含若干 `geosite-category-*` 聚合 tag —— 一条命中数百域名） | 按域名路由 |
 | `MetaCubeX/meta-rules-dat` sing 分支 `geo/geoip/` 目录 | 23（8 个 app tag：cloudflare / cloudfront / facebook / fastly / google / netflix / telegram / twitter；15 个 ISO 国家码） | 按 IP 路由 |
 
-> **为什么 geoip 用 MetaCubeX 而不是 SagerNet**：sagernet/sing-geoip rule-set 分支
-> **只发 ISO 国家码**，没有 app tag。MetaCubeX 这条社区线（Clash.Meta / mihomo 也用这个）
-> 维护了 ~10 个常见 app 的 IP CIDR 列表，文件格式跟 sagernet 完全一致（都是 sing-box `.srs`）。
+> **为什么统一在 MetaCubeX**：MetaCubeX/meta-rules-dat 每天 06:30 CST 自动构建（vs sagernet 周更），
+> 同时同时承载 geosite 和 geoip，上游聚合 v2fly + Loyalsoldier-enhanced，CN 域名/IP
+> 覆盖比 sagernet 单一 v2fly 上游更全。geosite 的 app tag 也都在那 —— 单一上游、统一节奏。
 
 > **慎用大网段 app geoip**：`geoip-google` / `geoip-cloudflare` 命中的是整个 Google /
 > Cloudflare 的 IP 范围（含 8.8.8.8 这种 DNS、所有 Cloudflare-fronted 站点等）。加进
