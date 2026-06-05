@@ -22,7 +22,7 @@ import (
 type Deps struct {
 	Subscribe  *subscribe.Manager
 	Scheduler  *subscribe.Scheduler
-	Renderer   *singbox.Renderer
+	Renderer   Renderer
 	Controller *singbox.Controller
 	Cfg        *config.Config
 	Store      *configstore.Store
@@ -30,6 +30,27 @@ type Deps struct {
 	Watchdog   *watchdog.Watchdog
 	Expander   *whitelistexpand.Expander
 	RuleSets   *rulesets.Manager
+}
+
+// Renderer is the engine-agnostic interface both internal/singbox.Renderer
+// and internal/mihomo.Renderer satisfy. Lets the control plane swap the
+// proxy data plane via cfg.SingBox.Engine without conditionals at every
+// call site.
+type Renderer interface {
+	// Path returns the on-disk path the next Write produces.
+	Path() string
+	// Write renders a complete engine config from the given outbounds and
+	// writes it to disk. Returns the rendered bytes for inspection.
+	Write(outbounds []subscribe.Outbound) ([]byte, error)
+	// SetSubscriptions replaces the captured subscription order in place.
+	// Used by API handlers that mutate cfg and need a re-render.
+	SetSubscriptions(subs []config.SubscriptionEntry)
+	// SetWhitelist re-seats the renderer's snapshot of route mode + WL.
+	// Renderer holds cfg.SingBox by value, so the live cfg pointer's
+	// mutations don't propagate automatically. Handlers that mutate the
+	// whitelist must call this before triggering a re-render — otherwise
+	// rendered config is stale (rule-providers / rules drop new tags).
+	SetWhitelist(mode string, wl config.WhitelistConfig)
 }
 
 type Server struct {
@@ -150,7 +171,7 @@ func (s *Server) handleRefresh(w http.ResponseWriter, r *http.Request) {
 
 // RunRefresh is the full subscribe → render → reload flow, exposed so main()
 // can also trigger it on startup or on a timer.
-func RunRefresh(ctx context.Context, mgr *subscribe.Manager, r *singbox.Renderer, c *singbox.Controller) error {
+func RunRefresh(ctx context.Context, mgr *subscribe.Manager, r Renderer, c *singbox.Controller) error {
 	results, err := mgr.Refresh(ctx)
 	if err != nil {
 		slog.Warn("subscribe refresh had errors", "err", err)

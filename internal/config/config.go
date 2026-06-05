@@ -60,6 +60,13 @@ type NodeConfig struct {
 }
 
 type SingBoxConfig struct {
+	// Engine selects the proxy data plane:
+	//   "sing-box" (default) — render config.json, restart leap-singbox.service
+	//   "mihomo"             — render config.yaml, restart leap-mihomo.service
+	// Both engines share the same internal Outbound representation; the
+	// renderer + controller pick is driven by this field at startup.
+	Engine string `yaml:"engine"`
+
 	ConfigPath string `yaml:"config_path"`
 	LogLevel   string `yaml:"log_level"`
 
@@ -136,6 +143,20 @@ type DNSConfig struct {
 	// Should be smaller than the typical DNS TTL so the cache stays warm.
 	// Default 5m. 0 disables preload (regardless of PreloadDomains).
 	PreloadInterval time.Duration `yaml:"preload_interval,omitempty"`
+	// FakeIPSkipSuffixes lists domain suffixes that must NOT receive a
+	// fake-IP from the engine's DNS server. Required for internal/private
+	// services whose hostnames are not on geosite-cn but resolve to CN /
+	// LAN IPs that should be reached DIRECTly. Without this, mihomo's
+	// fake-ip mode hands out 198.18.x.x for these hosts and the DIRECT
+	// outbound dials the unreachable fake IP — destination times out.
+	//
+	// Use leading-dot or "+.<suffix>" form per mihomo convention; both
+	// are accepted (renderer normalizes to "+." prefix).
+	//
+	// Example: ["+.paigod.work", "+.feilian.cn"]. The defaults +.lan,
+	// +.local, +.cn are always emitted by the renderer regardless of
+	// this list.
+	FakeIPSkipSuffixes []string `yaml:"fake_ip_skip_suffixes,omitempty"`
 }
 
 type RouteConfig struct {
@@ -172,8 +193,9 @@ type RouteConfig struct {
 //     route.final=direct and gets GFW'd.
 //
 // Tag conventions:
-//   - Geosites entries must start with "geosite-" (matches sing-geosite repo).
-//   - Geoips entries must start with "geoip-" (matches sing-geoip repo).
+//   - Geosites entries must start with "geosite-" (matches our internal tag
+//     namespace; the upstream URL strips the prefix per {stem} convention).
+//   - Geoips entries must start with "geoip-" (same convention).
 //   - DomainSuffix: bare domains, no scheme/path (e.g. "claude.ai").
 //   - IPCIDR: CIDR or bare IP. Bare IP normalized to /32 (v4) or /128 (v6).
 type WhitelistConfig struct {
@@ -306,14 +328,30 @@ func (c *Config) applyDefaults() {
 // ApplyDefaults fills in defaults for the SingBox subtree. Public so callers
 // that construct SingBoxConfig directly (e.g. cmd/selftest) can invoke it.
 func (c *SingBoxConfig) ApplyDefaults() {
-	if c.ConfigPath == "" {
-		c.ConfigPath = "/etc/leap/singbox/config.json"
+	if c.Engine == "" {
+		c.Engine = "sing-box"
 	}
-	if c.RuleSetsDir == "" {
-		c.RuleSetsDir = "/etc/leap/singbox/rule-sets"
-	}
-	if c.BinaryPath == "" {
-		c.BinaryPath = "/usr/local/bin/sing-box"
+	switch c.Engine {
+	case "sing-box":
+		if c.ConfigPath == "" {
+			c.ConfigPath = "/etc/leap/singbox/config.json"
+		}
+		if c.RuleSetsDir == "" {
+			c.RuleSetsDir = "/etc/leap/singbox/rule-sets"
+		}
+		if c.BinaryPath == "" {
+			c.BinaryPath = "/usr/local/bin/sing-box"
+		}
+	case "mihomo":
+		if c.ConfigPath == "" {
+			c.ConfigPath = "/etc/leap/mihomo/config.yaml"
+		}
+		if c.RuleSetsDir == "" {
+			c.RuleSetsDir = "/etc/leap/mihomo/rule-sets"
+		}
+		if c.BinaryPath == "" {
+			c.BinaryPath = "/usr/local/bin/mihomo"
+		}
 	}
 	if c.LogLevel == "" {
 		c.LogLevel = "info"
@@ -367,12 +405,14 @@ func (c *SingBoxConfig) ApplyDefaults() {
 		c.DNS.PreloadInterval = 5 * time.Minute
 	}
 
-	// Route defaults — sagernet's official rule sets.
+	// Route defaults — MetaCubeX/meta-rules-dat (daily build, Loyalsoldier-
+	// enhanced upstream). Single source for both geosite and geoip keeps the
+	// fetch / cache / failure path uniform.
 	if c.Route.GeositeURL == "" {
-		c.Route.GeositeURL = "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-cn.srs"
+		c.Route.GeositeURL = "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geosite/cn.srs"
 	}
 	if c.Route.GeoIPURL == "" {
-		c.Route.GeoIPURL = "https://raw.githubusercontent.com/SagerNet/sing-geoip/rule-set/geoip-cn.srs"
+		c.Route.GeoIPURL = "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geoip/cn.srs"
 	}
 	if c.Route.Mode == "" {
 		c.Route.Mode = "overseas"

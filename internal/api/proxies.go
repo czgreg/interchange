@@ -151,11 +151,14 @@ func (s *Server) queryActiveProxy(ctx context.Context) activeProxyDTO {
 	}
 
 	for _, name := range out.All {
-		if !strings.HasPrefix(name, "urltest") {
-			continue
-		}
 		pool, ok := bulk.Proxies[name]
 		if !ok {
+			continue
+		}
+		// Accept both sing-box's URLTest pools (urltest-primary/-backup) and
+		// mihomo's LoadBalance pool (us-pool). Skip leaf nodes / DIRECT /
+		// REJECT — those have other types.
+		if pool.Type != "URLTest" && pool.Type != "LoadBalance" {
 			continue
 		}
 		ps := poolStatusDTO{

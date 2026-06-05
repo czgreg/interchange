@@ -84,8 +84,11 @@ singbox:
     # preload_interval: 5m
 
   route:
-    geosite_url: "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-cn.srs"
-    geoip_url:   "https://raw.githubusercontent.com/SagerNet/sing-geoip/rule-set/geoip-cn.srs"
+    # MetaCubeX/meta-rules-dat (daily build, Loyalsoldier-enhanced) is the
+    # single source for both cn-direct rule-sets and the catalog (.srs path
+    # template lives in internal/rulesets/catalog.json).
+    geosite_url: "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geosite/cn.srs"
+    geoip_url:   "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geoip/cn.srs"
 
     # mode: how non-CN traffic is split.
     #   overseas (default): every non-CN destination → urltest (airport).
@@ -108,13 +111,13 @@ singbox:
     whitelist:
       # geosite tags from the embedded catalog (GET /api/rule-sets →
       # geosites.catalog). Selecting a tag here on first PUT triggers an
-      # on-demand fetch from sagernet/sing-geosite into RuleSetsDir.
+      # on-demand fetch from MetaCubeX/meta-rules-dat into RuleSetsDir.
       # Examples: geosite-google, geosite-anthropic, geosite-github
       geosites: []
-      # geoip tags from the embedded catalog. SagerNet/sing-geoip 只发 ISO
-      # 国家码 (geoip-jp / geoip-us / ...)，没有 geoip-telegram / geoip-google
-      # 这种分类。硬编码 IP 段写到下面 ip_cidr。
-      # Examples: geoip-jp, geoip-us, geoip-hk
+      # geoip tags from the embedded catalog. Both ISO country codes
+      # (geoip-jp / geoip-us / ...) and app-level tags (geoip-google /
+      # geoip-telegram / ...) are available — MetaCubeX ships both.
+      # Examples: geoip-jp, geoip-us, geoip-telegram
       geoips: []
       # 长尾域名后缀，跟 geosites 求并集。
       # Examples: anthropic.com, claude.ai, cursor.com

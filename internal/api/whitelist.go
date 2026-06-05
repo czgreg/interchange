@@ -45,7 +45,7 @@ func (s *Server) handleWhitelistGet(w http.ResponseWriter, r *http.Request) {
 // explicitly set to "overseas" (which clears the WL match rules at render
 // time). Every geosite/geoip tag must exist in the embedded catalog; any
 // referenced .srs file that isn't yet on disk is fetched on-demand from
-// upstream (sing-geosite / sing-geoip) before the cfg is mutated.
+// upstream (MetaCubeX/meta-rules-dat) before the cfg is mutated.
 func (s *Server) handleWhitelistPut(w http.ResponseWriter, r *http.Request) {
 	var dto whitelistDTO
 	if err := json.NewDecoder(r.Body).Decode(&dto); err != nil {
@@ -251,9 +251,13 @@ func (s *Server) handleWhitelistResolved(w http.ResponseWriter, r *http.Request)
 }
 
 // rerenderAndReload re-renders the sing-box config from the cached subscription
-// outbounds and restarts leap-singbox. Used by WL writes (no need to re-fetch
-// subscriptions). Subscription writes use RunRefresh instead.
+// state and triggers a sing-box reload. Used by mutating API endpoints
+// (whitelist PUT, refresh-interval PUT) where the cfg has changed without
+// touching subscriptions. Subscription writes use RunRefresh instead.
 func (s *Server) rerenderAndReload(ctx context.Context) error {
+	// Renderer holds cfg.SingBox by value — must reseed engine-relevant
+	// fields after a Mutate before Write reads stale state.
+	s.deps.Renderer.SetWhitelist(s.deps.Cfg.SingBox.Route.Mode, s.deps.Cfg.SingBox.Route.Whitelist)
 	out := s.deps.Subscribe.AllOutbounds()
 	if _, err := s.deps.Renderer.Write(out); err != nil {
 		return fmt.Errorf("render: %w", err)

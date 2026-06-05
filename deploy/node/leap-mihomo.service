@@ -1,0 +1,27 @@
+[Unit]
+Description=mihomo (leap-gateway data plane)
+Documentation=https://wiki.metacubex.one/
+After=network-online.target feilian-tun@tun0.service
+BindsTo=feilian-tun@tun0.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+# mihomo's working dir = /var/lib/leap/mihomo (writable for cache.db + geoip.metadb).
+# Static config + rule-sets live under /etc/leap/mihomo/; SAFE_PATHS lets
+# config files reference paths there (mihomo refuses out-of-workdir paths
+# by default).
+Environment=SAFE_PATHS=/etc/leap/mihomo
+ExecStartPre=/usr/local/bin/mihomo -d /var/lib/leap/mihomo -f /etc/leap/mihomo/config.yaml -t
+ExecStart=/usr/local/bin/mihomo -d /var/lib/leap/mihomo -f /etc/leap/mihomo/config.yaml
+Restart=on-failure
+RestartSec=5
+LimitNOFILE=infinity
+
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW CAP_NET_BIND_SERVICE
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/var/lib/leap /etc/leap
+
+[Install]
+WantedBy=multi-user.target

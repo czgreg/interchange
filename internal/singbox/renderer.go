@@ -101,6 +101,16 @@ func (r *Renderer) SetSubscriptions(subs []config.SubscriptionEntry) {
 	r.subs = cp
 }
 
+// SetWhitelist re-seats the renderer's route mode + whitelist snapshot.
+// Required because Renderer holds cfg by value: mutations to the live
+// *config.Config don't propagate. Call from API handlers right before
+// re-rendering after a whitelist edit, otherwise rule-set / route entries
+// will drop newly added tags.
+func (r *Renderer) SetWhitelist(mode string, wl config.WhitelistConfig) {
+	r.cfg.Route.Mode = mode
+	r.cfg.Route.Whitelist = wl
+}
+
 // Path is the on-disk path of the rendered config.
 func (r *Renderer) Path() string { return r.cfg.ConfigPath }
 

@@ -13,6 +13,7 @@ import (
 	"github.com/leap-gateway/leap-gateway/internal/config"
 	"github.com/leap-gateway/leap-gateway/internal/configstore"
 	"github.com/leap-gateway/leap-gateway/internal/dnspreload"
+	"github.com/leap-gateway/leap-gateway/internal/mihomo"
 	"github.com/leap-gateway/leap-gateway/internal/nodeinfo"
 	"github.com/leap-gateway/leap-gateway/internal/rulesets"
 	"github.com/leap-gateway/leap-gateway/internal/singbox"
@@ -39,11 +40,33 @@ func main() {
 		os.Exit(1)
 	}
 
-	mgr := subscribe.NewManagerWithFetch(cfg.Subscriptions, cfg.Subscribe.HTTPTimeout, cfg.Subscribe.UserAgent)
-	renderer := singbox.NewRenderer(cfg.SingBox).
-		WithNode(cfg.Node).
-		WithSubscriptions(cfg.Subscriptions)
+	// Wire fetcher through the local proxy engine's loopback HTTP inbound
+	// so subscription fetches bypass the host resolver (fakeip mode hands
+	// out 198.18.x.x for non-CN domains; direct dial fails). The engine
+	// itself answers DNS via cn-doh and routes the CONNECT correctly.
+	mgr := subscribe.NewManagerWithFetchAndProxy(
+		cfg.Subscriptions, cfg.Subscribe.HTTPTimeout, cfg.Subscribe.UserAgent,
+		singbox.LeapInternalProxyURL)
+
+	// Engine-aware factory: pick renderer + systemd unit + (TODO) watchdog
+	// behavior from cfg.SingBox.Engine. ApplyDefaults already validated and
+	// defaulted Engine to "sing-box". Mihomo path uses load-balance (multi-
+	// active across all US nodes); sing-box path uses urltest (single-active).
+	var renderer api.Renderer
+	systemdUnit := "leap-singbox.service"
+	switch cfg.SingBox.Engine {
+	case "mihomo":
+		renderer = mihomo.NewRenderer(cfg.SingBox).
+			WithNode(cfg.Node).
+			WithSubscriptions(cfg.Subscriptions)
+		systemdUnit = "leap-mihomo.service"
+	default:
+		renderer = singbox.NewRenderer(cfg.SingBox).
+			WithNode(cfg.Node).
+			WithSubscriptions(cfg.Subscriptions)
+	}
 	sbCtl := singbox.NewController(cfg.SingBox.ClashAPI)
+	sbCtl.SystemdUnit = systemdUnit
 	store := configstore.New(*cfgPath)
 
 	// Persist UA auto-discoveries: when Refresh's fallback finds a working
@@ -65,6 +88,15 @@ func main() {
 		}
 		mgr.SetEntries(cfg.Subscriptions)
 	})
+	// Watchdog targets sing-box's urltest-primary/-backup groups specifically.
+	// mihomo's load-balance group has no equivalent (no single "active" node
+	// per pool), so we disable the watchdog under that engine. Multi-active
+	// dispatch handled inside mihomo's load-balance health-check (lazy: false
+	// + interval) replaces what the watchdog used to provide.
+	if cfg.SingBox.Engine == "mihomo" {
+		cfg.SingBox.URLTest.Watchdog.Enabled = false
+		slog.Info("watchdog disabled (engine=mihomo)")
+	}
 	wd := watchdog.New(cfg.SingBox.ClashAPI, cfg.SingBox.URLTest.Watchdog, cfg.SingBox.URLTest.ProbeURL)
 	ni := nodeinfo.New(cfg.Node, Version)
 	expander := whitelistexpand.New("").
@@ -78,6 +110,7 @@ func main() {
 		slog.Error("rulesets: load embedded catalog", "err", err)
 		os.Exit(1)
 	}
+	ruleMgr.WithEngine(cfg.SingBox.Engine)
 
 	sched := subscribe.NewScheduler(cfg.Subscribe.RefreshInterval, func(ctx context.Context) error {
 		return api.RunRefresh(ctx, mgr, renderer, sbCtl)

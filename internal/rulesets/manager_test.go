@@ -30,13 +30,21 @@ func TestEmbeddedCatalogParses(t *testing.T) {
 		if !strings.HasPrefix(it.Name, "geosite-") {
 			t.Errorf("geosite item %q missing geosite- prefix", it.Name)
 		}
-		if !strings.Contains(it.URL, it.Name+".srs") {
-			t.Errorf("geosite %q url %q does not embed name", it.Name, it.URL)
+		// Catalog template is MetaCubeX-style (.../geosite/{stem}.srs);
+		// the URL therefore ends with the stem (name without "geosite-"),
+		// not the full name.
+		stem := strings.TrimPrefix(it.Name, "geosite-")
+		if !strings.HasSuffix(it.URL, "/"+stem+".srs") {
+			t.Errorf("geosite %q url %q does not end with /%s.srs", it.Name, it.URL, stem)
 		}
 	}
 	for _, it := range cat.Geoips {
 		if !strings.HasPrefix(it.Name, "geoip-") {
 			t.Errorf("geoip item %q missing geoip- prefix", it.Name)
+		}
+		stem := strings.TrimPrefix(it.Name, "geoip-")
+		if !strings.HasSuffix(it.URL, "/"+stem+".srs") {
+			t.Errorf("geoip %q url %q does not end with /%s.srs", it.Name, it.URL, stem)
 		}
 	}
 	if len(cat.DomainSuffixExamples) == 0 {
@@ -164,3 +172,56 @@ func newTestManager(t *testing.T, dir, name, urlTemplate string) *Manager {
 	m.items = map[string]Item{name: {Name: name, URL: url, Category: "test"}}
 	return m
 }
+
+// TestEngineMihomo_RewriteURLAndExt covers the engine-aware fetch path:
+// when WithEngine("mihomo") is set, the manager must (1) rewrite an upstream
+// URL from /sing/geo/...srs to /meta/geo/...mrs and (2) write the file to
+// disk with .mrs extension so mihomo's rule-providers picks it up.
+func TestEngineMihomo_RewriteURLAndExt(t *testing.T) {
+	t.Parallel()
+	var seenPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seenPath = r.URL.Path
+		_, _ = w.Write([]byte("FAKE-MRS-CONTENT"))
+	}))
+	defer srv.Close()
+
+	dir := t.TempDir()
+	m, err := New(dir, 5*time.Second, "")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	m.WithEngine("mihomo")
+	// Inject a catalog entry whose URL uses the sing-box flavor; expect
+	// rewriteURL to flip it to meta+.mrs and the file to land at name+".mrs".
+	srsURL := srv.URL + "/sing/geo/geosite/google.srs"
+	m.items = map[string]Item{
+		"geosite-google": {Name: "geosite-google", URL: srsURL, Category: "tech"},
+	}
+	if err := m.EnsureInstalled(context.Background(), "geosite-google"); err != nil {
+		t.Fatalf("EnsureInstalled: %v", err)
+	}
+	// 1) URL rewrite
+	if !strings.Contains(seenPath, "/meta/geo/geosite/google.mrs") {
+		t.Errorf("upstream got %q, want /meta/geo/geosite/google.mrs", seenPath)
+	}
+	// 2) .mrs on disk
+	mrsPath := filepath.Join(dir, "geosite-google.mrs")
+	body, err := os.ReadFile(mrsPath)
+	if err != nil {
+		t.Fatalf("read %s: %v", mrsPath, err)
+	}
+	if string(body) != "FAKE-MRS-CONTENT" {
+		t.Errorf("file body = %q, want FAKE-MRS-CONTENT", body)
+	}
+	// 3) IsInstalled must check .mrs path (not .srs)
+	if !m.IsInstalled("geosite-google") {
+		t.Error("IsInstalled returned false for installed mihomo .mrs")
+	}
+	// 4) sing-box .srs at same dir should NOT be reported as installed.
+	srsLeftover := filepath.Join(dir, "geosite-google.srs")
+	if _, err := os.Stat(srsLeftover); err == nil {
+		t.Error("manager wrote .srs file in mihomo mode; expected only .mrs")
+	}
+}
+

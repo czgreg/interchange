@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"time"
 )
 
@@ -36,14 +37,33 @@ type fetcher struct {
 }
 
 func newFetcher(timeout time.Duration, ua string) *fetcher {
+	return newFetcherWithProxy(timeout, ua, "")
+}
+
+// newFetcherWithProxy builds a fetcher that routes upstream HTTPS through
+// the given HTTP proxy URL. Production use: route through the local mihomo /
+// sing-box loopback HTTP inbound (LeapInternalProxyURL) so subscription
+// fetches don't try to dial fakeip-tainted upstream addresses returned by
+// the host's resolver. Without this, fetches to randomly-named airport
+// hostnames timeout against 198.18.x.x — caught in production 2026-06-05
+// when 3 of 5 subscriptions stopped pulling nodes.
+//
+// Empty proxy → direct OS network (used by tests).
+func newFetcherWithProxy(timeout time.Duration, ua, proxyURL string) *fetcher {
 	if timeout == 0 {
 		timeout = 30 * time.Second
 	}
 	if ua == "" {
 		ua = "leap-gateway/0.1"
 	}
+	transport := &http.Transport{}
+	if proxyURL != "" {
+		if u, err := url.Parse(proxyURL); err == nil {
+			transport.Proxy = http.ProxyURL(u)
+		}
+	}
 	return &fetcher{
-		client:    &http.Client{Timeout: timeout},
+		client:    &http.Client{Timeout: timeout, Transport: transport},
 		userAgent: ua,
 	}
 }

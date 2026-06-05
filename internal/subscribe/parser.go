@@ -44,9 +44,20 @@ func NewManager(entries []config.SubscriptionEntry) *Manager {
 // config — many subscription providers gate by UA, so the default
 // "leap-gateway/0.1" gets connection-reset on some upstreams.
 func NewManagerWithFetch(entries []config.SubscriptionEntry, timeout time.Duration, ua string) *Manager {
+	return NewManagerWithFetchAndProxy(entries, timeout, ua, "")
+}
+
+// NewManagerWithFetchAndProxy is NewManagerWithFetch + proxyURL routing.
+// Production wires this with the local mihomo / sing-box loopback HTTP
+// inbound (LeapInternalProxyURL) so subscription fetches don't go through
+// the host's resolver — which under fakeip mode returns 198.18.x.x for any
+// non-CN domain, making direct dial fail. Caught in production 2026-06-05.
+//
+// Empty proxyURL → direct OS network (used by tests + standalone CLIs).
+func NewManagerWithFetchAndProxy(entries []config.SubscriptionEntry, timeout time.Duration, ua, proxyURL string) *Manager {
 	return &Manager{
 		entries:  entries,
-		fetcher:  newFetcher(timeout, ua),
+		fetcher:  newFetcherWithProxy(timeout, ua, proxyURL),
 		globalUA: ua,
 	}
 }
