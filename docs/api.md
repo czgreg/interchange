@@ -360,7 +360,7 @@ engine=sing-box 时返回 `503 {"error":"..."}`。
 
 ## GET /api/whitelist
 
-返回当前白名单配置。
+返回当前白名单配置（含 DNS fake-ip-skip 列表）。
 
 ```json
 {
@@ -371,7 +371,8 @@ engine=sing-box 时返回 `503 {"error":"..."}`。
   ],
   "geoips": ["geoip-google", "geoip-telegram"],
   "domain_suffix": ["ipinfo.io", "ip.me", "claude.ai"],
-  "ip_cidr": ["149.154.0.0/16"]
+  "ip_cidr": ["149.154.0.0/16"],
+  "fake_ip_skip": ["+.paigod.work", "+.feilian.cn"]
 }
 ```
 
@@ -394,11 +395,30 @@ engine=sing-box 时返回 `503 {"error":"..."}`。
   "geosites": ["geosite-google", "geosite-anthropic", "geosite-category-ai-!cn"],
   "geoips":   ["geoip-telegram"],
   "domain_suffix": ["claude.ai", "cursor.com"],
-  "ip_cidr":  ["149.154.0.0/16", "91.108.0.0/16"]
+  "ip_cidr":  ["149.154.0.0/16", "91.108.0.0/16"],
+  "fake_ip_skip": ["+.paigod.work", "+.feilian.cn"]
 }
 ```
 
-**校验**：
+**字段说明**：
+
+| 字段 | 层次 | 作用 |
+|---|---|---|
+| `geosites` | 路由层 | 命中的域名集合 → 走代理（RULE-SET） |
+| `geoips` | 路由层 | 命中的 IP 段 → 走代理（适合 Telegram MTProto 等硬编码 IP 场景） |
+| `domain_suffix` | 路由层 | 精确域名后缀 → 走代理（补充 geosite 没覆盖的单条域名） |
+| `ip_cidr` | 路由层 | 精确 IP 段 → 走代理 |
+| `fake_ip_skip` | **DNS 层** | 这些域名返回**真实 IP**（不 fakeip）。用于内网服务：不在 geosite-cn 但解析到 CN/LAN IP，不加就会收到 198.18.x.x 导致直连失败 |
+
+**`fake_ip_skip` 格式**：接受三种写法，服务端自动规范化为 `+.` 前缀：
+
+| 输入 | 存储形式 |
+|---|---|
+| `paigod.work` | `+.paigod.work` |
+| `.feilian.cn` | `+.feilian.cn` |
+| `+.company.io` | `+.company.io`（不变） |
+
+**其他字段校验**：
 - `geosites` / `geoips` 中的每个 tag 必须在 `/api/rule-sets` 的 catalog 里
 - 不在磁盘上的 tag 会按需从 MetaCubeX 拉取（mihomo: `.mrs`；sing-box: `.srs`），失败返回 502
 - `domain_suffix`：裸域名，无 `://`
@@ -409,7 +429,7 @@ engine=sing-box 时返回 `503 {"error":"..."}`。
 ```bash
 # 加一条 domain_suffix：先 GET，jq 追加，再 PUT
 curl -s http://127.0.0.1:18080/api/whitelist \
-  | jq '.domain_suffix += ["paigod.work"]' \
+  | jq '.domain_suffix += ["new-ai-tool.com"]' \
   | curl -s -H "Content-Type: application/json" -X PUT \
       http://127.0.0.1:18080/api/whitelist -d @-
 ```
@@ -626,7 +646,14 @@ curl -s -X POST -H 'Content-Type: application/json' $BASE/api/subscriptions \
   -d '{"name":"new-airport","url":"https://...","user_agent":"clash.meta/v1.19.26"}'
 
 # 加一个域名进白名单
-curl -s $BASE/api/whitelist | jq '.domain_suffix += ["paigod.work"]' \
+# 加一条 domain_suffix（境外站走代理）
+curl -s $BASE/api/whitelist \
+  | jq '.domain_suffix += ["new-ai-tool.com"]' \
+  | curl -s -H 'Content-Type: application/json' -X PUT $BASE/api/whitelist -d @-
+
+# 加内网域名到 fake_ip_skip（不走 fakeip，返回真实 IP）
+curl -s $BASE/api/whitelist | jq '.fake_ip_skip += ["+.paigod.work"]' \
+  | curl -s -H 'Content-Type: application/json' -X PUT $BASE/api/whitelist -d @-
   | curl -s -H 'Content-Type: application/json' -X PUT $BASE/api/whitelist -d @-
 
 # 查看 UX 遥测摘要（过去 1h）
