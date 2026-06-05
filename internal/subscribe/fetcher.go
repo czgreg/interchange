@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"time"
@@ -32,7 +33,8 @@ func AsHTTPError(err error) *HTTPError {
 }
 
 type fetcher struct {
-	client    *http.Client
+	primary   *http.Client // proxied (or, when proxyURL was empty, direct)
+	fallback  *http.Client // direct; nil when primary is already direct
 	userAgent string
 }
 
@@ -48,7 +50,12 @@ func newFetcher(timeout time.Duration, ua string) *fetcher {
 // hostnames timeout against 198.18.x.x — caught in production 2026-06-05
 // when 3 of 5 subscriptions stopped pulling nodes.
 //
-// Empty proxy → direct OS network (used by tests).
+// When the proxy is unreachable (data plane crash-looping or mid-restart),
+// each Get falls back to a direct OS-network client. Better to fetch via
+// fakeip-tainted resolver and risk one failure than to lock the operator
+// out of refresh entirely while the data plane is recovering.
+//
+// Empty proxy → direct only (no fallback; primary is already direct).
 func newFetcherWithProxy(timeout time.Duration, ua, proxyURL string) *fetcher {
 	if timeout == 0 {
 		timeout = 30 * time.Second
@@ -56,14 +63,17 @@ func newFetcherWithProxy(timeout time.Duration, ua, proxyURL string) *fetcher {
 	if ua == "" {
 		ua = "leap-gateway/0.1"
 	}
-	transport := &http.Transport{}
+	primary := &http.Client{Timeout: timeout, Transport: &http.Transport{}}
+	var fallback *http.Client
 	if proxyURL != "" {
 		if u, err := url.Parse(proxyURL); err == nil {
-			transport.Proxy = http.ProxyURL(u)
+			primary.Transport = &http.Transport{Proxy: http.ProxyURL(u)}
+			fallback = &http.Client{Timeout: timeout, Transport: &http.Transport{}}
 		}
 	}
 	return &fetcher{
-		client:    &http.Client{Timeout: timeout, Transport: transport},
+		primary:   primary,
+		fallback:  fallback,
 		userAgent: ua,
 	}
 }
@@ -75,8 +85,27 @@ func (f *fetcher) Get(ctx context.Context, url string) ([]byte, error) {
 // GetWithUA fetches url using the override UA if non-empty, else the
 // fetcher's default. Used by Manager.Refresh to support per-subscription
 // User-Agent (some airports gate content by UA in incompatible ways).
-func (f *fetcher) GetWithUA(ctx context.Context, url, ua string) ([]byte, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+//
+// When a proxy is configured and the primary client fails with a network
+// error (proxy unreachable, dial timeout — NOT an HTTPError), retries on
+// the direct fallback client so a data-plane outage doesn't block refresh.
+// HTTPErrors (4xx/5xx) skip the fallback because they indicate the upstream
+// answered and won't change behavior with a different egress path.
+func (f *fetcher) GetWithUA(ctx context.Context, target, ua string) ([]byte, error) {
+	body, err := f.do(ctx, f.primary, target, ua)
+	if err == nil {
+		return body, nil
+	}
+	if f.fallback == nil || AsHTTPError(err) != nil {
+		return nil, err
+	}
+	slog.Warn("subscribe: primary fetch failed, retrying via direct",
+		"url", target, "err", err)
+	return f.do(ctx, f.fallback, target, ua)
+}
+
+func (f *fetcher) do(ctx context.Context, c *http.Client, target, ua string) ([]byte, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -84,13 +113,13 @@ func (f *fetcher) GetWithUA(ctx context.Context, url, ua string) ([]byte, error)
 		ua = f.userAgent
 	}
 	req.Header.Set("User-Agent", ua)
-	resp, err := f.client.Do(req)
+	resp, err := c.Do(req)
 	if err != nil {
 		return nil, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return nil, &HTTPError{Status: resp.StatusCode, URL: url}
+		return nil, &HTTPError{Status: resp.StatusCode, URL: target}
 	}
 	return io.ReadAll(io.LimitReader(resp.Body, 16<<20))
 }

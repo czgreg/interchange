@@ -24,6 +24,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -76,8 +77,18 @@ type Expander struct {
 	cachePath   string
 	client      *http.Client
 	sources     []string
-	ruleSetsDir string // "" disables geoip expansion
+	ruleSetsDir string // "" disables geoip expansion (sing-box-mode lookup path)
 	singboxBin  string // "" disables geoip expansion
+	// srsCacheDir, when non-empty, switches geoip expansion to a private
+	// cache: each geoip-* tag's .srs is fetched on demand from MetaCubeX
+	// /sing/ branch and stored here. Required under engine=mihomo, where
+	// the active rule-sets dir holds .mrs files that sing-box CLI can't
+	// decompile. srsHTTPClient routes the fetch through the local proxy
+	// engine's HTTP inbound (with direct-fallback) so fakeip resolver
+	// doesn't poison the upstream connect.
+	srsCacheDir   string
+	srsHTTPClient *http.Client
+	srsFallbackHC *http.Client
 
 	mu   sync.RWMutex
 	snap *Snapshot
@@ -102,6 +113,32 @@ func New(cachePath string) *Expander {
 func (e *Expander) WithRuleSets(dir, singboxBin string) *Expander {
 	e.ruleSetsDir = dir
 	e.singboxBin = singboxBin
+	return e
+}
+
+// WithMihomoSrsCache enables geoip expansion under engine=mihomo. The active
+// proxy engine's rule-sets dir holds .mrs files (mihomo's binary format) that
+// sing-box CLI can't decompile, so whitelistexpand maintains its own private
+// .srs cache at cacheDir, fetching from MetaCubeX /sing/ branch on demand.
+//
+// proxyURL: optional HTTP proxy used for the fetch — typically the local
+// proxy engine's loopback inbound (e.g. http://127.0.0.1:11080). Routes
+// the fetch around the host resolver's fakeip pollution. Empty → direct.
+//
+// Must be set in addition to WithRuleSets for the engine's binary path
+// (singboxBin still required — sing-box CLI is what we shell out to).
+func (e *Expander) WithMihomoSrsCache(cacheDir, proxyURL string) *Expander {
+	e.srsCacheDir = cacheDir
+	e.srsHTTPClient = &http.Client{Timeout: httpTimeout, Transport: &http.Transport{}}
+	if proxyURL != "" {
+		if u, err := url.Parse(proxyURL); err == nil {
+			e.srsHTTPClient = &http.Client{
+				Timeout:   httpTimeout,
+				Transport: &http.Transport{Proxy: http.ProxyURL(u)},
+			}
+			e.srsFallbackHC = &http.Client{Timeout: httpTimeout, Transport: &http.Transport{}}
+		}
+	}
 	return e
 }
 
@@ -336,10 +373,27 @@ func (e *Expander) expandIPCIDRs(geoips, ipCIDR []string) ([]string, error) {
 // decompileGeoip shells out to sing-box, reads the produced JSON, and
 // extracts every ip_cidr from rules[].ip_cidr (also handles default_value-
 // style top-level rule arrays).
+//
+// Source path priority:
+//
+//  1. srsCacheDir (when set, mihomo mode): ensure <tag>.srs is present,
+//     fetching from MetaCubeX /sing/ branch on demand. Required because
+//     mihomo's rule-sets dir holds .mrs which sing-box CLI can't decompile.
+//  2. ruleSetsDir (sing-box mode): read <tag>.srs from there directly.
 func (e *Expander) decompileGeoip(tag string) ([]string, error) {
-	srcPath := filepath.Join(e.ruleSetsDir, tag+".srs")
-	if _, err := os.Stat(srcPath); err != nil {
-		return nil, err
+	var srcPath string
+	if e.srsCacheDir != "" {
+		srcPath = filepath.Join(e.srsCacheDir, tag+".srs")
+		if _, err := os.Stat(srcPath); err != nil {
+			if err := e.fetchSrsToCache(tag, srcPath); err != nil {
+				return nil, fmt.Errorf("fetch %s.srs: %w", tag, err)
+			}
+		}
+	} else {
+		srcPath = filepath.Join(e.ruleSetsDir, tag+".srs")
+		if _, err := os.Stat(srcPath); err != nil {
+			return nil, err
+		}
 	}
 	// Use the cache dir's parent for scratch, NOT $TMPDIR — leap-gateway's
 	// systemd unit sets ProtectSystem=strict with ReadWritePaths limited to
@@ -378,6 +432,62 @@ func (e *Expander) decompileGeoip(tag string) ([]string, error) {
 		out = append(out, r.IPCIDR...)
 	}
 	return out, nil
+}
+
+// fetchSrsToCache downloads <tag>.srs from MetaCubeX /sing/ branch into
+// dest. Used by decompileGeoip under mihomo mode where the engine's
+// rule-sets dir only has .mrs. Tries the proxy client first (routes
+// through the local data plane to bypass fakeip resolver pollution),
+// falls back to direct on connection error.
+func (e *Expander) fetchSrsToCache(tag, dest string) error {
+	if e.srsHTTPClient == nil {
+		return fmt.Errorf("srs cache not configured (call WithMihomoSrsCache)")
+	}
+	stem := strings.TrimPrefix(tag, "geoip-")
+	stem = strings.TrimPrefix(stem, "geosite-")
+	url := "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geoip/" + stem + ".srs"
+	if strings.HasPrefix(tag, "geosite-") {
+		url = "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geosite/" + stem + ".srs"
+	}
+
+	body, err := e.fetchSrsOnce(e.srsHTTPClient, url)
+	if err != nil && e.srsFallbackHC != nil {
+		slog.Warn("whitelistexpand: srs fetch via primary failed, trying direct",
+			"tag", tag, "url", url, "err", err)
+		body, err = e.fetchSrsOnce(e.srsFallbackHC, url)
+	}
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
+		return err
+	}
+	tmp := dest + ".tmp"
+	if err := os.WriteFile(tmp, body, 0o644); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, dest); err != nil {
+		return err
+	}
+	slog.Info("whitelistexpand: cached .srs for geoip expansion", "tag", tag, "path", dest)
+	return nil
+}
+
+func (e *Expander) fetchSrsOnce(c *http.Client, srsURL string) ([]byte, error) {
+	req, err := http.NewRequest(http.MethodGet, srsURL, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("User-Agent", "leap-gateway/whitelistexpand")
+	resp, err := c.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("srs fetch %s: HTTP %d", srsURL, resp.StatusCode)
+	}
+	return io.ReadAll(io.LimitReader(resp.Body, 16<<20))
 }
 
 func (e *Expander) markStale(msg string) {

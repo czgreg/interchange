@@ -99,8 +99,21 @@ func main() {
 	}
 	wd := watchdog.New(cfg.SingBox.ClashAPI, cfg.SingBox.URLTest.Watchdog, cfg.SingBox.URLTest.ProbeURL)
 	ni := nodeinfo.New(cfg.Node, Version)
+	// whitelistexpand always shells out to sing-box CLI for `rule-set
+	// decompile` (mihomo can't decompile its own .mrs format). Under
+	// engine=mihomo the active rule-sets dir holds .mrs, so set
+	// WithMihomoSrsCache to maintain a private .srs cache fetched from
+	// MetaCubeX /sing/ branch on demand. install.sh ships sing-box even
+	// when engine=mihomo specifically for this.
+	const singboxCLI = "/usr/local/bin/sing-box"
 	expander := whitelistexpand.New("").
-		WithRuleSets(cfg.SingBox.RuleSetsDir, cfg.SingBox.BinaryPath)
+		WithRuleSets(cfg.SingBox.RuleSetsDir, singboxCLI)
+	if cfg.SingBox.Engine == "mihomo" {
+		expander.WithMihomoSrsCache(
+			"/var/lib/leap/whitelist-srs-cache",
+			singbox.LeapInternalProxyURL,
+		)
+	}
 	if err := expander.LoadFromDisk(); err != nil {
 		slog.Warn("whitelistexpand: cannot load on-disk cache", "err", err)
 	}
