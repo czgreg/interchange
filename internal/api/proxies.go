@@ -248,31 +248,36 @@ type historyEntry struct {
 }
 
 // proxiesSelectDTO is the body of POST /api/proxies/select.
+//
+// Two-field shape so callers can flip ANY Selector group to any of its
+// registered members — engine-agnostic by design:
+//
+//	{ "selector": "out", "name": "us-pool"   }   // mihomo: route via load-balance
+//	{ "selector": "out", "name": "pin"       }   // mihomo: route via the manually-pinned node
+//	{ "selector": "pin", "name": "yuyun/SG-01" } // mihomo: pick which node `pin` points at
+//	{ "selector": "out", "name": "urltest-primary" } // sing-box: flip back to primary pool
+//	{ "selector": "out", "name": "direct"    }   // either engine: emergency bypass
+//
+// Validation is dynamic — we GET /proxies/{selector} from clash-api and
+// require {name} to be in its `all` list. No hardcoded selector or member
+// names: works under both mihomo and sing-box renderers without code
+// changes when groups evolve.
 type proxiesSelectDTO struct {
 	Selector string `json:"selector"`
+	Name     string `json:"name"`
 }
 
-// validSelectors is the closed set of names POST /api/proxies/select accepts —
-// matches what the renderer puts into the "out" selector's outbounds list
-// (see internal/singbox/renderer.go:302). "direct" lets operators bypass the
-// airport entirely as an emergency override.
-var validSelectors = map[string]bool{
-	"urltest-primary": true,
-	"urltest-backup":  true,
-	"direct":          true,
-}
-
-// handleProxiesSelect manually flips the "out" selector to the requested pool.
-// Useful as an operator override when the watchdog's automatic primary→backup
-// failover hasn't fired (or shouldn't) but you want to switch right now.
+// handleProxiesSelect manually flips a Selector group at one of its
+// registered members. Useful as an operator override (force route via a
+// specific pool / node) or for emergency direct bypass.
 //
-// The override is NOT sticky — the watchdog keeps running and may flip again:
-//   - manual → urltest-backup, primary healthy: watchdog's recovery goroutine
-//     (see watchdog.runPrimaryRecovery) eventually flips back after
-//     primary_recovery_threshold consecutive healthy probes.
-//   - manual → urltest-primary, primary failing: watchdog will flip to backup
-//     again after fail_threshold consecutive failures.
-//   - manual → direct: stays direct until either side flips it back.
+// The override is NOT sticky:
+//   - sing-box engine: the watchdog keeps running and may flip "out" back
+//     to primary/backup on its own depending on health probes.
+//   - mihomo engine: the NodeScorer manages us-pool MEMBERSHIP (which
+//     nodes can carry traffic) but does not touch selector pointers, so
+//     manual `out` / `pin` flips persist until the operator reverts them
+//     or restarts the data plane.
 func (s *Server) handleProxiesSelect(w http.ResponseWriter, r *http.Request) {
 	var dto proxiesSelectDTO
 	if err := json.NewDecoder(r.Body).Decode(&dto); err != nil {
@@ -280,38 +285,46 @@ func (s *Server) handleProxiesSelect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	dto.Selector = strings.TrimSpace(dto.Selector)
-	if !validSelectors[dto.Selector] {
-		http.Error(w, fmt.Sprintf("invalid selector %q (want urltest-primary | urltest-backup | direct)", dto.Selector), http.StatusBadRequest)
+	dto.Name = strings.TrimSpace(dto.Name)
+	if dto.Selector == "" || dto.Name == "" {
+		http.Error(w, `body must include "selector" and "name" (e.g. {"selector":"out","name":"us-pool"})`, http.StatusBadRequest)
 		return
 	}
 
-	// Pre-check that the selector is registered on this node before issuing
-	// the PUT. clash-api returns 400 (not 404) for unregistered members,
-	// which would surface as an unhelpful 500 here. Reading the "out"
-	// selector's `all` list lets us return a clean 404 with operator-level
-	// context (the most common cause is single-subscription deploys having
-	// no urltest-backup).
+	// Validate against clash-api's live state. Avoids hardcoding selector
+	// or member names per engine — the renderer decides what exists; we
+	// just echo what's there. A 404 from clash-api means the selector
+	// group isn't registered (engine difference, typo); a missing member
+	// in `all` means the requested name isn't a child of that group.
 	httpc := &http.Client{Timeout: 2 * time.Second}
 	var sel struct {
-		All []string `json:"all"`
+		Type string   `json:"type"`
+		All  []string `json:"all"`
 	}
-	if err := getJSON(r.Context(), httpc, s.deps.Cfg.SingBox.ClashAPI, "/proxies/out", &sel); err != nil {
-		http.Error(w, "clash-api read /proxies/out: "+err.Error(), http.StatusInternalServerError)
+	if err := getJSON(r.Context(), httpc, s.deps.Cfg.SingBox.ClashAPI, "/proxies/"+url.PathEscape(dto.Selector), &sel); err != nil {
+		http.Error(w, fmt.Sprintf("selector %q not found on data plane: %v", dto.Selector, err), http.StatusNotFound)
+		return
+	}
+	// Only Selector-type groups can be flipped manually. URLTest /
+	// LoadBalance manage their own active member; PUT-ing a name there is
+	// a no-op stub at best.
+	if sel.Type != "Selector" {
+		http.Error(w, fmt.Sprintf("selector %q has type %q (only Selector groups can be flipped)", dto.Selector, sel.Type), http.StatusBadRequest)
 		return
 	}
 	registered := false
 	for _, m := range sel.All {
-		if m == dto.Selector {
+		if m == dto.Name {
 			registered = true
 			break
 		}
 	}
 	if !registered {
-		http.Error(w, fmt.Sprintf("selector %q not registered on sing-box (registered: %v — single-subscription deploys have no urltest-backup)", dto.Selector, sel.All), http.StatusNotFound)
+		http.Error(w, fmt.Sprintf("name %q not registered under selector %q (registered: %v)", dto.Name, dto.Selector, sel.All), http.StatusNotFound)
 		return
 	}
 
-	if err := setOutSelector(r.Context(), s.deps.Cfg.SingBox.ClashAPI, dto.Selector); err != nil {
+	if err := setSelector(r.Context(), s.deps.Cfg.SingBox.ClashAPI, dto.Selector, dto.Name); err != nil {
 		http.Error(w, "clash-api: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -319,12 +332,12 @@ func (s *Server) handleProxiesSelect(w http.ResponseWriter, r *http.Request) {
 	s.handleProxiesActive(w, r)
 }
 
-// setOutSelector PUTs to clash-api /proxies/out to pin the "out" selector
-// at the named member. Mirrors watchdog.setSelector but lives here so the
-// API package doesn't need to depend on the watchdog package's internals.
-func setOutSelector(ctx context.Context, api config.ClashAPIConfig, member string) error {
+// setSelector PUTs to clash-api /proxies/{selector} to pin a Selector group
+// at the named member. Engine-agnostic: works for mihomo's "out"/"pin" and
+// sing-box's "out".
+func setSelector(ctx context.Context, api config.ClashAPIConfig, selector, member string) error {
 	body, _ := json.Marshal(map[string]string{"name": member})
-	u := "http://" + api.ExternalController + "/proxies/" + url.PathEscape("out")
+	u := "http://" + api.ExternalController + "/proxies/" + url.PathEscape(selector)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPut, u, bytes.NewReader(body))
 	if err != nil {
 		return err
@@ -340,7 +353,7 @@ func setOutSelector(ctx context.Context, api config.ClashAPIConfig, member strin
 	}
 	defer res.Body.Close()
 	if res.StatusCode/100 != 2 {
-		return fmt.Errorf("PUT /proxies/out: status %d", res.StatusCode)
+		return fmt.Errorf("PUT /proxies/%s: status %d", selector, res.StatusCode)
 	}
 	return nil
 }
