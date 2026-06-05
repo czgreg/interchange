@@ -11,6 +11,7 @@ import (
 
 	"github.com/leap-gateway/leap-gateway/internal/config"
 	"github.com/leap-gateway/leap-gateway/internal/configstore"
+	"github.com/leap-gateway/leap-gateway/internal/nodescorer"
 	"github.com/leap-gateway/leap-gateway/internal/nodeinfo"
 	"github.com/leap-gateway/leap-gateway/internal/rulesets"
 	"github.com/leap-gateway/leap-gateway/internal/singbox"
@@ -32,6 +33,8 @@ type Deps struct {
 	Expander   *whitelistexpand.Expander
 	RuleSets   *rulesets.Manager
 	UXTel      *uxtelemetry.Store
+	// NodeScorer is non-nil only when engine=mihomo + NodeQualify.Enabled=true.
+	NodeScorer *nodescorer.Scorer
 }
 
 // Renderer is the engine-agnostic interface both internal/singbox.Renderer
@@ -95,6 +98,10 @@ func NewServer(deps Deps) *Server {
 	mux.HandleFunc("POST /api/ux-telemetry", s.handleUXTelemetryPost)
 	mux.HandleFunc("GET /api/ux-telemetry", s.auth(s.handleUXTelemetryGet))
 	mux.HandleFunc("GET /api/ux-telemetry/summary", s.auth(s.handleUXTelemetrySummary))
+
+	// Node health scoring — mihomo only, shows per-node RTT stats +
+	// passive throughput + qualified/in-pool state.
+	mux.HandleFunc("GET /api/nodes/health", s.auth(s.handleNodesHealth))
 
 	s.srv = &http.Server{
 		Addr:              deps.Cfg.API.Listen,

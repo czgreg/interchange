@@ -255,7 +255,49 @@ type URLTestConfig struct {
 	// to the urltest pool. Empty = every airport node is a candidate.
 	NodePattern string `yaml:"node_pattern"`
 
+	// NodeQualify controls the NodeScorer goroutine that dynamically manages
+	// which nodes participate in the load-balance pool under engine=mihomo.
+	// Nodes are scored every ScoringInterval using mihomo's per-node probe
+	// history plus passive throughput from /connections; those that fail the
+	// thresholds are removed from the pool until they recover.
+	NodeQualify NodeQualifyConfig `yaml:"node_qualify"`
+
 	Watchdog WatchdogConfig `yaml:"watchdog"`
+}
+
+// NodeQualifyConfig is the threshold set for the NodeScorer. All thresholds
+// must be satisfied simultaneously for a node to be considered "qualified".
+// A node that fails a threshold accumulates strikes; it is evicted from the
+// pool once it has accumulated EvictStrikes consecutive failures (preventing
+// single-probe jitter from bouncing nodes in and out).
+type NodeQualifyConfig struct {
+	// Enabled turns the scorer on. Default false (opt-in) so existing sing-box
+	// deployments are unaffected. Set true when engine=mihomo.
+	Enabled bool `yaml:"enabled"`
+	// ScoringInterval is how often the scorer reads /proxies and /connections
+	// and re-evaluates every node. Default 60s (matches mihomo url-test interval
+	// so each scoring round has fresh probe data).
+	ScoringInterval time.Duration `yaml:"scoring_interval"`
+	// MaxRTTP50Ms: p50 RTT ceiling in ms. Nodes whose median probe latency
+	// exceeds this are disqualified. Default 500.
+	MaxRTTP50Ms int `yaml:"max_rtt_p50_ms"`
+	// MaxRTTP95Ms: p95 RTT ceiling in ms. Guards against nodes that are usually
+	// fast but spike. Default 800.
+	MaxRTTP95Ms int `yaml:"max_rtt_p95_ms"`
+	// MaxJitterMs: p95-p50 spread in ms. High jitter = unstable. Default 300.
+	MaxJitterMs int `yaml:"max_jitter_ms"`
+	// MaxFailRate: fraction of probes (delay=0 = failed) tolerated. Default 0.25.
+	MaxFailRate float64 `yaml:"max_fail_rate"`
+	// MinProbes: minimum history entries before a node is eligible. Nodes
+	// with fewer probes (just joined / restarted) stay in the pool but are
+	// not scored until they accumulate data. Default 2.
+	MinProbes int `yaml:"min_probes"`
+	// EvictStrikes: consecutive scoring rounds a node must fail before being
+	// removed from the pool. Prevents single-spike eviction. Default 2.
+	EvictStrikes int `yaml:"evict_strikes"`
+	// ReadmitStrikes: consecutive passing rounds before an evicted node is
+	// added back. Default 1.
+	ReadmitStrikes int `yaml:"readmit_strikes"`
 }
 
 // WatchdogConfig drives the in-process active health checker. Every Interval
@@ -427,6 +469,35 @@ func (c *SingBoxConfig) ApplyDefaults() {
 	}
 	if c.URLTest.ProbeURL == "" {
 		c.URLTest.ProbeURL = "https://www.gstatic.com/generate_204"
+	}
+	// NodeQualify defaults. Enabled auto-set to true when engine=mihomo so new
+	// deployments get dynamic pool management without extra yaml config.
+	if c.Engine == "mihomo" && !c.URLTest.NodeQualify.Enabled {
+		c.URLTest.NodeQualify.Enabled = true
+	}
+	if c.URLTest.NodeQualify.ScoringInterval == 0 {
+		c.URLTest.NodeQualify.ScoringInterval = 60 * time.Second
+	}
+	if c.URLTest.NodeQualify.MaxRTTP50Ms == 0 {
+		c.URLTest.NodeQualify.MaxRTTP50Ms = 500
+	}
+	if c.URLTest.NodeQualify.MaxRTTP95Ms == 0 {
+		c.URLTest.NodeQualify.MaxRTTP95Ms = 800
+	}
+	if c.URLTest.NodeQualify.MaxJitterMs == 0 {
+		c.URLTest.NodeQualify.MaxJitterMs = 300
+	}
+	if c.URLTest.NodeQualify.MaxFailRate == 0 {
+		c.URLTest.NodeQualify.MaxFailRate = 0.25
+	}
+	if c.URLTest.NodeQualify.MinProbes == 0 {
+		c.URLTest.NodeQualify.MinProbes = 2
+	}
+	if c.URLTest.NodeQualify.EvictStrikes == 0 {
+		c.URLTest.NodeQualify.EvictStrikes = 2
+	}
+	if c.URLTest.NodeQualify.ReadmitStrikes == 0 {
+		c.URLTest.NodeQualify.ReadmitStrikes = 1
 	}
 	// Watchdog defaults — enabled by default once urltest is in place.
 	if c.URLTest.Watchdog.Interval == 0 {

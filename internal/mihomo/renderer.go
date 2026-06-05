@@ -57,6 +57,10 @@ type Renderer struct {
 	cfg  config.SingBoxConfig // reused: schema is engine-agnostic
 	node config.NodeConfig
 	subs []config.SubscriptionEntry
+	// qualifiedOverride, when non-nil, limits us-pool members to the given
+	// set of node tags (used by nodescorer during hot-reload). nil = use all
+	// NodePattern-matched nodes (normal rendering path).
+	qualifiedOverride []string
 }
 
 // NewRenderer constructs a Renderer with the given engine-agnostic config.
@@ -93,6 +97,16 @@ func (r *Renderer) SetSubscriptions(subs []config.SubscriptionEntry) {
 func (r *Renderer) SetWhitelist(mode string, wl config.WhitelistConfig) {
 	r.cfg.Route.Mode = mode
 	r.cfg.Route.Whitelist = wl
+}
+
+// RenderWithQualifiedNodes produces a Clash YAML where us-pool contains
+// only the given qualified node tags. Used by nodescorer to hot-reload
+// mihomo with an updated pool after a scoring round. nil = use all
+// NodePattern-matched nodes (normal rendering path).
+func (r *Renderer) RenderWithQualifiedNodes(outbounds []subscribe.Outbound, qualified []string) ([]byte, error) {
+	clone := *r
+	clone.qualifiedOverride = qualified
+	return clone.Write(outbounds)
 }
 
 // Path returns the on-disk path the rendered config should be written to.

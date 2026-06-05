@@ -58,12 +58,28 @@ func (r *Renderer) buildProxies(outbounds []subscribe.Outbound) []map[string]any
 //	                      PUT /proxies/pin
 func (r *Renderer) buildProxyGroups(outbounds []subscribe.Outbound) []map[string]any {
 	tags := nodeTags(outbounds)
-	pool := filterByPattern(tags, r.cfg.URLTest.NodePattern)
+
+	var pool []string
+	if len(r.qualifiedOverride) > 0 {
+		// NodeScorer hot-reload path: use the explicitly qualified set.
+		// Still intersect with actually-present tags in case outbounds
+		// changed between scoring and render (defensive).
+		tagSet := make(map[string]bool, len(tags))
+		for _, t := range tags {
+			tagSet[t] = true
+		}
+		for _, t := range r.qualifiedOverride {
+			if tagSet[t] {
+				pool = append(pool, t)
+			}
+		}
+	}
 	if len(pool) == 0 {
-		// NodePattern matched nothing — fall back to all parsed nodes,
-		// matching the sing-box renderer's behavior. Without this, the
-		// pool would be empty and mihomo would refuse to load.
-		pool = tags
+		// Normal render path: filter by NodePattern.
+		pool = filterByPattern(tags, r.cfg.URLTest.NodePattern)
+		if len(pool) == 0 {
+			pool = tags
+		}
 	}
 
 	probeURL := r.cfg.URLTest.ProbeURL

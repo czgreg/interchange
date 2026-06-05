@@ -14,6 +14,7 @@ import (
 	"github.com/leap-gateway/leap-gateway/internal/configstore"
 	"github.com/leap-gateway/leap-gateway/internal/dnspreload"
 	"github.com/leap-gateway/leap-gateway/internal/mihomo"
+	"github.com/leap-gateway/leap-gateway/internal/nodescorer"
 	"github.com/leap-gateway/leap-gateway/internal/nodeinfo"
 	"github.com/leap-gateway/leap-gateway/internal/rulesets"
 	"github.com/leap-gateway/leap-gateway/internal/singbox"
@@ -49,17 +50,19 @@ func main() {
 		cfg.Subscriptions, cfg.Subscribe.HTTPTimeout, cfg.Subscribe.UserAgent,
 		singbox.LeapInternalProxyURL)
 
-	// Engine-aware factory: pick renderer + systemd unit + (TODO) watchdog
-	// behavior from cfg.SingBox.Engine. ApplyDefaults already validated and
-	// defaulted Engine to "sing-box". Mihomo path uses load-balance (multi-
-	// active across all US nodes); sing-box path uses urltest (single-active).
+	// Engine-aware factory: pick renderer + systemd unit + watchdog behavior
+	// from cfg.SingBox.Engine. Mihomo path uses load-balance (multi-active
+	// across all US nodes); sing-box path uses urltest (single-active).
 	var renderer api.Renderer
+	var mihomoRenderer *mihomo.Renderer // non-nil only when engine=mihomo
 	systemdUnit := "leap-singbox.service"
 	switch cfg.SingBox.Engine {
 	case "mihomo":
-		renderer = mihomo.NewRenderer(cfg.SingBox).
+		mr := mihomo.NewRenderer(cfg.SingBox).
 			WithNode(cfg.Node).
 			WithSubscriptions(cfg.Subscriptions)
+		mihomoRenderer = mr
+		renderer = mr
 		systemdUnit = "leap-mihomo.service"
 	default:
 		renderer = singbox.NewRenderer(cfg.SingBox).
@@ -126,6 +129,27 @@ func main() {
 	}
 	ruleMgr.WithEngine(cfg.SingBox.Engine)
 
+	// NodeScorer: dynamic pool management for engine=mihomo.
+	// Scores every node on its probe history + passive /connections
+	// throughput; keeps only qualified nodes in us-pool; hot-reloads
+	// mihomo via PUT /configs when the set changes (no systemctl restart).
+	var nodeScorer *nodescorer.Scorer
+	if cfg.SingBox.Engine == "mihomo" && cfg.SingBox.URLTest.NodeQualify.Enabled && mihomoRenderer != nil {
+		ns := nodescorer.New(
+			cfg.SingBox.URLTest.NodeQualify,
+			cfg.SingBox.ClashAPI.ExternalController,
+			cfg.SingBox.ClashAPI.Secret,
+			cfg.SingBox.URLTest.ProbeURL,
+			mihomoRenderer,
+			mgr.AllOutbounds,
+		)
+		nodeScorer = ns
+		slog.Info("nodescorer: enabled",
+			"interval", cfg.SingBox.URLTest.NodeQualify.ScoringInterval,
+			"max_rtt_p50", cfg.SingBox.URLTest.NodeQualify.MaxRTTP50Ms,
+		)
+	}
+
 	sched := subscribe.NewScheduler(cfg.Subscribe.RefreshInterval, func(ctx context.Context) error {
 		return api.RunRefresh(ctx, mgr, renderer, sbCtl)
 	})
@@ -156,11 +180,19 @@ func main() {
 		// employees) — beyond that the ring overwrites oldest. Operators
 		// scrape /api/ux-telemetry/summary periodically into a long-term
 		// store if they want history; we don't try to be that store.
-		UXTel: uxtelemetry.New(5000),
+		UXTel:      uxtelemetry.New(5000),
+		NodeScorer: nodeScorer,
 	})
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
+
+	// Launch NodeScorer now that ctx is available and mihomo is up (bootstrap
+	// render ran above). The 10s warm-up in scorer.Run gives mihomo time to
+	// complete its first url-test round before scoring begins.
+	if nodeScorer != nil {
+		go nodeScorer.Run(ctx)
+	}
 
 	go func() {
 		slog.Info("api listening", "addr", cfg.API.Listen)
