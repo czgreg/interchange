@@ -12,12 +12,13 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
-	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/leap-gateway/leap-gateway/internal/leaphttp"
 )
 
 //go:embed catalog.json
@@ -62,9 +63,15 @@ type Manager struct {
 // downloaded .srs files into dir. httpTimeout caps each HTTP fetch.
 //
 // proxyURL is optional. When non-empty, fetches are routed through that
-// HTTP proxy — used in production to relay through the local sing-box's
-// http inbound so .srs downloads transit the airport (raw.githubusercontent
-// is GFW-blocked from inside CN). Empty string ⇒ direct OS network.
+// HTTP proxy — used in production to relay through the local mihomo /
+// sing-box's http inbound so .srs downloads transit the airport
+// (raw.githubusercontent is GFW-blocked from inside CN). Empty string ⇒
+// direct OS network.
+//
+// The HTTP client falls back to direct dial when the proxy is unreachable
+// (data plane crash-looping or mid-restart) — matches the leaphttp
+// pattern used by subscribe + whitelistexpand. Without fallback, a single
+// data-plane outage would block all on-demand .srs fetches indefinitely.
 //
 // Engine defaults to "sing-box". Use WithEngine to switch to mihomo, which
 // rewrites upstream URLs to MetaCubeX's meta/<kind>/<stem>.mrs path and
@@ -74,19 +81,11 @@ func New(dir string, httpTimeout time.Duration, proxyURL string) (*Manager, erro
 	if err != nil {
 		return nil, fmt.Errorf("rulesets: parse embedded catalog: %w", err)
 	}
-	transport := &http.Transport{}
-	if proxyURL != "" {
-		u, err := url.Parse(proxyURL)
-		if err != nil {
-			return nil, fmt.Errorf("rulesets: parse proxy url %q: %w", proxyURL, err)
-		}
-		transport.Proxy = http.ProxyURL(u)
-	}
 	return &Manager{
 		dir:     dir,
 		catalog: cat,
 		items:   items,
-		httpc:   &http.Client{Timeout: httpTimeout, Transport: transport},
+		httpc:   leaphttp.NewClient(proxyURL, httpTimeout, "rulesets"),
 		engine:  "sing-box",
 	}, nil
 }

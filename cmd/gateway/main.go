@@ -109,14 +109,16 @@ func main() {
 	// WithMihomoSrsCache to maintain a private .srs cache fetched from
 	// MetaCubeX /sing/ branch on demand. install.sh ships sing-box even
 	// when engine=mihomo specifically for this.
+	//
+	// WithProxy is called unconditionally — both engines run fakeip mode,
+	// so leap-gateway's outbound HTTP must transit the local proxy or
+	// time out on direct dial against fake IPs (see internal/leaphttp).
 	const singboxCLI = "/usr/local/bin/sing-box"
 	expander := whitelistexpand.New("").
+		WithProxy(singbox.LeapInternalProxyURL).
 		WithRuleSets(cfg.SingBox.RuleSetsDir, singboxCLI)
 	if cfg.SingBox.Engine == "mihomo" {
-		expander.WithMihomoSrsCache(
-			"/var/lib/leap/whitelist-srs-cache",
-			singbox.LeapInternalProxyURL,
-		)
+		expander.WithMihomoSrsCache("/var/lib/leap/whitelist-srs-cache")
 	}
 	if err := expander.LoadFromDisk(); err != nil {
 		slog.Warn("whitelistexpand: cannot load on-disk cache", "err", err)

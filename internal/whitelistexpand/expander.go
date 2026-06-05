@@ -24,7 +24,6 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
-	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -32,6 +31,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/leap-gateway/leap-gateway/internal/leaphttp"
 )
 
 const (
@@ -75,6 +76,7 @@ type Snapshot struct {
 // Expander owns the cache + the build worker.
 type Expander struct {
 	cachePath   string
+	proxyURL    string // empty = direct dial; set via WithProxy. See package leaphttp for why this exists.
 	client      *http.Client
 	sources     []string
 	ruleSetsDir string // "" disables geoip expansion (sing-box-mode lookup path)
@@ -84,11 +86,10 @@ type Expander struct {
 	// /sing/ branch and stored here. Required under engine=mihomo, where
 	// the active rule-sets dir holds .mrs files that sing-box CLI can't
 	// decompile. srsHTTPClient routes the fetch through the local proxy
-	// engine's HTTP inbound (with direct-fallback) so fakeip resolver
-	// doesn't poison the upstream connect.
+	// engine's HTTP inbound (via leaphttp's proxy-or-direct fallback) so
+	// fakeip resolver pollution doesn't poison the upstream connect.
 	srsCacheDir   string
 	srsHTTPClient *http.Client
-	srsFallbackHC *http.Client
 
 	mu   sync.RWMutex
 	snap *Snapshot
@@ -102,9 +103,38 @@ func New(cachePath string) *Expander {
 	}
 	return &Expander{
 		cachePath: cachePath,
-		client:    &http.Client{Timeout: httpTimeout},
-		sources:   defaultSources,
+		// Default to direct-dial. Production callers MUST follow up with
+		// WithProxy(LeapInternalProxyURL) — otherwise this client dials
+		// overseas hosts directly through the host's resolver, which sees
+		// mihomo's fake IPs and times out. See package leaphttp.
+		client:  leaphttp.NewClient("", httpTimeout, "whitelistexpand-domain"),
+		sources: defaultSources,
 	}
+}
+
+// WithProxy wires the leap-internal HTTP proxy URL (typically
+// http://127.0.0.1:11080 = singbox.LeapInternalProxyURL) for ALL outbound
+// HTTP from this expander — the v2fly domain fetcher AND the on-demand
+// .srs cache fetcher.
+//
+// Without this, the expander's `&http.Client{}` dials directly through
+// the host's resolver, which mihomo's fakeip mode pollutes; result is
+// indefinite timeouts on every category fetch (caught in production
+// 2026-06-06 — domain count silently dropped from 2400+ to 6 = literals
+// only).
+//
+// The returned client falls back to direct dial if the proxy is
+// unreachable, so the bootstrap window (mihomo not yet up) and data-
+// plane crash periods don't completely stall expansion.
+//
+// Idempotent: safe to call multiple times; takes effect from next fetch.
+func (e *Expander) WithProxy(proxyURL string) *Expander {
+	e.proxyURL = proxyURL
+	e.client = leaphttp.NewClient(proxyURL, httpTimeout, "whitelistexpand-domain")
+	if e.srsCacheDir != "" {
+		e.srsHTTPClient = leaphttp.NewClient(proxyURL, httpTimeout, "whitelistexpand-srs")
+	}
+	return e
 }
 
 // WithRuleSets configures the local .srs directory and sing-box binary used
@@ -121,24 +151,14 @@ func (e *Expander) WithRuleSets(dir, singboxBin string) *Expander {
 // sing-box CLI can't decompile, so whitelistexpand maintains its own private
 // .srs cache at cacheDir, fetching from MetaCubeX /sing/ branch on demand.
 //
-// proxyURL: optional HTTP proxy used for the fetch — typically the local
-// proxy engine's loopback inbound (e.g. http://127.0.0.1:11080). Routes
-// the fetch around the host resolver's fakeip pollution. Empty → direct.
-//
-// Must be set in addition to WithRuleSets for the engine's binary path
-// (singboxBin still required — sing-box CLI is what we shell out to).
-func (e *Expander) WithMihomoSrsCache(cacheDir, proxyURL string) *Expander {
+// Pair with WithProxy(...) to route the fetch through the local proxy
+// engine's loopback inbound (avoids fakeip resolver pollution). When
+// WithProxy hasn't been called the srs fetcher dials direct — which
+// usually fails under mihomo for the same fakeip reason; deliberate
+// caller responsibility, not silently swallowed.
+func (e *Expander) WithMihomoSrsCache(cacheDir string) *Expander {
 	e.srsCacheDir = cacheDir
-	e.srsHTTPClient = &http.Client{Timeout: httpTimeout, Transport: &http.Transport{}}
-	if proxyURL != "" {
-		if u, err := url.Parse(proxyURL); err == nil {
-			e.srsHTTPClient = &http.Client{
-				Timeout:   httpTimeout,
-				Transport: &http.Transport{Proxy: http.ProxyURL(u)},
-			}
-			e.srsFallbackHC = &http.Client{Timeout: httpTimeout, Transport: &http.Transport{}}
-		}
-	}
+	e.srsHTTPClient = leaphttp.NewClient(e.proxyURL, httpTimeout, "whitelistexpand-srs")
 	return e
 }
 
@@ -451,11 +471,6 @@ func (e *Expander) fetchSrsToCache(tag, dest string) error {
 	}
 
 	body, err := e.fetchSrsOnce(e.srsHTTPClient, url)
-	if err != nil && e.srsFallbackHC != nil {
-		slog.Warn("whitelistexpand: srs fetch via primary failed, trying direct",
-			"tag", tag, "url", url, "err", err)
-		body, err = e.fetchSrsOnce(e.srsFallbackHC, url)
-	}
 	if err != nil {
 		return err
 	}
