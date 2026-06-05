@@ -4,11 +4,12 @@
 
 | 节点 | base URL |
 |---|---|
-| 89（mihomo，当前进化版） | `http://192.168.70.89:18080` |
-| 92（sing-box，旧版） | `http://192.168.70.92:18080` |
+| 89（生产 PoC，mihomo） | `http://192.168.70.89:18080` |
 | 节点本机调用 | `http://127.0.0.1:18080` |
 
 监听由 `gateway.yaml` 的 `api.listen` 控制；生产前应收回 `127.0.0.1:18080` 并在前置 nginx 终端 TLS。
+
+> **数据面引擎**：现役部署一律是 **mihomo**（load-balance + consistent-hashing 多活）。`internal/singbox/` 渲染器仍保留为可选 fallback（`gateway.yaml: singbox.engine: sing-box`），但这条路径未在线上使用，仅为应急退路。本文按 **mihomo 为基线** 描述；sing-box 引擎下的差异在每个端点末尾以 *sing-box 退路* 备注。
 
 ---
 
@@ -34,7 +35,7 @@ Authorization: Bearer <token>
 | 409 | 资源冲突（订阅名已存在） |
 | 500 | 持久化 / 渲染 / 数据面 reload 失败 |
 | 502 | 上游按需拉取 .srs/.mrs 失败 |
-| 503 | 功能未启用（如 engine=sing-box 时访问节点健康评分） |
+| 503 | 功能未启用（如访问 `/api/nodes/health` 但 NodeScorer 未启用 —— sing-box 引擎，或 mihomo 引擎下 `node_qualify.enabled=false`） |
 
 ---
 
@@ -83,18 +84,25 @@ HTTP 200
 
 ```json
 {
-  "last_refresh": "2026-06-05T12:28:25Z",
-  "node_count": 155,
-  "singbox_ok": true,
-  "subscriptions": 5
+  "last_refresh":     "2026-06-06T01:00:00Z",
+  "node_count":       155,
+  "subscriptions":    5,
+  "singbox_ok":       true,
+  "pool_qualified":   17,
+  "pool_total":       26,
+  "pool_last_update": "2026-06-06T00:55:32Z"
 }
 ```
 
 | 字段 | 说明 |
 |---|---|
 | `node_count` | 所有已解析的代理节点总数（跨全部订阅） |
-| `singbox_ok` | 数据面（sing-box 或 mihomo）clash-api 可达 |
 | `subscriptions` | 当前已配置的订阅数 |
+| `singbox_ok` | 数据面 clash-api `/version` 可达（字段名是历史包袱：mihomo 引擎下也是这一项，含义是"当前数据面引擎可达"，并非特指 sing-box） |
+| `pool_qualified` / `pool_total` | NodeScorer 当前合格 / 候选总数（仅 mihomo 引擎，未启用 NodeScorer 时省略） |
+| `pool_last_update` | 最近一次 us-pool 成员变更的时间 |
+
+> *sing-box 退路*：`pool_qualified` / `pool_total` / `pool_last_update` 三个字段缺失（NodeScorer 仅 mihomo 引擎启用）。
 
 ---
 
@@ -115,9 +123,11 @@ HTTP 200
 
 ## GET /api/nodes/health
 
-**engine=mihomo 专用**。NodeScorer 的动态评分结果：每 `node_qualify.scoring_interval`（默认 60s）对 us-pool 候选集打一次分，按 RTT 稳定性 + 探测失败率 + 被动吞吐决定是否入池，变化时热重载 mihomo（无重启）。
+**仅 mihomo 引擎**。NodeScorer 的动态评分结果：每 `node_qualify.scoring_interval`（默认 60s）对 us-pool 候选集打一次分，按 RTT 稳定性 + 探测失败率 + 被动吞吐决定是否入池，变化时热重载 mihomo（无重启）。
 
-engine=sing-box 时返回 `503 {"error":"..."}`。
+返回 `503 {"error":"node health scoring not active ..."}` 的两种情况：
+- `engine=sing-box`（NodeScorer 仅 mihomo 模式启用）
+- `engine=mihomo` 但 `node_qualify.enabled=false`（默认会自动开启，除非显式关闭）
 
 ```json
 {
@@ -204,11 +214,16 @@ engine=sing-box 时返回 `503 {"error":"..."}`。
   "feilian": { "tun0_active": true, "vpn_active": true, ... },
   "leap": {
     "gateway_version": "dev",
-    "singbox_version": "v1.19.26",
-    "services": { "leap-mihomo": "active", "leap-gateway": "active", "leap-nft": "active" },
+    "singbox_version": "1.10.7",
+    "services": {
+      "leap-gateway": "active",
+      "leap-mihomo":  "active",
+      "leap-singbox": "inactive",
+      "leap-nft":     "active"
+    },
     "subscriptions_count": 5,
     "nodes_parsed": 155,
-    "last_refresh": "2026-06-05T12:28:25Z"
+    "last_refresh": "2026-06-06T00:55:32Z"
   },
   "active_proxy": {
     "reachable":     true,
@@ -226,34 +241,53 @@ engine=sing-box 时返回 `503 {"error":"..."}`。
   },
   "watchdog": {
     "enabled": false,
-    "current_node": "ctc-02/US-C30-01-DMIT",
-    "consecutive_healthy": 4
+    "current_node": "",
+    "consecutive_healthy": 0
   }
 }
 ```
 
-**说明**：
-- engine=mihomo 时，`active_urltest` 为 `"us-pool"`（load-balance 组），`pools` 列出的是该组的所有成员节点及其最近 RTT
-- engine=sing-box 时，`active_urltest` 为 `"urltest-primary"` 或 `"urltest-backup"`
-- `watchdog.enabled=false` 是 mihomo 模式的正常状态（mihomo 内置 url-test 管理，watchdog 不再需要）
+**字段说明**：
+- `leap.singbox_version`：节点上 `/usr/local/bin/sing-box --version` 的输出，引擎是 mihomo 时这个字段反映的是 sing-box CLI（whitelistexpand 用它来 decompile `.srs`），**不是当前数据面引擎版本**。字段名是历史包袱
+- `leap.services.leap-mihomo` / `leap-singbox`：两个数据面 unit 永远共存于磁盘，`enable` 的那个由 `gateway.yaml: singbox.engine` 决定，另一个会是 `inactive`
+- `active_proxy.active_urltest`：mihomo 下是 `us-pool`（load-balance 组）；sing-box 下是 `urltest-primary` 或 `urltest-backup`
+- `watchdog.enabled=false` 是 mihomo 模式的正常状态——load-balance 内置的 url-test 已经管理了健康检查
+
+> *sing-box 退路*：`active_urltest` 取值为 `urltest-primary` / `urltest-backup`；`pools` 列表里有两个池子（primary + backup），其中 `active=true` 的是当前承载流量的；`watchdog.enabled=true` 时会有 watchdog 自动 primary↔backup 切换；`pools[].egress` 字段会有该池出口 IP（mihomo 下没有 per-pool egress 探测，因为只有一个池）。
 
 ---
 
 ## POST /api/proxies/select
 
-手动指定 `out` selector 指向的成员（用于运维调试，不影响 NodeScorer 自动管理）。
+手动把某个 Selector 组指向它的某个成员（用于运维调试 / 应急切换）。
 
 ```json
-// 请求体
+// 请求体（两个字段必填）
 { "selector": "out", "name": "us-pool" }
-// 或者直接指定某个节点（通过 pin selector）
-{ "selector": "pin", "name": "ctc-02/US-C30-01-DMIT" }
 ```
 
-```json
-// 响应
-{ "ok": true }
-```
+**典型用法**（mihomo）：
+
+| selector | name | 效果 |
+|---|---|---|
+| `out` | `us-pool` | 走 load-balance 多活池（默认行为） |
+| `out` | `pin` | 走人工钉住的单节点（`pin` 选哪个节点见下一行） |
+| `out` | `DIRECT` | 应急绕过代理，全部直连 |
+| `pin` | `<node-tag>` | 把 pin 选择器固定到某个节点（之后 `out=pin` 才有意义） |
+
+**响应**：成功返回 `200` + `/api/proxies/active` 当前快照（让运维直接看到切换后的状态）。失败：
+
+| 状态 | 含义 |
+|---|---|
+| 400 | 请求体缺字段；或 selector 类型不是 Selector（URLTest/LoadBalance 不能手动 PUT） |
+| 404 | selector 在数据面上不存在；或 name 不在该 selector 的 `all` 列表里（response 体会列出合法成员） |
+| 500 | clash-api 不可达 |
+
+**override 持久性**：
+- mihomo 引擎：NodeScorer 只管 us-pool 的 *成员*（哪些节点能承载流量），不会去动 selector 指针。手动 `out`/`pin` 切换会一直保持，直到下次运维改动或数据面重启
+- sing-box 引擎：watchdog 仍在跑，可能会按健康探测把 `out` 自动切回去
+
+> *sing-box 退路*：`selector=out` 的合法 `name` 是 `urltest-primary` / `urltest-backup` / `direct`（注意是小写 `direct`，不是 mihomo 的大写 `DIRECT`）。
 
 ---
 
@@ -424,7 +458,7 @@ engine=sing-box 时返回 `503 {"error":"..."}`。
 - `domain_suffix`：裸域名，无 `://`
 - `ip_cidr`：有效 CIDR 或裸 IP（自动补 /32 / /128）
 
-成功触发 **数据面 reload**（mihomo: PUT /configs 热重载；sing-box: systemctl restart，约 5-10s 中断）。
+成功触发 **数据面 reload**：当前 `Controller.Reload` 走 `systemctl restart leap-{mihomo|singbox}.service`，约 3-10s 中断（mihomo 启动快一些）。NodeScorer 调整 us-pool 成员是另一条路径，走 mihomo clash-api `PUT /configs?force=true` 热重载，不中断；但白名单/订阅类的整体重新渲染当前不走热重载。
 
 ```bash
 # 加一条 domain_suffix：先 GET，jq 追加，再 PUT
@@ -459,7 +493,7 @@ curl -s http://127.0.0.1:18080/api/whitelist \
 
 **数据来源**：
 - `domains`：v2fly/domain-list-community（经 jsdelivr CDN，CN 内可达；失败回退 raw.githubusercontent）
-- `ip_cidrs`：本地 `.srs` / `.mrs` 文件经 `sing-box rule-set decompile` 解出；mihomo 模式下 scorer 会在首次使用时按需从 MetaCubeX 拉取私有 `.srs` 缓存至 `/var/lib/leap/whitelist-srs-cache/`
+- `ip_cidrs`：本地 `.mrs`（mihomo）/ `.srs`（sing-box）经 `sing-box rule-set decompile` 解出。mihomo 不能解自己的 `.mrs`，所以 leap-gateway 在首次需要时按需从 MetaCubeX `/sing/` 分支拉取对应 `.srs` 缓存到 `/var/lib/leap/whitelist-srs-cache/`，再调 sing-box CLI（即使数据面是 mihomo，节点上也总会装 sing-box CLI 就为了这件事）
 
 **刷新时机**：`PUT /api/whitelist` 后异步触发；不阻塞 PUT 响应。快照有效期内多次 GET 返回缓存。
 
@@ -511,7 +545,7 @@ curl -s http://127.0.0.1:18080/api/whitelist/resolved | jq -r '.ip_cidrs[]'
 }
 ```
 
-**上游**：MetaCubeX/meta-rules-dat（每日 06:30 CST 自动构建，Loyalsoldier-enhanced）。`geosite-cn` / `geoip-cn` 不在 catalog 里（它们是路由基建，由 `gateway.yaml` 固定 URL 控制）。
+**上游**：MetaCubeX/meta-rules-dat（每日 06:30 CST 自动构建，Loyalsoldier-enhanced）。catalog 里 URL 写的是 `/sing/.../*.srs`；mihomo 引擎的 ruleset manager 在按需拉取时会自动改写为 `/meta/.../*.mrs`（`internal/rulesets.WithEngine("mihomo")`）。`geosite-cn` / `geoip-cn` 不在 catalog 里（路由基建，由 `gateway.yaml` 固定 URL 控制）。
 
 ---
 
@@ -654,7 +688,6 @@ curl -s $BASE/api/whitelist \
 # 加内网域名到 fake_ip_skip（不走 fakeip，返回真实 IP）
 curl -s $BASE/api/whitelist | jq '.fake_ip_skip += ["+.paigod.work"]' \
   | curl -s -H 'Content-Type: application/json' -X PUT $BASE/api/whitelist -d @-
-  | curl -s -H 'Content-Type: application/json' -X PUT $BASE/api/whitelist -d @-
 
 # 查看 UX 遥测摘要（过去 1h）
 curl -s "$BASE/api/ux-telemetry/summary" | jq '.domains[:5]'
@@ -717,4 +750,4 @@ curl -s $BASE/api/whitelist/resolved | jq -r '.domains[]' | head -20
 
 ---
 
-*最后更新：2026-06-05，基于 commit b1ff1df，engine=mihomo 版本*
+*最后更新：2026-06-06，基于 commit 630efb9，engine=mihomo 基线（含 sniffer + DNS nameserver-policy 重构）*

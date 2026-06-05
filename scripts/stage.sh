@@ -69,8 +69,15 @@ rm -rf "$STAGE_DIR"
 mkdir -p "$STAGE_DIR"
 
 # 1. Build leap-gateway for the target platform.
-log "building leap-gateway (linux/$GOARCH)"
-GOOS=linux GOARCH="$GOARCH" CGO_ENABLED=0 go build -ldflags='-s -w' \
+# Version is `git describe --tags --always --dirty`: tag if present, short
+# sha otherwise, with `-dirty` suffix when the worktree has uncommitted
+# changes. Injected into main.Version so /api/proxies/active.leap
+# .gateway_version reports it — `dev` means the binary was built off-tree,
+# which is exactly the case we want to flag during incident triage.
+VERSION=$(git describe --tags --always --dirty 2>/dev/null || echo dev)
+log "building leap-gateway (linux/$GOARCH, version=$VERSION)"
+GOOS=linux GOARCH="$GOARCH" CGO_ENABLED=0 go build \
+  -ldflags="-s -w -X main.Version=$VERSION" \
   -o "$STAGE_DIR/leap-gateway" ./cmd/gateway
 ls -lh "$STAGE_DIR/leap-gateway" | awk '{print "[stage] leap-gateway", $5}'
 
