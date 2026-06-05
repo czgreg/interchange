@@ -140,6 +140,7 @@ func main() {
 			cfg.SingBox.ClashAPI.ExternalController,
 			cfg.SingBox.ClashAPI.Secret,
 			cfg.SingBox.URLTest.ProbeURL,
+			cfg.SingBox.URLTest.NodePattern,
 			mihomoRenderer,
 			mgr.AllOutbounds,
 		)

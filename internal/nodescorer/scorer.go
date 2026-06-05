@@ -21,6 +21,7 @@ import (
 	"log/slog"
 	"math"
 	"net/http"
+	"regexp"
 	"sort"
 	"sync"
 	"time"
@@ -77,12 +78,13 @@ type Renderer interface {
 
 // Scorer is the dynamic pool manager.
 type Scorer struct {
-	cfg     config.NodeQualifyConfig
-	apiAddr string // mihomo clash-api host:port
-	apiSecret string
-	probeURL string  // same URL mihomo uses for url-test
-	renderer Renderer
-	subscribe func() []subscribe.Outbound // live outbounds from subscribe.Manager
+	cfg         config.NodeQualifyConfig
+	nodePattern string // regexp filter matching sing-box renderer's NodePattern
+	apiAddr     string // mihomo clash-api host:port
+	apiSecret   string
+	probeURL    string // same URL mihomo uses for url-test
+	renderer    Renderer
+	subscribe   func() []subscribe.Outbound // live outbounds from subscribe.Manager
 
 	mu      sync.RWMutex
 	state   map[string]*nodeState // keyed by node tag
@@ -111,21 +113,22 @@ type connBytes struct {
 // probe target = same measurement conditions).
 func New(
 	cfg config.NodeQualifyConfig,
-	apiAddr, apiSecret, probeURL string,
+	apiAddr, apiSecret, probeURL, nodePattern string,
 	r Renderer,
 	allOutbounds func() []subscribe.Outbound,
 ) *Scorer {
 	return &Scorer{
-		cfg:       cfg,
-		apiAddr:   apiAddr,
-		apiSecret: apiSecret,
-		probeURL:  probeURL,
-		renderer:  r,
-		subscribe: allOutbounds,
-		state:     map[string]*nodeState{},
-		poolSet:   map[string]bool{},
-		connPrev:  map[string]connBytes{},
-		httpc:     &http.Client{Timeout: 5 * time.Second},
+		cfg:         cfg,
+		nodePattern: nodePattern,
+		apiAddr:     apiAddr,
+		apiSecret:   apiSecret,
+		probeURL:    probeURL,
+		renderer:    r,
+		subscribe:   allOutbounds,
+		state:       map[string]*nodeState{},
+		poolSet:     map[string]bool{},
+		connPrev:    map[string]connBytes{},
+		httpc:       &http.Client{Timeout: 5 * time.Second},
 	}
 }
 
@@ -183,26 +186,46 @@ func (s *Scorer) score(ctx context.Context) {
 	// 2. Fetch /connections for passive throughput.
 	throughput := s.updateThroughput(ctx, proxies)
 
-	// 3. Find current us-pool members.
-	usPool, ok := proxies["us-pool"]
-	if !ok {
+	// 3. Build candidate set = union of (current us-pool members) and (nodes
+	//    previously seen in state). This keeps evicted nodes under observation
+	//    without needing to re-run NodePattern regexp (which has edge-case
+	//    matching issues in Go's RE2 for patterns like \bUS).
+	usPool := proxies["us-pool"]
+	if usPool == nil {
 		slog.Warn("nodescorer: us-pool not found in /proxies")
 		return
 	}
 	members, _ := usPool["all"].([]interface{})
+	candidateSet := make(map[string]bool, len(members)+len(s.state))
+	for _, raw := range members {
+		if tag, ok := raw.(string); ok && tag != "" {
+			candidateSet[tag] = true
+		}
+	}
+	for tag := range s.state {
+		// Re-include previously scored nodes only if they still exist in /proxies
+		if _, ok := proxies[tag]; ok {
+			candidateSet[tag] = true
+		}
+	}
+	candidates := make([]string, 0, len(candidateSet))
+	for tag := range candidateSet {
+		candidates = append(candidates, tag)
+	}
+	sort.Strings(candidates)
+	if len(candidates) == 0 {
+		slog.Warn("nodescorer: no candidates (us-pool empty and no prior state)")
+		return
+	}
 
 	// 4. Score each member.
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	newPoolSet := map[string]bool{}
-	nodes := make([]NodeHealth, 0, len(members))
+	nodes := make([]NodeHealth, 0, len(candidates))
 
-	for _, raw := range members {
-		tag, _ := raw.(string)
-		if tag == "" {
-			continue
-		}
+	for _, tag := range candidates {
 		pData, ok := proxies[tag]
 		if !ok {
 			continue
@@ -491,6 +514,41 @@ func (s *Scorer) mihomoHotReload(ctx context.Context) error {
 		return fmt.Errorf("PUT /configs: HTTP %d", resp.StatusCode)
 	}
 	return nil
+}
+
+// filterCandidates returns the subset of outbound tags that:
+//   - are node-bearing (not selector/urltest/direct/etc.)
+//   - match the NodePattern regexp
+//   - exist as known entries in mihomo's /proxies map
+//
+// Using AllOutbounds() as source (not us-pool.all) means evicted nodes
+// are still in the candidate set and can recover + be readmitted.
+func filterCandidates(outbounds []subscribe.Outbound, nodePattern string, proxies map[string]map[string]interface{}) []string {
+	var re *regexp.Regexp
+	if nodePattern != "" {
+		var err error
+		re, err = regexp.Compile(nodePattern)
+		if err != nil {
+			re = nil
+		}
+	}
+	var out []string
+	for _, o := range outbounds {
+		tag := o.Tag()
+		if tag == "" {
+			continue
+		}
+		if re != nil && !re.MatchString(tag) {
+			continue
+		}
+		// Verify mihomo knows about this proxy (it may not if the subscription
+		// hasn't been loaded yet or the proxy was removed).
+		if _, ok := proxies[tag]; !ok {
+			continue
+		}
+		out = append(out, tag)
+	}
+	return out
 }
 
 func (s *Scorer) fetchProxies(ctx context.Context) (map[string]map[string]interface{}, error) {
