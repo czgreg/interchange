@@ -7,13 +7,13 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-# mihomo's working dir = /var/lib/leap/mihomo (writable for cache.db + geoip.metadb).
-# Static config + rule-sets live under /etc/leap/mihomo/; SAFE_PATHS lets
-# config files reference paths there (mihomo refuses out-of-workdir paths
-# by default).
-Environment=SAFE_PATHS=/etc/leap/mihomo
-ExecStartPre=/usr/local/bin/mihomo -d /var/lib/leap/mihomo -f /etc/leap/mihomo/config.yaml -t
-ExecStart=/usr/local/bin/mihomo -d /var/lib/leap/mihomo -f /etc/leap/mihomo/config.yaml
+# Working dir = /var/lib/leap/mihomo.
+# leap-gateway renders config.yaml here (matches cfg.SingBox.ConfigPath).
+# mihomo reads <workdir>/config.yaml automatically when no -f is given.
+# rule-sets live under <workdir>/rule-sets/ (subpath, always accepted).
+# SAFE_PATHS is not needed when everything is under the working dir.
+ExecStartPre=/usr/local/bin/mihomo -d /var/lib/leap/mihomo -t
+ExecStart=/usr/local/bin/mihomo -d /var/lib/leap/mihomo
 Restart=on-failure
 RestartSec=5
 LimitNOFILE=infinity
