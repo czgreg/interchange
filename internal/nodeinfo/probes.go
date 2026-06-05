@@ -151,3 +151,35 @@ func singboxVersion(ctx context.Context) string {
 	first = strings.TrimPrefix(first, "sing-box version ")
 	return first
 }
+
+// mihomoVersion: `mihomo -v` — first line, parsed.
+// Typical output: "Mihomo Meta v1.19.26 linux amd64 with go1.26.3 ...".
+// Returns just "v1.19.26" or empty on error.
+func mihomoVersion(ctx context.Context) string {
+	c, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(c, "/usr/local/bin/mihomo", "-v").Output()
+	if err != nil {
+		return ""
+	}
+	first, _, _ := strings.Cut(string(out), "\n")
+	for _, tok := range strings.Fields(first) {
+		if strings.HasPrefix(tok, "v") {
+			return tok
+		}
+	}
+	return strings.TrimSpace(first)
+}
+
+// engineVersion returns the version string of the active data-plane
+// engine. Maps to the matching binary probe; "" for unknown engine names.
+func engineVersion(ctx context.Context, engine string) string {
+	switch engine {
+	case "mihomo":
+		return mihomoVersion(ctx)
+	case "sing-box", "":
+		return singboxVersion(ctx)
+	default:
+		return ""
+	}
+}

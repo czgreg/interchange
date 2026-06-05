@@ -29,7 +29,8 @@ type activeDTO struct {
 
 type leapDTO struct {
 	GatewayVersion     string            `json:"gateway_version"`
-	SingBoxVersion     string            `json:"singbox_version"`
+	Engine             string            `json:"engine"`
+	EngineVersion      string            `json:"engine_version"`
 	Services           map[string]string `json:"services"`
 	SubscriptionsCount int               `json:"subscriptions_count"`
 	NodesParsed        int               `json:"nodes_parsed"`
@@ -85,7 +86,8 @@ func (s *Server) handleProxiesActive(w http.ResponseWriter, r *http.Request) {
 	}
 	leap := leapDTO{
 		GatewayVersion:     ni.Leap.GatewayVersion,
-		SingBoxVersion:     ni.Leap.SingBoxVersion,
+		Engine:             ni.Leap.Engine,
+		EngineVersion:      ni.Leap.EngineVersion,
 		Services:           ni.Leap.Services,
 		SubscriptionsCount: len(s.deps.Cfg.Subscriptions),
 		NodesParsed:        nodesParsed,

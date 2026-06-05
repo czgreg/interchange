@@ -152,12 +152,12 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	for _, r := range results {
 		count += len(r.Outbounds)
 	}
-	singboxOK := s.deps.Controller.Health(r.Context()) == nil
+	engineOK := s.deps.Controller.Health(r.Context()) == nil
 	resp := map[string]any{
 		"last_refresh":  last,
 		"node_count":    count,
 		"subscriptions": len(results),
-		"singbox_ok":    singboxOK,
+		"engine_ok":     engineOK,
 	}
 	// Expose NodeScorer pool summary when active (engine=mihomo).
 	if s.deps.NodeScorer != nil {

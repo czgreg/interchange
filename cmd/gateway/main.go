@@ -102,7 +102,7 @@ func main() {
 		slog.Info("watchdog disabled (engine=mihomo)")
 	}
 	wd := watchdog.New(cfg.SingBox.ClashAPI, cfg.SingBox.URLTest.Watchdog, cfg.SingBox.URLTest.ProbeURL)
-	ni := nodeinfo.New(cfg.Node, Version)
+	ni := nodeinfo.New(cfg.Node, Version, cfg.SingBox.Engine)
 	// whitelistexpand always shells out to sing-box CLI for `rule-set
 	// decompile` (mihomo can't decompile its own .mrs format). Under
 	// engine=mihomo the active rule-sets dir holds .mrs, so set

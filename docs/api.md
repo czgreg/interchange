@@ -87,7 +87,7 @@ HTTP 200
   "last_refresh":     "2026-06-06T01:00:00Z",
   "node_count":       155,
   "subscriptions":    5,
-  "singbox_ok":       true,
+  "engine_ok":        true,
   "pool_qualified":   17,
   "pool_total":       26,
   "pool_last_update": "2026-06-06T00:55:32Z"
@@ -98,7 +98,7 @@ HTTP 200
 |---|---|
 | `node_count` | 所有已解析的代理节点总数（跨全部订阅） |
 | `subscriptions` | 当前已配置的订阅数 |
-| `singbox_ok` | 数据面 clash-api `/version` 可达（字段名是历史包袱：mihomo 引擎下也是这一项，含义是"当前数据面引擎可达"，并非特指 sing-box） |
+| `engine_ok` | 当前数据面引擎的 clash-api `/version` 可达（mihomo 或 sing-box 都用这一字段） |
 | `pool_qualified` / `pool_total` | NodeScorer 当前合格 / 候选总数（仅 mihomo 引擎，未启用 NodeScorer 时省略） |
 | `pool_last_update` | 最近一次 us-pool 成员变更的时间 |
 
@@ -213,8 +213,9 @@ HTTP 200
   "node": { "hostname": "...", "ipv4": "192.168.70.89", ... },
   "feilian": { "tun0_active": true, "vpn_active": true, ... },
   "leap": {
-    "gateway_version": "dev",
-    "singbox_version": "1.10.7",
+    "gateway_version": "8db91fe",
+    "engine":          "mihomo",
+    "engine_version":  "v1.19.26",
     "services": {
       "leap-gateway": "active",
       "leap-mihomo":  "active",
@@ -248,7 +249,8 @@ HTTP 200
 ```
 
 **字段说明**：
-- `leap.singbox_version`：节点上 `/usr/local/bin/sing-box --version` 的输出，引擎是 mihomo 时这个字段反映的是 sing-box CLI（whitelistexpand 用它来 decompile `.srs`），**不是当前数据面引擎版本**。字段名是历史包袱
+- `leap.engine`：当前数据面引擎名（`mihomo` 或 `sing-box`），由 `gateway.yaml: singbox.engine` 决定
+- `leap.engine_version`：当前引擎二进制的版本字符串（mihomo 取 `mihomo -v` 第一行的 vX.Y.Z；sing-box 取 `sing-box version` 输出）。二进制不存在或不响应时为空
 - `leap.services.leap-mihomo` / `leap-singbox`：两个数据面 unit 永远共存于磁盘，`enable` 的那个由 `gateway.yaml: singbox.engine` 决定，另一个会是 `inactive`
 - `active_proxy.active_urltest`：mihomo 下是 `us-pool`（load-balance 组）；sing-box 下是 `urltest-primary` 或 `urltest-backup`
 - `watchdog.enabled=false` 是 mihomo 模式的正常状态——load-balance 内置的 url-test 已经管理了健康检查
@@ -750,4 +752,4 @@ curl -s $BASE/api/whitelist/resolved | jq -r '.domains[]' | head -20
 
 ---
 
-*最后更新：2026-06-06，基于 commit 630efb9，engine=mihomo 基线（含 sniffer + DNS nameserver-policy 重构）*
+*最后更新：2026-06-06，基于 commit 8db91fe，engine=mihomo 基线（含 sniffer + DNS nameserver-policy 重构 + leaphttp class fix + engine_/engine_version 字段重命名）*

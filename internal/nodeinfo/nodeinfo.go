@@ -51,23 +51,34 @@ type FeiLianInfo struct {
 
 type LeapInfo struct {
 	GatewayVersion string            `json:"gateway_version"`
-	SingBoxVersion string            `json:"singbox_version"`
-	Services       map[string]string `json:"services"`
+	// Engine is the active data-plane name: "mihomo" or "sing-box".
+	Engine string `json:"engine"`
+	// EngineVersion is the version string of the active data-plane binary
+	// (mihomo's banner or sing-box's `version` output). Empty when the
+	// binary is missing or doesn't respond. Replaces the older
+	// `singbox_version` field which was misleading under engine=mihomo.
+	EngineVersion string            `json:"engine_version"`
+	Services      map[string]string `json:"services"`
 }
 
 // Reporter holds a goroutine-safe cached snapshot.
 type Reporter struct {
 	node     config.NodeConfig
 	gatewayV string
+	engine   string // active data-plane: "mihomo" or "sing-box"
 
 	mu   sync.RWMutex
 	snap Snapshot
 }
 
-func New(node config.NodeConfig, gatewayVersion string) *Reporter {
+func New(node config.NodeConfig, gatewayVersion, engine string) *Reporter {
+	if engine == "" {
+		engine = "sing-box"
+	}
 	return &Reporter{
 		node:     node,
 		gatewayV: gatewayVersion,
+		engine:   engine,
 	}
 }
 
@@ -147,7 +158,8 @@ func (r *Reporter) collectLeap(ctx context.Context) LeapInfo {
 	}
 	return LeapInfo{
 		GatewayVersion: r.gatewayV,
-		SingBoxVersion: singboxVersion(ctx),
+		Engine:         r.engine,
+		EngineVersion:  engineVersion(ctx, r.engine),
 		Services:       services,
 	}
 }
