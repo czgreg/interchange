@@ -135,6 +135,7 @@ func New(
 // Run blocks until ctx is cancelled. Each ScoringInterval it scores all
 // nodes and hot-reloads mihomo when the pool changes.
 func (s *Scorer) Run(ctx context.Context) {
+	s.loadState()
 	slog.Info("nodescorer: started",
 		"interval", s.cfg.ScoringInterval,
 		"max_rtt_p50", s.cfg.MaxRTTP50Ms,
@@ -302,6 +303,7 @@ func (s *Scorer) score(ctx context.Context) {
 		"total", len(nodes),
 		"pool_changed", poolChanged,
 	)
+	s.saveState()
 
 	if poolChanged {
 		go s.hotReload(context.Background(), newPoolSet)

@@ -167,6 +167,16 @@ func (r *Renderer) build(outbounds []subscribe.Outbound) map[string]any {
 	doc["proxy-groups"] = r.buildProxyGroups(outbounds)
 	doc["rule-providers"] = r.buildRuleProviders()
 	doc["rules"] = r.buildRules()
+	// Persist DNS cache across hot-reloads and restarts. store-fake-ip keeps
+	// fakeip mappings alive so employees don't pay the cold DNS round-trip
+	// (~400ms cross-border DoH) after every nodescorer hot-reload.
+	doc["experimental"] = map[string]any{
+		"cache-file": map[string]any{
+			"enable":        true,
+			"path":          "./cache.db",
+			"store-fake-ip": true,
+		},
+	}
 
 	return doc
 }

@@ -96,17 +96,24 @@ singbox:
     bootstrap_resolver: "udp://119.29.29.29"
 
     # DNS preload —— leap-gateway 周期性主动 resolve 这里列的域名，把对应
-    # A 记录灌进 sing-box DNS 缓存。第一个 FeiLian 客户端访问 claude.ai 时
-    # 不再付 ~400ms 跨境 DoH 冷查询的代价。空列表 / 0 间隔 = 关闭。
-    # 默认 interval 5m，比典型 DoH TTL 短，能稳定保温。
-    preload_domains: []
-      # - claude.ai
-      # - anthropic.com
-      # - openai.com
-      # - chatgpt.com
-      # - github.com
-      # - cursor.com
-    # preload_interval: 5m
+    # A 记录灌进数据面 DNS 缓存（结合 store-fake-ip 在 mihomo 模式下可跨
+    # hot-reload 持久化）。员工首次访问这些域名时不再付 ~400ms 跨境 DoH
+    # 冷查询的代价。
+    #
+    # 建议填写员工最高频访问的海外域名（通常是 AI 工具 + 代码托管）。
+    # 条目不要过多（20 以内），每条占一次 DoH 查询 * interval 频率。
+    # 0 间隔 或 空列表 = 关闭。
+    preload_domains:
+      - claude.ai
+      - anthropic.com
+      - openai.com
+      - chatgpt.com
+      - api.openai.com
+      - github.com
+      - cursor.sh
+      - cursor.so
+      - perplexity.ai
+    preload_interval: 5m    # 比典型 DoH TTL 短，能稳定保温缓存
 
   route:
     # MetaCubeX/meta-rules-dat (daily build, Loyalsoldier-enhanced) is the

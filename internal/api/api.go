@@ -153,12 +153,20 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		count += len(r.Outbounds)
 	}
 	singboxOK := s.deps.Controller.Health(r.Context()) == nil
-	writeJSON(w, http.StatusOK, map[string]any{
+	resp := map[string]any{
 		"last_refresh":  last,
 		"node_count":    count,
 		"subscriptions": len(results),
 		"singbox_ok":    singboxOK,
-	})
+	}
+	// Expose NodeScorer pool summary when active (engine=mihomo).
+	if s.deps.NodeScorer != nil {
+		snap := s.deps.NodeScorer.GetSnapshot()
+		resp["pool_qualified"] = snap.Qualified
+		resp["pool_total"] = snap.Total
+		resp["pool_last_update"] = snap.LastPoolUpdate
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 func (s *Server) handleNodes(w http.ResponseWriter, _ *http.Request) {
