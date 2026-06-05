@@ -163,6 +163,7 @@ func (r *Renderer) build(outbounds []subscribe.Outbound) map[string]any {
 
 	doc["dns"] = r.buildDNS()
 	doc["tun"] = r.buildTUN()
+	doc["sniffer"] = r.buildSniffer()
 	doc["proxies"] = r.buildProxies(outbounds)
 	doc["proxy-groups"] = r.buildProxyGroups(outbounds)
 	doc["rule-providers"] = r.buildRuleProviders()

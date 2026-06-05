@@ -105,7 +105,7 @@ func TestRenderer_OverseasMode(t *testing.T) {
 
 	// Top-level keys
 	for _, k := range []string{"mode", "log-level", "external-controller",
-		"mixed-port", "dns", "tun", "proxies", "proxy-groups",
+		"mixed-port", "dns", "tun", "sniffer", "proxies", "proxy-groups",
 		"rule-providers", "rules"} {
 		if _, ok := doc[k]; !ok {
 			t.Errorf("missing top-level key %q", k)
@@ -338,6 +338,116 @@ func TestRenderer_FakeIPSkipSuffixes(t *testing.T) {
 	for k, seen := range want {
 		if !seen {
 			t.Errorf("fake-ip-filter missing %q", k)
+		}
+	}
+}
+
+// TestRenderer_SnifferEnabled guards the production fix from 2026-06-06:
+// without sniffer, Chrome's DoH-acquired real IPs reach mihomo's TUN as raw
+// IPs, geosite rules don't match, and load-balance hashes by dst IP — so a
+// single Google session spreads across multiple proxy nodes and trips
+// Google's session-anomaly response (the "Use secure DNS" diagnostic).
+// sing-box has had the equivalent (sniff + sniff_override_destination) since
+// day one. This test pins the sniffer block on so a future cleanup pass
+// can't regress it silently.
+func TestRenderer_SnifferEnabled(t *testing.T) {
+	r := newTestRenderer(t)
+	body, err := r.Write(sampleOutbounds())
+	if err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	var doc map[string]any
+	_ = yaml.Unmarshal(body, &doc)
+
+	sn, ok := doc["sniffer"].(map[string]any)
+	if !ok {
+		t.Fatal("missing sniffer block")
+	}
+	if sn["enable"] != true {
+		t.Errorf("sniffer.enable = %v, want true", sn["enable"])
+	}
+	if sn["override-destination"] != true {
+		t.Error("sniffer.override-destination MUST be true (else dst stays raw IP, geosite never matches)")
+	}
+	if sn["parse-pure-ip"] != true {
+		t.Error("sniffer.parse-pure-ip MUST be true (the DoH-bypass case is exactly pure IP)")
+	}
+
+	sniff, _ := sn["sniff"].(map[string]any)
+	for _, proto := range []string{"TLS", "HTTP", "QUIC"} {
+		if _, ok := sniff[proto]; !ok {
+			t.Errorf("sniffer.sniff missing %s entry", proto)
+		}
+	}
+}
+
+// TestRenderer_DNSNameserverPolicy guards the 2026-06-06 DNS refactor:
+// dropped fallback / fallback-filter (parallel-fan-out resolution) in favor
+// of nameserver-policy (domain-keyed direct routing). Mirror of sing-box's
+// `{rule_set: [geosite-cn], server: local}; final: remote`.
+//
+// Invariants:
+//   - default nameserver = proxyDoH (not cnDoH) — overseas resolves through proxy
+//   - nameserver-policy["rule-set:geosite-cn"] = cnDoH — CN domains short-circuit
+//   - each fake-ip-skip suffix appears as "+.<suf>" in policy → cnDoH so
+//     intranet domains (paigod.work etc.) resolve via the right side
+//   - no `fallback` / `fallback-filter` keys (otherwise we're paying for
+//     parallel queries again)
+//   - proxy-server-nameserver still cnDoH (airport-node hostnames must
+//     resolve direct, not through the proxy we're trying to set up)
+func TestRenderer_DNSNameserverPolicy(t *testing.T) {
+	r := newTestRenderer(t)
+	r.cfg.DNS.CNDoH = []string{"https://doh.pub/dns-query"}
+	r.cfg.DNS.ProxyDoH = []string{"tls://1.1.1.1:853"}
+	r.cfg.DNS.FakeIPSkipSuffixes = []string{"paigod.work", ".feilian.cn"}
+
+	body, err := r.Write(sampleOutbounds())
+	if err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	var doc map[string]any
+	_ = yaml.Unmarshal(body, &doc)
+	dns, _ := doc["dns"].(map[string]any)
+
+	// fallback gone
+	if _, has := dns["fallback"]; has {
+		t.Error("dns.fallback must be removed (defeats nameserver-policy savings)")
+	}
+	if _, has := dns["fallback-filter"]; has {
+		t.Error("dns.fallback-filter must be removed")
+	}
+
+	// default nameserver = proxyDoH
+	ns, _ := dns["nameserver"].([]any)
+	if len(ns) != 1 || ns[0] != "tls://1.1.1.1:853" {
+		t.Errorf("dns.nameserver = %v, want [tls://1.1.1.1:853] (proxyDoH default)", ns)
+	}
+
+	// proxy-server-nameserver = cnDoH (unchanged; airport-node resolution)
+	psn, _ := dns["proxy-server-nameserver"].([]any)
+	if len(psn) != 1 || psn[0] != "https://doh.pub/dns-query" {
+		t.Errorf("proxy-server-nameserver = %v, want cnDoH list", psn)
+	}
+
+	// nameserver-policy keys
+	pol, _ := dns["nameserver-policy"].(map[string]any)
+	if pol == nil {
+		t.Fatal("dns.nameserver-policy missing")
+	}
+	wantKeys := []string{
+		"rule-set:geosite-cn",
+		"+.paigod.work",
+		"+.feilian.cn",
+	}
+	for _, k := range wantKeys {
+		v, ok := pol[k]
+		if !ok {
+			t.Errorf("nameserver-policy missing key %q", k)
+			continue
+		}
+		list, _ := v.([]any)
+		if len(list) != 1 || list[0] != "https://doh.pub/dns-query" {
+			t.Errorf("nameserver-policy[%q] = %v, want cnDoH list", k, v)
 		}
 	}
 }
