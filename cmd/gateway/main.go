@@ -18,6 +18,7 @@ import (
 	"github.com/leap-gateway/leap-gateway/internal/rulesets"
 	"github.com/leap-gateway/leap-gateway/internal/singbox"
 	"github.com/leap-gateway/leap-gateway/internal/subscribe"
+	"github.com/leap-gateway/leap-gateway/internal/uxtelemetry"
 	"github.com/leap-gateway/leap-gateway/internal/watchdog"
 	"github.com/leap-gateway/leap-gateway/internal/whitelistexpand"
 )
@@ -150,6 +151,12 @@ func main() {
 		Watchdog:   wd,
 		Expander:   expander,
 		RuleSets:   ruleMgr,
+		// In-memory ring of client-reported UX events. 5000 ≈ a few hours
+		// of busy ops (one employee opens 50+ domains/page, multiple
+		// employees) — beyond that the ring overwrites oldest. Operators
+		// scrape /api/ux-telemetry/summary periodically into a long-term
+		// store if they want history; we don't try to be that store.
+		UXTel: uxtelemetry.New(5000),
 	})
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)

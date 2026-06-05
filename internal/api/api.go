@@ -15,6 +15,7 @@ import (
 	"github.com/leap-gateway/leap-gateway/internal/rulesets"
 	"github.com/leap-gateway/leap-gateway/internal/singbox"
 	"github.com/leap-gateway/leap-gateway/internal/subscribe"
+	"github.com/leap-gateway/leap-gateway/internal/uxtelemetry"
 	"github.com/leap-gateway/leap-gateway/internal/watchdog"
 	"github.com/leap-gateway/leap-gateway/internal/whitelistexpand"
 )
@@ -30,6 +31,7 @@ type Deps struct {
 	Watchdog   *watchdog.Watchdog
 	Expander   *whitelistexpand.Expander
 	RuleSets   *rulesets.Manager
+	UXTel      *uxtelemetry.Store
 }
 
 // Renderer is the engine-agnostic interface both internal/singbox.Renderer
@@ -83,6 +85,16 @@ func NewServer(deps Deps) *Server {
 	mux.HandleFunc("POST /api/subscriptions", s.auth(s.handleSubscriptionsPost))
 	mux.HandleFunc("PUT /api/subscriptions/{name}", s.auth(s.handleSubscriptionsPut))
 	mux.HandleFunc("DELETE /api/subscriptions/{name}", s.auth(s.handleSubscriptionsDelete))
+
+	// UX telemetry — client-side TTFB / disconnect / error reports posted
+	// by browser extensions or IDE plugins. No auth on POST: the cost of
+	// requiring tokens on every employee's browser submission outweighs
+	// the value of dropping anonymous fakes (we don't trust client clocks
+	// or numeric values blindly anyway). GET is auth'd because raw events
+	// can include user-identifying detail strings.
+	mux.HandleFunc("POST /api/ux-telemetry", s.handleUXTelemetryPost)
+	mux.HandleFunc("GET /api/ux-telemetry", s.auth(s.handleUXTelemetryGet))
+	mux.HandleFunc("GET /api/ux-telemetry/summary", s.auth(s.handleUXTelemetrySummary))
 
 	s.srv = &http.Server{
 		Addr:              deps.Cfg.API.Listen,
