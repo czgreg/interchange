@@ -74,7 +74,7 @@ fi
 # ---------------------------------------------------------------------------
 for HOST in "${HOSTS[@]}"; do
   log "deploying to $REMOTE_USER@$HOST ..."
-  SSH="ssh -o ConnectTimeout=10 -o StrictHostKeyChecking=no $REMOTE_USER@$HOST"
+  SSH="ssh -t -o ConnectTimeout=10 -o StrictHostKeyChecking=no $REMOTE_USER@$HOST"
   SCP_TO="scp -O -o ConnectTimeout=10 -o StrictHostKeyChecking=no"
 
   # Connectivity check
