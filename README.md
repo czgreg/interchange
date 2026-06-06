@@ -109,7 +109,7 @@ docs/
 
 ## API 文档
 
-[docs/api.md](docs/api.md) — 节点健康、订阅、白名单、UX 遥测，含前端接入变更日志。
+[docs/api.md](docs/api.md) — 节点健康、订阅、白名单，含前端接入变更日志。
 
 ## 流量路径
 

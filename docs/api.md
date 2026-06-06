@@ -6,7 +6,7 @@
 
 ## 认证
 
-`gateway.yaml` 配置 `api.token` 后，除 `/healthz` 和 `POST /api/ux-telemetry` 外所有端点需要：
+`gateway.yaml` 配置 `api.token` 后，除 `/healthz` 外所有端点需要：
 
 ```
 Authorization: Bearer <token>
@@ -38,9 +38,6 @@ token 为空时不鉴权。
 | GET | `/api/whitelist/resolved` | 展开为域名 + CIDR 列表 | ✓ |
 | GET | `/api/rule-sets` | 可用 geosite/geoip catalog | ✓ |
 | GET | `/api/geosites` | 同 /api/rule-sets（兼容别名） | ✓ |
-| POST | `/api/ux-telemetry` | 客户端上报 UX 事件 | 无 |
-| GET | `/api/ux-telemetry` | 查询原始事件 | ✓ |
-| GET | `/api/ux-telemetry/summary` | 按域名聚合 | ✓ |
 
 ---
 
@@ -323,47 +320,6 @@ curl -s http://127.0.0.1:18080/api/whitelist \
 `geosite-cn` / `geoip-cn` 是路由基建，不在 catalog 中。
 
 `GET /api/geosites` 是此端点的兼容别名，只返回 geosites 部分。
-
----
-
-## POST /api/ux-telemetry（无需认证）
-
-员工浏览器/IDE 上报 UX 指标。
-
-```json
-{"domain":"claude.ai", "event_type":"ttfb", "duration_ms":280, "client_id":"emp-007"}
-```
-
-| `event_type` | 说明 |
-|---|---|
-| `ttfb` | 首字节延迟 |
-| `page_load` | 页面加载完成 |
-| `ws_disconnect` | WebSocket 断连（duration_ms = 存活时长） |
-| `stream_stall` | 流式响应停滞 |
-| `request_error` | 请求失败（duration_ms = 超时等待时长） |
-
-202 `{"accepted": N}`。环形缓冲 5000 条，重启清零。
-
-## GET /api/ux-telemetry
-
-Query: `limit`（默认 100，最大 1000）、`since_sec`（默认 3600）
-
-```json
-{"count": 3, "events": [{"time":"...","domain":"claude.ai","event_type":"ttfb","duration_ms":190}]}
-```
-
-## GET /api/ux-telemetry/summary
-
-Query: `window_sec`（默认 3600）
-
-```json
-{
-  "window_sec": 3600,
-  "domains": [
-    {"domain":"claude.ai", "event_count":47, "ttfb_p50_ms":285, "ttfb_p95_ms":520, "error_rate":0.04}
-  ]
-}
-```
 
 ---
 

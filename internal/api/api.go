@@ -16,7 +16,6 @@ import (
 	"github.com/leap-gateway/leap-gateway/internal/nodeinfo"
 	"github.com/leap-gateway/leap-gateway/internal/rulesets"
 	"github.com/leap-gateway/leap-gateway/internal/subscribe"
-	"github.com/leap-gateway/leap-gateway/internal/uxtelemetry"
 	"github.com/leap-gateway/leap-gateway/internal/whitelistexpand"
 )
 
@@ -30,7 +29,6 @@ type Deps struct {
 	NodeInfo   *nodeinfo.Reporter
 	Expander   *whitelistexpand.Expander
 	RuleSets   *rulesets.Manager
-	UXTel      *uxtelemetry.Store
 	// NodeScorer is non-nil only when NodeQualify.Enabled=true (the
 	// default under mihomo). Powers /api/nodes/health and the pool-
 	// summary fields in /api/status.
@@ -93,15 +91,6 @@ func NewServer(deps Deps) *Server {
 	mux.HandleFunc("PUT /api/subscriptions/{name}", s.auth(s.handleSubscriptionsPut))
 	mux.HandleFunc("DELETE /api/subscriptions/{name}", s.auth(s.handleSubscriptionsDelete))
 
-	// UX telemetry — client-side TTFB / disconnect / error reports posted
-	// by browser extensions or IDE plugins. No auth on POST: the cost of
-	// requiring tokens on every employee's browser submission outweighs
-	// the value of dropping anonymous fakes (we don't trust client clocks
-	// or numeric values blindly anyway). GET is auth'd because raw events
-	// can include user-identifying detail strings.
-	mux.HandleFunc("POST /api/ux-telemetry", s.handleUXTelemetryPost)
-	mux.HandleFunc("GET /api/ux-telemetry", s.auth(s.handleUXTelemetryGet))
-	mux.HandleFunc("GET /api/ux-telemetry/summary", s.auth(s.handleUXTelemetrySummary))
 
 	// Node health scoring — mihomo only, shows per-node RTT stats +
 	// passive throughput + qualified/in-pool state.
