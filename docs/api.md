@@ -381,7 +381,21 @@ curl -s $BASE/api/whitelist/resolved | jq -r '.domains[]' | head -20
 
 ## 接入变更日志（前端 / 控制平台）
 
-### 2026-06-06（commit `0d7432d`）— 当前版本
+### 2026-06-06（commit `21a88d5`）— 当前版本
+
+**Breaking**：
+
+| 端点 / 路径 | 变化 |
+|---|---|
+| `POST /api/ux/event`、`GET /api/ux/events`、`GET /api/ux/stats` | **已删除**（commit `9bb5ee9`，整个 ux-telemetry 子系统下线，前端勿再上报） |
+
+**配置相关（影响部署，但 REST 表面不变）**：
+
+- `data_plane.tproxy_port` 现在是**全局必填**（>0）。`--validate` 会拒绝 `tproxy_port: 0`，TUN-only 模式不再支持（之前只在 `load_balance.per_terminal=true` 时强制）。
+- 部署链增加 `--validate`：`mihomo -t` 在临时目录跑，永远不写生产 `config.yaml`。
+- install.sh 增加 `--print-env` 生成 `/etc/leap/env`，nft 模板和 `iproute.sh` 都从这里读，不再 grep YAML。
+
+### 2026-06-06（commit `0d7432d`）
 
 **新增字段**：
 

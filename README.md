@@ -65,7 +65,9 @@ make logs               # leap-gateway 日志
 data_plane:
   tun:
     stack: system        # system or gvisor — does NOT affect TPROXY source IP
-  tproxy_port: 7893      # TPROXY inbound port (data_plane level, not under tun)
+  tproxy_port: 7893      # TPROXY inbound port — REQUIRED (>0).
+                         # TUN-only 模式不再支持，--validate 会拒绝 tproxy_port=0。
+                         # 真正保留 client srcIP 的路径是 TPROXY，不是 TUN stack。
   route:
     mode: whitelist      # whitelist | overseas
     whitelist:
@@ -73,9 +75,7 @@ data_plane:
 
 load_balance:
   per_terminal: true     # pin each terminal to a single egress node
-                         # REQUIRES tproxy_port set (TPROXY preserves real srcIP;
-                         # TUN mode collapses all clients to 198.18.0.0 regardless
-                         # of gvisor/system stack)
+                         # 依赖上面的 tproxy_port（已是全局必填）
 
 node_qualify:
   probes:
