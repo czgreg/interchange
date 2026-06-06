@@ -54,7 +54,7 @@ const (
 // mihomo Clash YAML config. The public API mirrors internal/singbox.Renderer
 // so the control plane can swap engines via a single config switch.
 type Renderer struct {
-	cfg  config.SingBoxConfig // reused: schema is engine-agnostic
+	cfg  config.DataPlaneConfig // reused: schema is engine-agnostic
 	node config.NodeConfig
 	subs []config.SubscriptionEntry
 	// qualifiedOverride, when non-nil, limits us-pool members to the given
@@ -65,7 +65,7 @@ type Renderer struct {
 
 // NewRenderer constructs a Renderer with the given engine-agnostic config.
 // Node + subscriptions are attached later via WithNode / WithSubscriptions.
-func NewRenderer(cfg config.SingBoxConfig) *Renderer {
+func NewRenderer(cfg config.DataPlaneConfig) *Renderer {
 	return &Renderer{cfg: cfg}
 }
 

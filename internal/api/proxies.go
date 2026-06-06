@@ -11,9 +11,8 @@ import (
 	"time"
 
 	"github.com/leap-gateway/leap-gateway/internal/config"
+	"github.com/leap-gateway/leap-gateway/internal/dataplane"
 	"github.com/leap-gateway/leap-gateway/internal/nodeinfo"
-	"github.com/leap-gateway/leap-gateway/internal/singbox"
-	"github.com/leap-gateway/leap-gateway/internal/watchdog"
 )
 
 // activeDTO is the comprehensive "what's happening on this node" view. The
@@ -24,7 +23,6 @@ type activeDTO struct {
 	FeiLian     nodeinfo.FeiLianInfo `json:"feilian"`
 	Leap        leapDTO              `json:"leap"`
 	ActiveProxy activeProxyDTO       `json:"active_proxy"`
-	Watchdog    watchdog.Snapshot    `json:"watchdog"`
 }
 
 type leapDTO struct {
@@ -38,30 +36,30 @@ type leapDTO struct {
 }
 
 type activeProxyDTO struct {
-	Now           string          `json:"now"`            // currently-selected airport node tag (mirrors active pool's `now`)
+	Now           string          `json:"now"`            // currently-selected airport node tag inside the active pool (mirrors pool.now)
 	DelayMs       int             `json:"delay_ms"`       // mirrors active pool's selected node's last delay
 	LastCheck     string          `json:"last_check,omitempty"`
-	PoolSize      int             `json:"pool_size"` // size of the active urltest pool (primary or backup)
+	PoolSize      int             `json:"pool_size"` // size of the active load-balance pool
 	PoolFilter    string          `json:"pool_filter,omitempty"`
 	HistoryLen    int             `json:"history_len"`
 	Reachable     bool            `json:"reachable"`      // whether clash-api responded
-	ActiveURLTest string          `json:"active_urltest"` // urltest-primary or urltest-backup
+	ActiveURLTest string          `json:"active_urltest"` // mihomo: "us-pool" (kept name for backward compat with dashboard scrapers)
 	Pools         []poolStatusDTO `json:"pools,omitempty"`
 }
 
 type poolStatusDTO struct {
-	Tag      string          `json:"tag"`       // urltest-primary | urltest-backup
+	Tag      string          `json:"tag"`       // mihomo: "us-pool"
 	Now      string          `json:"now"`       // its currently-selected member
 	PoolSize int             `json:"pool_size"`
 	Active   bool            `json:"active"` // whether "out" selector points at this pool
-	// Egress is the IP+geo seen by the public internet when traffic exits via
-	// this pool's currently-selected member. Sampled lazily through a
-	// pool-pinned HTTP inbound (see internal/singbox/renderer.go's
-	// LeapInternalProxyURL / LeapInternalBackupProxyURL); cached 60s. nil =
-	// no probe has succeeded yet (cold start, or upstream unreachable).
+	// Egress is the IP+geo seen by the public internet when traffic exits
+	// via this pool's currently-selected member. Probed through the leap-
+	// internal HTTP proxy (LeapInternalProxyURL = 127.0.0.1:11080), which
+	// follows mihomo's "out" selector → us-pool. Cached 60s. nil = no
+	// probe has succeeded yet (cold start, or upstream unreachable).
 	Egress *egressInfo `json:"egress,omitempty"`
-	// Nodes is per-member latency from clash-api's last urltest measurement.
-	// One entry per `all` member of the urltest. Empty list = clash-api
+	// Nodes is per-member latency from clash-api's last url-test measurement.
+	// One entry per `all` member of the pool. Empty list = clash-api
 	// unreachable or pool freshly rendered, no measurements yet.
 	Nodes []nodeStatusDTO `json:"nodes,omitempty"`
 }
@@ -99,34 +97,27 @@ func (s *Server) handleProxiesActive(w http.ResponseWriter, r *http.Request) {
 	// Live clash-api hit for the active proxy state.
 	ap := s.queryActiveProxy(ctx)
 
-	wdSnap := watchdog.Snapshot{}
-	if s.deps.Watchdog != nil {
-		wdSnap = s.deps.Watchdog.Snapshot()
-	}
-
 	writeJSON(w, http.StatusOK, activeDTO{
 		Node:        ni.Node,
 		FeiLian:     ni.FeiLian,
 		Leap:        leap,
 		ActiveProxy: ap,
-		Watchdog:    wdSnap,
 	})
 }
 
-// queryActiveProxy walks clash-api selector → urltest → leaf node:
+// queryActiveProxy walks clash-api selector → load-balance pool → leaf node:
 //
 //  1. GET /proxies — bulk dump of every proxy + its history (1 round-trip)
-//  2. From it: pluck the "out" selector's `now` field (primary | backup | direct)
-//  3. For each urltest-* member, list its `all` and per-node latency from
-//     each member's history
-//  4. Per pool: kick the lazy egress probe through that pool's pinned
-//     loopback HTTP inbound (urltest-primary → 11080, urltest-backup → 11081)
+//  2. From it: pluck the "out" selector's `now` field (us-pool / pin / DIRECT)
+//  3. For us-pool, list its members and per-node latency
+//  4. Kick the lazy egress probe through LeapInternalProxyURL (which goes
+//     "out → us-pool" via mihomo, so the IP we sample IS us-pool's egress)
 //
 // Returns Reachable=false on any clash-api error so the rest of the response
 // is still useful.
 func (s *Server) queryActiveProxy(ctx context.Context) activeProxyDTO {
-	api := s.deps.Cfg.SingBox.ClashAPI
-	pf := s.deps.Cfg.SingBox.URLTest.NodePattern
+	api := s.deps.Cfg.DataPlane.ClashAPI
+	pf := s.deps.Cfg.DataPlane.URLTest.NodePattern
 
 	client := &http.Client{Timeout: 2 * time.Second}
 
@@ -157,10 +148,9 @@ func (s *Server) queryActiveProxy(ctx context.Context) activeProxyDTO {
 		if !ok {
 			continue
 		}
-		// Accept both sing-box's URLTest pools (urltest-primary/-backup) and
-		// mihomo's LoadBalance pool (us-pool). Skip leaf nodes / DIRECT /
-		// REJECT — those have other types.
-		if pool.Type != "URLTest" && pool.Type != "LoadBalance" {
+		// mihomo's us-pool is type LoadBalance. Skip leaf nodes / DIRECT
+		// / REJECT / Selector children — those have other types.
+		if pool.Type != "LoadBalance" {
 			continue
 		}
 		ps := poolStatusDTO{
@@ -180,11 +170,11 @@ func (s *Server) queryActiveProxy(ctx context.Context) activeProxyDTO {
 			}
 			ps.Nodes = append(ps.Nodes, n)
 		}
-		// Egress probe — per-pool pinned proxy URL. Skip if no URL is wired
-		// for this pool tag (defensive; only urltest-primary / urltest-backup
-		// have inbounds today).
-		if proxyURL := proxyURLForPool(name); proxyURL != "" {
-			ps.Egress = s.egress.GetOrRefresh(name, proxyURL, pool.Now)
+		// Egress probe — through the leap-internal HTTP proxy. mihomo
+		// routes 11080 through "out → us-pool", so the IP we sample is
+		// the pool's egress IP. Cached 60s by egressCache.
+		if ps.Active {
+			ps.Egress = s.egress.GetOrRefresh(name, dataplane.LeapInternalProxyURL, pool.Now)
 		}
 		dto.Pools = append(dto.Pools, ps)
 		if ps.Active {
@@ -199,29 +189,10 @@ func (s *Server) queryActiveProxy(ctx context.Context) activeProxyDTO {
 		}
 	}
 
-	// Edge case: selector points at "direct" or something not starting with
-	// urltest — Now stays "", PoolSize 0, but ActiveURLTest is informative.
+	// Edge case: "out" points at "DIRECT" or "pin" (Selector type, filtered
+	// out above) — Now stays "", PoolSize 0, ActiveURLTest reflects what was
+	// selected.
 	return dto
-}
-
-// proxyURLForPool maps an urltest pool tag to the loopback HTTP-proxy URL
-// the renderer pinned to it. Used by queryActiveProxy to feed the egress
-// cache. Returns "" for pools that don't have a pinned inbound, in which
-// case the egress probe is skipped (the cache simply won't populate).
-//
-// Note: urltest-primary uses LeapInternalPrimaryProxyURL (11082), NOT
-// LeapInternalProxyURL (11080). The latter follows the `out` selector and
-// would silently route the probe via whatever pool is currently selected
-// — defeating the whole point of "what's primary's egress" when watchdog
-// has flipped to backup.
-func proxyURLForPool(poolTag string) string {
-	switch poolTag {
-	case "urltest-primary":
-		return singbox.LeapInternalPrimaryProxyURL
-	case "urltest-backup":
-		return singbox.LeapInternalBackupProxyURL
-	}
-	return ""
 }
 
 // getJSON is a tiny helper that does the auth+timeout+decode dance once.
@@ -303,7 +274,7 @@ func (s *Server) handleProxiesSelect(w http.ResponseWriter, r *http.Request) {
 		Type string   `json:"type"`
 		All  []string `json:"all"`
 	}
-	if err := getJSON(r.Context(), httpc, s.deps.Cfg.SingBox.ClashAPI, "/proxies/"+url.PathEscape(dto.Selector), &sel); err != nil {
+	if err := getJSON(r.Context(), httpc, s.deps.Cfg.DataPlane.ClashAPI, "/proxies/"+url.PathEscape(dto.Selector), &sel); err != nil {
 		http.Error(w, fmt.Sprintf("selector %q not found on data plane: %v", dto.Selector, err), http.StatusNotFound)
 		return
 	}
@@ -326,7 +297,7 @@ func (s *Server) handleProxiesSelect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := setSelector(r.Context(), s.deps.Cfg.SingBox.ClashAPI, dto.Selector, dto.Name); err != nil {
+	if err := setSelector(r.Context(), s.deps.Cfg.DataPlane.ClashAPI, dto.Selector, dto.Name); err != nil {
 		http.Error(w, "clash-api: "+err.Error(), http.StatusInternalServerError)
 		return
 	}

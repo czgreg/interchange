@@ -11,7 +11,7 @@ import (
 
 // ruleSetEntryDTO is one item of GET /api/rule-sets — name + url + category
 // from the embedded catalog, plus runtime flags (installed: .srs is on disk;
-// selected: tag is in cfg.SingBox.Route.Whitelist).
+// selected: tag is in cfg.DataPlane.Route.Whitelist).
 type ruleSetEntryDTO struct {
 	Name      string `json:"name"`
 	URL       string `json:"url"`
@@ -45,7 +45,7 @@ type geositesDTO struct {
 // for the literal domain_suffix / ip_cidr fields so a UI can prefill them.
 func (s *Server) handleRuleSetsGet(w http.ResponseWriter, _ *http.Request) {
 	cat := s.deps.RuleSets.Catalog()
-	wl := s.deps.Cfg.SingBox.Route.Whitelist
+	wl := s.deps.Cfg.DataPlane.Route.Whitelist
 
 	dto := ruleSetsDTO{}
 	dto.Geosites = ruleSetsSideDTO{
@@ -63,14 +63,14 @@ func (s *Server) handleRuleSetsGet(w http.ResponseWriter, _ *http.Request) {
 // the legacy {available, active} shape. Newer callers should use
 // /api/rule-sets directly.
 func (s *Server) handleGeositesGet(w http.ResponseWriter, _ *http.Request) {
-	avail, err := scanRuleSetsDir(s.deps.Cfg.SingBox.RuleSetsDir)
+	avail, err := scanRuleSetsDir(s.deps.Cfg.DataPlane.RuleSetsDir)
 	if err != nil {
 		http.Error(w, "cannot scan rule-sets dir: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 	writeJSON(w, http.StatusOK, geositesDTO{
 		Available: avail.Geosites,
-		Active:    append([]string{}, s.deps.Cfg.SingBox.Route.Whitelist.Geosites...),
+		Active:    append([]string{}, s.deps.Cfg.DataPlane.Route.Whitelist.Geosites...),
 	})
 }
 

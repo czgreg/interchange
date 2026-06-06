@@ -1,5 +1,5 @@
 // selftest is a one-shot CLI: fetch a subscription URL or replay a saved
-// body, run it through the real parser + renderer, and print
+// body, run it through the real parser + mihomo renderer, and print
 // non-sensitive stats. Use it to validate a new subscription provider
 // before wiring it into the production config.
 //
@@ -16,7 +16,7 @@ import (
 	"time"
 
 	"github.com/leap-gateway/leap-gateway/internal/config"
-	"github.com/leap-gateway/leap-gateway/internal/singbox"
+	"github.com/leap-gateway/leap-gateway/internal/mihomo"
 	"github.com/leap-gateway/leap-gateway/internal/subscribe"
 )
 
@@ -27,7 +27,7 @@ func main() {
 	name := flag.String("name", "selftest", "subscription name (tag prefix)")
 	format := flag.String("format", "auto", "auto | clash | singbox | uri | sip008")
 	timeout := flag.Duration("timeout", 30*time.Second, "fetch timeout")
-	render := flag.String("render", "", "if set, render sing-box config to this path")
+	render := flag.String("render", "", "if set, render mihomo config to this path")
 	flag.Parse()
 
 	if *url == "" && *file == "" {
@@ -66,15 +66,16 @@ func main() {
 	}
 
 	if *render != "" {
-		rcfg := config.SingBoxConfig{
+		rcfg := config.DataPlaneConfig{
 			ConfigPath:  *render,
 			SOCKSListen: "0.0.0.0:1080",
 			HTTPListen:  "0.0.0.0:1081",
 		}
 		rcfg.ApplyDefaults()
-		// No NodeConfig — selftest renders in lab mode (no TUN, no DNS-direct
-		// inbound). Output still passes `sing-box check` for static validation.
-		data, err := singbox.NewRenderer(rcfg).Write(allOutbounds)
+		// No NodeConfig — selftest renders in lab mode (no TUN, no DNS-
+		// direct inbound). Output still passes `mihomo -t` for static
+		// validation.
+		data, err := mihomo.NewRenderer(rcfg).Write(allOutbounds)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "render error: %v\n", err)
 			os.Exit(1)

@@ -137,21 +137,6 @@ func nftFeiLianChains(ctx context.Context) []string {
 	return chains
 }
 
-// singboxVersion: `sing-box version` — first line, trimmed.
-// Typical output: "sing-box version 1.10.7".
-func singboxVersion(ctx context.Context) string {
-	c, cancel := context.WithTimeout(ctx, 2*time.Second)
-	defer cancel()
-	out, err := exec.CommandContext(c, "/usr/local/bin/sing-box", "version").Output()
-	if err != nil {
-		return ""
-	}
-	first, _, _ := strings.Cut(string(out), "\n")
-	first = strings.TrimSpace(first)
-	first = strings.TrimPrefix(first, "sing-box version ")
-	return first
-}
-
 // mihomoVersion: `mihomo -v` — first line, parsed.
 // Typical output: "Mihomo Meta v1.19.26 linux amd64 with go1.26.3 ...".
 // Returns just "v1.19.26" or empty on error.
@@ -169,17 +154,4 @@ func mihomoVersion(ctx context.Context) string {
 		}
 	}
 	return strings.TrimSpace(first)
-}
-
-// engineVersion returns the version string of the active data-plane
-// engine. Maps to the matching binary probe; "" for unknown engine names.
-func engineVersion(ctx context.Context, engine string) string {
-	switch engine {
-	case "mihomo":
-		return mihomoVersion(ctx)
-	case "sing-box", "":
-		return singboxVersion(ctx)
-	default:
-		return ""
-	}
 }

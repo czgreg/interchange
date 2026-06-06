@@ -11,13 +11,12 @@ import (
 
 	"github.com/leap-gateway/leap-gateway/internal/config"
 	"github.com/leap-gateway/leap-gateway/internal/configstore"
+	"github.com/leap-gateway/leap-gateway/internal/dataplane"
 	"github.com/leap-gateway/leap-gateway/internal/nodescorer"
 	"github.com/leap-gateway/leap-gateway/internal/nodeinfo"
 	"github.com/leap-gateway/leap-gateway/internal/rulesets"
-	"github.com/leap-gateway/leap-gateway/internal/singbox"
 	"github.com/leap-gateway/leap-gateway/internal/subscribe"
 	"github.com/leap-gateway/leap-gateway/internal/uxtelemetry"
-	"github.com/leap-gateway/leap-gateway/internal/watchdog"
 	"github.com/leap-gateway/leap-gateway/internal/whitelistexpand"
 )
 
@@ -25,22 +24,23 @@ type Deps struct {
 	Subscribe  *subscribe.Manager
 	Scheduler  *subscribe.Scheduler
 	Renderer   Renderer
-	Controller *singbox.Controller
+	Controller *dataplane.Controller
 	Cfg        *config.Config
 	Store      *configstore.Store
 	NodeInfo   *nodeinfo.Reporter
-	Watchdog   *watchdog.Watchdog
 	Expander   *whitelistexpand.Expander
 	RuleSets   *rulesets.Manager
 	UXTel      *uxtelemetry.Store
-	// NodeScorer is non-nil only when engine=mihomo + NodeQualify.Enabled=true.
+	// NodeScorer is non-nil only when NodeQualify.Enabled=true (the
+	// default under mihomo). Powers /api/nodes/health and the pool-
+	// summary fields in /api/status.
 	NodeScorer *nodescorer.Scorer
 }
 
-// Renderer is the engine-agnostic interface both internal/singbox.Renderer
-// and internal/mihomo.Renderer satisfy. Lets the control plane swap the
-// proxy data plane via cfg.SingBox.Engine without conditionals at every
-// call site.
+// Renderer is the interface internal/mihomo.Renderer satisfies. Kept as
+// an interface (rather than collapsing to *mihomo.Renderer directly) so
+// API handlers stay decoupled from the rendering package — and so a
+// future second engine can slot in without touching every call site.
 type Renderer interface {
 	// Path returns the on-disk path the next Write produces.
 	Path() string
@@ -51,7 +51,7 @@ type Renderer interface {
 	// Used by API handlers that mutate cfg and need a re-render.
 	SetSubscriptions(subs []config.SubscriptionEntry)
 	// SetWhitelist re-seats the renderer's snapshot of route mode + WL.
-	// Renderer holds cfg.SingBox by value, so the live cfg pointer's
+	// The renderer holds cfg by value, so the live cfg pointer's
 	// mutations don't propagate automatically. Handlers that mutate the
 	// whitelist must call this before triggering a re-render — otherwise
 	// rendered config is stale (rule-providers / rules drop new tags).
@@ -202,7 +202,7 @@ func (s *Server) handleRefresh(w http.ResponseWriter, r *http.Request) {
 
 // RunRefresh is the full subscribe → render → reload flow, exposed so main()
 // can also trigger it on startup or on a timer.
-func RunRefresh(ctx context.Context, mgr *subscribe.Manager, r Renderer, c *singbox.Controller) error {
+func RunRefresh(ctx context.Context, mgr *subscribe.Manager, r Renderer, c *dataplane.Controller) error {
 	results, err := mgr.Refresh(ctx)
 	if err != nil {
 		slog.Warn("subscribe refresh had errors", "err", err)

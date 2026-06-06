@@ -87,13 +87,13 @@ func TestMutateAtomicWriteFailureLeavesOriginal(t *testing.T) {
 // populated (catches schema-level errors like a non-marshalable type).
 func TestRoundtripFullConfig(t *testing.T) {
 	c := &config.Config{}
-	c.SingBox.Route.Mode = "whitelist"
-	c.SingBox.Route.Whitelist.Geosites = config.StringList{"geosite-google"}
-	c.SingBox.Route.Whitelist.Geoips = config.StringList{"geoip-telegram"}
-	c.SingBox.Route.Whitelist.DomainSuffix = []string{"claude.ai"}
-	c.SingBox.Route.Whitelist.IPCIDR = []string{"149.154.0.0/16"}
-	c.SingBox.URLTest.Interval = 3 * time.Minute
-	c.SingBox.URLTest.Watchdog.Enabled = true
+	c.DataPlane.Route.Mode = "whitelist"
+	c.DataPlane.Route.Whitelist.Geosites = config.StringList{"geosite-google"}
+	c.DataPlane.Route.Whitelist.Geoips = config.StringList{"geoip-telegram"}
+	c.DataPlane.Route.Whitelist.DomainSuffix = []string{"claude.ai"}
+	c.DataPlane.Route.Whitelist.IPCIDR = []string{"149.154.0.0/16"}
+	c.DataPlane.URLTest.Interval = 3 * time.Minute
+	c.NodeQualify.Enabled = true
 
 	data, err := yaml.Marshal(c)
 	if err != nil {
@@ -103,16 +103,16 @@ func TestRoundtripFullConfig(t *testing.T) {
 	if err := yaml.Unmarshal(data, &parsed); err != nil {
 		t.Fatalf("Unmarshal back: %v", err)
 	}
-	if parsed.SingBox.Route.Mode != "whitelist" {
-		t.Errorf("mode lost in round-trip: %q", parsed.SingBox.Route.Mode)
+	if parsed.DataPlane.Route.Mode != "whitelist" {
+		t.Errorf("mode lost in round-trip: %q", parsed.DataPlane.Route.Mode)
 	}
-	if len(parsed.SingBox.Route.Whitelist.Geosites) != 1 {
+	if len(parsed.DataPlane.Route.Whitelist.Geosites) != 1 {
 		t.Errorf("WL geosites lost in round-trip")
 	}
-	if len(parsed.SingBox.Route.Whitelist.Geoips) != 1 {
+	if len(parsed.DataPlane.Route.Whitelist.Geoips) != 1 {
 		t.Errorf("WL geoips lost in round-trip")
 	}
-	if len(parsed.SingBox.Route.Whitelist.IPCIDR) != 1 {
+	if len(parsed.DataPlane.Route.Whitelist.IPCIDR) != 1 {
 		t.Errorf("WL ip_cidr lost in round-trip")
 	}
 }

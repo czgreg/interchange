@@ -1,3 +1,13 @@
+// Package config defines the on-disk yaml schema (gateway.yaml) and applies
+// defaults at load time. Schema lives in this single file — keep it that way
+// so new fields are easy to find by reading top-to-bottom.
+//
+// History: leap-gateway started as a sing-box sidecar; the legacy schema
+// nested all engine fields under `singbox:`. After the mihomo cutover and
+// the sing-box renderer was removed, the top-level block was renamed to
+// `data_plane:` and three new sibling blocks were added — `node_qualify`,
+// `pools` — that used to be buried under `singbox.url_test.*`. The old
+// `singbox:` and `urltest.watchdog:` blocks are no longer accepted.
 package config
 
 import (
@@ -13,7 +23,21 @@ type Config struct {
 	Subscribe     SubscribeConfig     `yaml:"subscribe"`
 	Subscriptions []SubscriptionEntry `yaml:"subscriptions"`
 	Node          NodeConfig          `yaml:"node"`
-	SingBox       SingBoxConfig       `yaml:"singbox"`
+	DataPlane     DataPlaneConfig     `yaml:"data_plane"`
+
+	// NodeQualify drives the NodeScorer goroutine that dynamically manages
+	// us-pool membership: each ScoringInterval the scorer probes every
+	// candidate, applies the thresholds + probe checks, and hot-reloads
+	// mihomo when the qualified set changes.
+	NodeQualify NodeQualifyConfig `yaml:"node_qualify"`
+
+	// Pools lists named select groups that get rendered alongside the
+	// default us-pool. Each pool is gated by `requires_passing` (probe
+	// names from NodeQualify.Probes that must all pass) and routes the
+	// listed `rule_sets` via mihomo rules. Used to segregate sites with
+	// special needs (e.g. openai-pool for ChatGPT/Claude — only nodes
+	// passing chatgpt.com / claude.ai probes qualify).
+	Pools []PoolConfig `yaml:"pools"`
 }
 
 type APIConfig struct {
@@ -34,13 +58,8 @@ type SubscriptionEntry struct {
 	Format  string `yaml:"format"` // auto | clash | singbox | uri | sip008
 	Enabled bool   `yaml:"enabled"`
 	// UserAgent overrides Subscribe.UserAgent for this subscription only.
-	// Different airports gate by UA in incompatible ways:
-	//   - yuyun (mhlnf.cn) returns full sing-box JSON for "sing-box/*" UA but
-	//     a stripped Clash YAML with "proxies: []" for Clash UA.
-	//   - ash (671234.xyz) returns HTTP 500 for "sing-box/*" UA but full
-	//     Clash YAML for "ClashforWindows/*" UA.
-	// Set this per subscription to whatever UA the provider expects;
-	// leave empty to use the global default.
+	// Different airports gate by UA in incompatible ways — set this per
+	// subscription to whatever UA the provider expects.
 	UserAgent string `yaml:"user_agent,omitempty"`
 }
 
@@ -50,59 +69,48 @@ type SubscriptionEntry struct {
 type NodeConfig struct {
 	// ClientSubnet is the CIDR of the client pool (e.g. "10.8.11.0/24").
 	ClientSubnet string `yaml:"client_subnet"`
-	// Tun0GatewayIP is the IP address sing-box DNS server binds to
+	// Tun0GatewayIP is the IP address mihomo's DNS server binds to
 	// (e.g. "10.8.11.1"). It must be the gateway of tun0 — the address that
 	// the FeiLian client sees as the gateway of its tunnel.
 	Tun0GatewayIP string `yaml:"tun0_gateway_ip"`
 	// EgressIface is the interface that the node uses to reach the public
-	// internet (e.g. "ens18"). Used for sing-box auto_detect_interface fallback.
+	// internet (e.g. "ens18"). Used for diagnostic reporting.
 	EgressIface string `yaml:"egress_iface"`
 }
 
-type SingBoxConfig struct {
-	// Engine selects the proxy data plane:
-	//   "sing-box" (default) — render config.json, restart leap-singbox.service
-	//   "mihomo"             — render config.yaml, restart leap-mihomo.service
-	// Both engines share the same internal Outbound representation; the
-	// renderer + controller pick is driven by this field at startup.
-	Engine string `yaml:"engine"`
-
+// DataPlaneConfig describes the proxy data plane (mihomo) the control plane
+// renders to + reloads. mihomo is the only supported engine; the field name
+// `data_plane` is engine-neutral by intent (so a future swap doesn't force
+// another rename).
+type DataPlaneConfig struct {
+	// ConfigPath is where the renderer writes mihomo's config.yaml.
+	// Defaults to /var/lib/leap/mihomo/config.yaml.
 	ConfigPath string `yaml:"config_path"`
-	LogLevel   string `yaml:"log_level"`
 
-	// RuleSetsDir is where the renderer expects .srs files (geosite-cn.srs,
-	// geoip-cn.srs, plus any whitelist geosite). Files are baked into the
-	// tarball by scripts/stage.sh and installed by deploy/node/install.sh —
-	// they're loaded at startup with type=local so sing-box doesn't have to
-	// race against urltest readiness during initial download.
+	LogLevel string `yaml:"log_level"`
+
+	// RuleSetsDir holds .mrs files used by mihomo. Pre-fetched into the
+	// install tarball by scripts/stage.sh; expanded at startup.
+	// Defaults to /var/lib/leap/mihomo/rule-sets.
 	RuleSetsDir string `yaml:"rule_sets_dir"`
-
-	// BinaryPath points at the sing-box executable. The control plane shells
-	// out to it for `rule-set decompile` (used by whitelistexpand to turn
-	// geoip-* .srs blobs into a flat IP/CIDR list for /api/whitelist/resolved).
-	// The leap-singbox.service unit has its own ExecStart and isn't affected
-	// by this — it's only used out-of-band by the leap-gateway process.
-	BinaryPath string `yaml:"binary_path"`
 
 	ClashAPI ClashAPIConfig `yaml:"clash_api"`
 
-	// TUN drives the TUN inbound that catches forwarded traffic redirected to
-	// us via fwmark policy routing.
+	// TUN drives mihomo's TUN inbound that catches forwarded traffic via
+	// fwmark policy routing.
 	TUN TUNConfig `yaml:"tun"`
 
-	// DNS drives the sing-box DNS server upstreams.
+	// DNS drives mihomo's DNS server upstreams.
 	DNS DNSConfig `yaml:"dns"`
 
-	// Route drives the sing-box route.rule_set URLs.
+	// Route drives the rule-set URLs + whitelist mode.
 	Route RouteConfig `yaml:"route"`
 
-	// URLTest tunes the auto-selected outbound's behavior + the watchdog that
-	// guards it.
-	URLTest URLTestConfig `yaml:"urltest"`
+	// URLTest tunes mihomo's load-balance internal url-test. Note: this
+	// is mihomo's own concept, not our NodeScorer — they're complementary.
+	URLTest URLTestConfig `yaml:"url_test"`
 
-	// Legacy ad-hoc inbounds, retained so cmd/selftest renders something
-	// sing-box check can validate without a full deployment. If left empty,
-	// these inbounds are simply omitted.
+	// Legacy ad-hoc inbounds, retained for cmd/selftest. Empty = omitted.
 	SOCKSListen string `yaml:"socks_listen"`
 	HTTPListen  string `yaml:"http_listen"`
 }
@@ -127,35 +135,23 @@ type DNSConfig struct {
 	FakeIPRange string `yaml:"fakeip_range"`
 	// CNDoH is the upstream pool for CN-side resolution.
 	CNDoH []string `yaml:"cn_doh"`
-	// ProxyDoH is the upstream pool for non-CN resolution. The first entry
-	// gets detour=out (goes through the airport proxy).
+	// ProxyDoH is the upstream pool for non-CN resolution. Routed through
+	// mihomo's "out" selector → us-pool by the renderer.
 	ProxyDoH []string `yaml:"proxy_doh"`
 	// BootstrapResolver is an IP literal used to resolve any DoH/DoT host
 	// names without chicken-and-egg (e.g. "udp://119.29.29.29").
 	BootstrapResolver string `yaml:"bootstrap_resolver"`
 	// PreloadDomains is the list of overseas domains leap-gateway will
-	// keep warm in sing-box's DNS cache. Set this to your team's frequent
-	// destinations (claude.ai, anthropic.com, github.com, ...) so the
-	// first FeiLian client to access each one doesn't pay the ~400ms
-	// cross-border DoH latency. Empty disables preload.
+	// keep warm in mihomo's DNS cache.
 	PreloadDomains []string `yaml:"preload_domains,omitempty"`
 	// PreloadInterval is how often each preloaded domain is re-queried.
-	// Should be smaller than the typical DNS TTL so the cache stays warm.
 	// Default 5m. 0 disables preload (regardless of PreloadDomains).
 	PreloadInterval time.Duration `yaml:"preload_interval,omitempty"`
 	// FakeIPSkipSuffixes lists domain suffixes that must NOT receive a
-	// fake-IP from the engine's DNS server. Required for internal/private
-	// services whose hostnames are not on geosite-cn but resolve to CN /
-	// LAN IPs that should be reached DIRECTly. Without this, mihomo's
-	// fake-ip mode hands out 198.18.x.x for these hosts and the DIRECT
-	// outbound dials the unreachable fake IP — destination times out.
-	//
-	// Use leading-dot or "+.<suffix>" form per mihomo convention; both
-	// are accepted (renderer normalizes to "+." prefix).
-	//
-	// Example: ["+.paigod.work", "+.feilian.cn"]. The defaults +.lan,
-	// +.local, +.cn are always emitted by the renderer regardless of
-	// this list.
+	// fake-IP. Required for internal/private services whose hostnames
+	// are not on geosite-cn but resolve to CN/LAN IPs that should be
+	// reached DIRECTly. Without this, mihomo's fake-ip mode hands out
+	// 198.18.x.x and DIRECT outbound dials the unreachable fake IP.
 	FakeIPSkipSuffixes []string `yaml:"fake_ip_skip_suffixes,omitempty"`
 }
 
@@ -164,63 +160,34 @@ type RouteConfig struct {
 	GeoIPURL   string `yaml:"geoip_url"`
 
 	// Mode controls how non-CN traffic is split.
-	//
-	//   "overseas" (default): every non-CN destination → urltest (airport).
-	//                         CN domains/IPs still go direct via geosite-cn /
-	//                         geoip-cn. This is the original behavior — most
-	//                         transparent to clients.
-	//   "whitelist":          only domains hitting Whitelist.* go to urltest;
-	//                         everything else (including non-CN sites that
-	//                         aren't whitelisted) goes direct. Saves airport
-	//                         bandwidth at the cost of curating the list.
-	//
-	// Empty / unrecognized values fall back to "overseas".
+	//   "overseas" (default): every non-CN destination → us-pool. CN
+	//                         domains/IPs still go DIRECT via geosite-cn /
+	//                         geoip-cn. Most transparent to clients.
+	//   "whitelist":          only domains hitting Whitelist.* go to
+	//                         us-pool (or its named pool); everything else
+	//                         goes DIRECT. Saves airport bandwidth at the
+	//                         cost of curating the list.
 	Mode string `yaml:"mode"`
 
 	// Whitelist is consulted only when Mode == "whitelist".
 	Whitelist WhitelistConfig `yaml:"whitelist"`
 }
 
-// WhitelistConfig enumerates what's allowed through the airport in whitelist
-// mode. The four routing lists are unioned at render time:
-//
-//   - Domain-side: Geosites (rule_set refs) ∪ DomainSuffix (literal suffixes).
-//     Hits via DNS / SNI sniff → outbound "out".
-//   - IP-side: Geoips (rule_set refs) ∪ IPCIDR (literal CIDRs/IPs).
-//     Hits via destination IP match → outbound "out". Critical for apps that
-//     bypass DNS by hardcoding IPs (Telegram MTProto, Signal, ProtonVPN
-//     bootstrap). Without these, the IP-direct connection falls through to
-//     route.final=direct and gets GFW'd.
-//
-// Tag conventions:
-//   - Geosites entries must start with "geosite-" (matches our internal tag
-//     namespace; the upstream URL strips the prefix per {stem} convention).
-//   - Geoips entries must start with "geoip-" (same convention).
-//   - DomainSuffix: bare domains, no scheme/path (e.g. "claude.ai").
-//   - IPCIDR: CIDR or bare IP. Bare IP normalized to /32 (v4) or /128 (v6).
-//
-// FakeIPSkip controls the DNS layer: domains listed here are exempted from
-// fakeip and get a real IP answer from cn-doh instead. This is the correct
-// fix for internal services (paigod.work, feilian.cn, …) whose hostnames
-// are not on geosite-cn but resolve to CN/LAN IPs — without this exemption
-// mihomo hands out 198.18.x.x for those domains and DIRECT outbound fails.
-// Entries are normalized to "+.<suffix>" form (leading-dot and bare-suffix
-// forms are also accepted and converted).
+// WhitelistConfig enumerates what's allowed through the airport in
+// whitelist mode. See docs/api.md for full semantics.
 type WhitelistConfig struct {
 	Geosites     StringList `yaml:"geosites"`
 	Geoips       StringList `yaml:"geoips"`
 	DomainSuffix []string   `yaml:"domain_suffix"`
 	IPCIDR       []string   `yaml:"ip_cidr"`
-	// FakeIPSkip is surfaced via PUT /api/whitelist as the `fake_ip_skip`
-	// field. On mutation it is synced to cfg.SingBox.DNS.FakeIPSkipSuffixes
+	// FakeIPSkip is surfaced via PUT /api/whitelist as `fake_ip_skip`.
+	// On mutation it is synced to cfg.DataPlane.DNS.FakeIPSkipSuffixes
 	// so the renderer picks it up without a separate API call.
 	FakeIPSkip []string `yaml:"fake_ip_skip"`
 }
 
 // StringList is yaml-decoded as []string but tolerates the legacy "list of
-// {name, url}" mapping form so old gateway.yaml files keep loading. The URL
-// field was never read at render time (rule-sets come off disk via stage.sh)
-// and is dropped on first re-write by the configstore.
+// {name, url}" mapping form so old gateway.yaml files keep loading.
 type StringList []string
 
 func (s *StringList) UnmarshalYAML(node *yaml.Node) error {
@@ -233,7 +200,6 @@ func (s *StringList) UnmarshalYAML(node *yaml.Node) error {
 		case yaml.ScalarNode:
 			out = append(out, item.Value)
 		case yaml.MappingNode:
-			// Legacy {name: X, url: Y} — keep just the name.
 			var m struct {
 				Name string `yaml:"name"`
 			}
@@ -251,101 +217,112 @@ func (s *StringList) UnmarshalYAML(node *yaml.Node) error {
 	return nil
 }
 
-// URLTestConfig drives both sing-box's native urltest outbound and the
-// in-process watchdog that supplements urltest's coarse interval-based check
-// with a fast-path failure detector.
+// URLTestConfig drives mihomo's load-balance internal url-test. Distinct
+// from NodeQualifyConfig (which is leap-gateway's own scorer); these
+// thresholds shape mihomo's own per-flow health-check + url-test cycle.
 type URLTestConfig struct {
-	// Interval = sing-box urltest periodic full-pool re-test (default 3m).
+	// Interval = mihomo url-test periodic full-pool re-test (default 3m).
 	Interval time.Duration `yaml:"interval"`
-	// Tolerance = ms hysteresis: only switch if a new candidate is faster by
-	// this much (default 50).
+	// Tolerance = ms hysteresis: only switch if a new candidate is faster
+	// by this much (default 50). Mostly cosmetic under load-balance.
 	Tolerance int `yaml:"tolerance"`
-	// ProbeURL = the URL probed for latency. Default gstatic.com/generate_204
+	// ProbeURL = URL probed for latency. Default gstatic.com/generate_204
 	// because it must traverse GFW (which is what we want to verify).
 	ProbeURL string `yaml:"probe_url"`
-	// NodePattern is a Go-regexp; only outbounds whose tag matches are added
-	// to the urltest pool. Empty = every airport node is a candidate.
+	// NodePattern is a Go-regexp; only outbounds whose tag matches are
+	// added to us-pool. Empty = every airport node is a candidate.
 	NodePattern string `yaml:"node_pattern"`
-
-	// NodeQualify controls the NodeScorer goroutine that dynamically manages
-	// which nodes participate in the load-balance pool under engine=mihomo.
-	// Nodes are scored every ScoringInterval using mihomo's per-node probe
-	// history plus passive throughput from /connections; those that fail the
-	// thresholds are removed from the pool until they recover.
-	NodeQualify NodeQualifyConfig `yaml:"node_qualify"`
-
-	Watchdog WatchdogConfig `yaml:"watchdog"`
 }
 
 // NodeQualifyConfig is the threshold set for the NodeScorer. All thresholds
-// must be satisfied simultaneously for a node to be considered "qualified".
-// A node that fails a threshold accumulates strikes; it is evicted from the
-// pool once it has accumulated EvictStrikes consecutive failures (preventing
-// single-probe jitter from bouncing nodes in and out).
+// must be satisfied simultaneously for a node to be considered "qualified"
+// for the base us-pool. Probe results gate membership in named pools.
 type NodeQualifyConfig struct {
-	// Enabled turns the scorer on. Default false (opt-in) so existing sing-box
-	// deployments are unaffected. Set true when engine=mihomo.
+	// Enabled turns the scorer on. Default true under mihomo.
 	Enabled bool `yaml:"enabled"`
-	// ScoringInterval is how often the scorer reads /proxies and /connections
-	// and re-evaluates every node. Default 60s (matches mihomo url-test interval
-	// so each scoring round has fresh probe data).
+	// ScoringInterval is how often the scorer reads /proxies and
+	// /connections and re-evaluates every node. Default 60s.
 	ScoringInterval time.Duration `yaml:"scoring_interval"`
-	// MaxRTTP50Ms: p50 RTT ceiling in ms. Nodes whose median probe latency
-	// exceeds this are disqualified. Default 500.
+	// MaxRTTP50Ms: p50 RTT ceiling in ms. Default 500.
 	MaxRTTP50Ms int `yaml:"max_rtt_p50_ms"`
-	// MaxRTTP95Ms: p95 RTT ceiling in ms. Guards against nodes that are usually
-	// fast but spike. Default 800.
+	// MaxRTTP95Ms: p95 RTT ceiling in ms. Default 800.
 	MaxRTTP95Ms int `yaml:"max_rtt_p95_ms"`
-	// MaxJitterMs: p95-p50 spread in ms. High jitter = unstable. Default 300.
+	// MaxJitterMs: p95-p50 spread in ms. Default 300.
 	MaxJitterMs int `yaml:"max_jitter_ms"`
-	// MaxFailRate: fraction of probes (delay=0 = failed) tolerated. Default 0.25.
+	// MaxFailRate: fraction of probes (delay=0 = failed) tolerated.
+	// Default 0.25.
 	MaxFailRate float64 `yaml:"max_fail_rate"`
-	// MinProbes: minimum history entries before a node is eligible. Nodes
-	// with fewer probes (just joined / restarted) stay in the pool but are
-	// not scored until they accumulate data. Default 2.
+	// MinProbes: minimum history entries before a node is eligible.
+	// Default 2.
 	MinProbes int `yaml:"min_probes"`
-	// EvictStrikes: consecutive scoring rounds a node must fail before being
-	// removed from the pool. Prevents single-spike eviction. Default 2.
+	// EvictStrikes: consecutive scoring rounds a node must fail before
+	// being removed from the pool. Default 2.
 	EvictStrikes int `yaml:"evict_strikes"`
-	// ReadmitStrikes: consecutive passing rounds before an evicted node is
-	// added back. Default 1.
+	// ReadmitStrikes: consecutive passing rounds before an evicted node
+	// is added back. Default 1.
 	ReadmitStrikes int `yaml:"readmit_strikes"`
+
+	// Probes defines per-target reachability checks (e.g. "can this node
+	// load chatgpt.com without hitting Cloudflare's bot challenge?"). Each
+	// probe runs from each candidate node periodically; results land in
+	// NodeHealth.Probes and gate membership in named Pools.
+	Probes []ProbeConfig `yaml:"probes"`
 }
 
-// WatchdogConfig drives the in-process active health checker. Every Interval
-// it probes the currently selected urltest member; FailThreshold consecutive
-// failures triggers a forced full re-test (clash-api /proxies/urltest/delay)
-// which makes sing-box re-pick the fastest reachable node.
-type WatchdogConfig struct {
-	Enabled       bool          `yaml:"enabled"`
-	Interval      time.Duration `yaml:"interval"`       // default 5s
-	Timeout       time.Duration `yaml:"timeout"`        // default 3s
-	FailThreshold int           `yaml:"fail_threshold"` // default 3
+// ProbeConfig is one site-specific reachability check. Probes are NOT
+// part of the basic RTT-qualification thresholds — a node failing probe
+// X is removed only from pools that list X in `requires_passing`, not
+// from the base us-pool.
+type ProbeConfig struct {
+	// Name is the probe identifier. Use the destination hostname so the
+	// API surface is self-descriptive (e.g. "chatgpt.com", "claude.ai").
+	// Pool config's `requires_passing` references probes by Name.
+	Name string `yaml:"name"`
+	// URL is the full HTTPS URL to GET. Caller's responsibility to use a
+	// path that returns a stable response without auth.
+	URL string `yaml:"url"`
+	// Interval between probes per node. Default 5m. Lower values increase
+	// detection speed at the cost of airport traffic + risk of being
+	// flagged as bot probing.
+	Interval time.Duration `yaml:"interval"`
+	// Timeout caps each probe. Default 10s.
+	Timeout time.Duration `yaml:"timeout"`
+	// Check defines the pass criteria.
+	Check ProbeCheckConfig `yaml:"check"`
+}
 
-	// JitterPercent randomizes Interval by ±N% per tick (default 20). Reduces
-	// the "exactly every 5s" fingerprint visible from inside the airport.
-	JitterPercent int `yaml:"jitter_percent"`
+// ProbeCheckConfig describes what counts as a probe pass. Initial rules
+// are simple; if more become necessary they can be added as additional
+// fields rather than replacing this with a generic rule list.
+type ProbeCheckConfig struct {
+	// MaxStatus is the inclusive upper bound for status_code = pass.
+	// Default 399 (i.e. 1xx-3xx pass, 4xx/5xx fail).
+	MaxStatus int `yaml:"max_status"`
+	// RejectCFChallenge — if true, response carrying `cf-mitigated:
+	// challenge` header is treated as failure even if status_code is in
+	// range. Catches Cloudflare bot-challenge interstitials that return
+	// 200 + HTML challenge body. Default false; set true on probes that
+	// target CF-protected destinations (chatgpt.com, claude.ai).
+	RejectCFChallenge bool `yaml:"reject_cf_challenge"`
+}
 
-	// BackoffMax caps the inter-probe sleep when the connection has been
-	// healthy for many consecutive ticks. Default 60s. Sequence with default
-	// Interval=5s: 5 → 10 → 20 → 40 → 60. Any failure or selection change
-	// resets to Interval. Set to 0 to disable backoff.
-	BackoffMax time.Duration `yaml:"backoff_max"`
-
-	// RealTrafficSkip: if true, skip a probe whenever clash-api /connections
-	// reports any positive byte-delta on a connection routed through "out"
-	// since the last poll. Real user traffic IS the health signal — no need
-	// to spam synthetic probes. Default true; set explicit `false` to opt out.
-	// Pointer so we can distinguish "unset" (→default true) from "set false".
-	RealTrafficSkip *bool `yaml:"real_traffic_skip"`
-
-	// PrimaryRecoveryInterval: when failed-over to backup, how often to
-	// independently probe the primary's currently-selected node. Default 30m.
-	PrimaryRecoveryInterval time.Duration `yaml:"primary_recovery_interval"`
-
-	// PrimaryRecoveryThreshold: consecutive healthy probes on primary required
-	// before switching back from backup. Default 3.
-	PrimaryRecoveryThreshold int `yaml:"primary_recovery_threshold"`
+// PoolConfig describes a named select group rendered alongside the default
+// us-pool. Members are nodes that are both qualified for us-pool AND pass
+// every probe listed in `requires_passing`. Routes the `rule_sets` to this
+// pool instead of `out` (the default).
+type PoolConfig struct {
+	// Name is the pool tag emitted into mihomo's proxy-groups (e.g.
+	// "openai-pool"). Must be unique across pools.
+	Name string `yaml:"name"`
+	// RequiresPassing names probes (from NodeQualify.Probes[].Name) that
+	// every member must currently pass. Empty = no extra gating beyond
+	// us-pool's basic RTT thresholds.
+	RequiresPassing []string `yaml:"requires_passing"`
+	// RuleSets names rule-providers (e.g. "geosite-openai", "geosite-
+	// anthropic") that route through this pool instead of `out`. Each
+	// must be present in cfg.DataPlane.Route.Whitelist.Geosites OR
+	// auto-fetched.
+	RuleSets []string `yaml:"rule_sets"`
 }
 
 func Load(path string) (*Config, error) {
@@ -371,41 +348,21 @@ func (c *Config) applyDefaults() {
 		c.Subscribe.HTTPTimeout = 30 * time.Second
 	}
 	if c.Subscribe.UserAgent == "" {
-		// Default airport User-Agent. Most providers speak Clash; some (yuyun)
-		// also speak native sing-box JSON and prefer "sing-box/*" UA — those
-		// must override per-subscription via SubscriptionEntry.UserAgent.
 		c.Subscribe.UserAgent = "ClashforWindows/0.20.39"
 	}
-	c.SingBox.ApplyDefaults()
+	c.DataPlane.ApplyDefaults()
+	c.NodeQualify.applyDefaults()
 }
 
-// ApplyDefaults fills in defaults for the SingBox subtree. Public so callers
-// that construct SingBoxConfig directly (e.g. cmd/selftest) can invoke it.
-func (c *SingBoxConfig) ApplyDefaults() {
-	if c.Engine == "" {
-		c.Engine = "sing-box"
+// ApplyDefaults fills in defaults for the DataPlane subtree. Public so
+// callers that construct DataPlaneConfig directly (e.g. cmd/selftest) can
+// invoke it.
+func (c *DataPlaneConfig) ApplyDefaults() {
+	if c.ConfigPath == "" {
+		c.ConfigPath = "/etc/leap/mihomo/config.yaml"
 	}
-	switch c.Engine {
-	case "sing-box":
-		if c.ConfigPath == "" {
-			c.ConfigPath = "/etc/leap/singbox/config.json"
-		}
-		if c.RuleSetsDir == "" {
-			c.RuleSetsDir = "/etc/leap/singbox/rule-sets"
-		}
-		if c.BinaryPath == "" {
-			c.BinaryPath = "/usr/local/bin/sing-box"
-		}
-	case "mihomo":
-		if c.ConfigPath == "" {
-			c.ConfigPath = "/etc/leap/mihomo/config.yaml"
-		}
-		if c.RuleSetsDir == "" {
-			c.RuleSetsDir = "/etc/leap/mihomo/rule-sets"
-		}
-		if c.BinaryPath == "" {
-			c.BinaryPath = "/usr/local/bin/mihomo"
-		}
+	if c.RuleSetsDir == "" {
+		c.RuleSetsDir = "/etc/leap/mihomo/rule-sets"
 	}
 	if c.LogLevel == "" {
 		c.LogLevel = "info"
@@ -433,17 +390,12 @@ func (c *SingBoxConfig) ApplyDefaults() {
 		c.DNS.FakeIPRange = "198.18.0.0/15"
 	}
 	if len(c.DNS.CNDoH) == 0 {
-		// Tencent first (faster from FeiLian node measured 2026-05-27),
-		// AliDNS as fallback.
 		c.DNS.CNDoH = []string{
 			"https://doh.pub/dns-query",
 			"https://dns.alidns.com/dns-query",
 		}
 	}
 	if len(c.DNS.ProxyDoH) == 0 {
-		// Cloudflare DoT — node-direct reachable per measurement.
-		// doh.pub fallback because it returns un-poisoned answers for
-		// overseas domains (verified 2026-05-27).
 		c.DNS.ProxyDoH = []string{
 			"tls://1.1.1.1:853",
 			"https://doh.pub/dns-query",
@@ -453,15 +405,11 @@ func (c *SingBoxConfig) ApplyDefaults() {
 		c.DNS.BootstrapResolver = "udp://119.29.29.29"
 	}
 	if c.DNS.PreloadInterval == 0 && len(c.DNS.PreloadDomains) > 0 {
-		// Default refresh cadence: 5min. Most DoH responses come back with
-		// TTL ≥ 60s; sing-box honors that. Re-querying every 5min keeps
-		// every preloaded domain in cache without burning bandwidth.
 		c.DNS.PreloadInterval = 5 * time.Minute
 	}
 
-	// Route defaults — MetaCubeX/meta-rules-dat (daily build, Loyalsoldier-
-	// enhanced upstream). Single source for both geosite and geoip keeps the
-	// fetch / cache / failure path uniform.
+	// Route defaults — MetaCubeX/meta-rules-dat. mihomo loads .mrs from
+	// the meta/ branch; the rulesets manager rewrites URLs at fetch time.
 	if c.Route.GeositeURL == "" {
 		c.Route.GeositeURL = "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geosite/cn.srs"
 	}
@@ -482,61 +430,48 @@ func (c *SingBoxConfig) ApplyDefaults() {
 	if c.URLTest.ProbeURL == "" {
 		c.URLTest.ProbeURL = "https://www.gstatic.com/generate_204"
 	}
-	// NodeQualify defaults. Enabled auto-set to true when engine=mihomo so new
-	// deployments get dynamic pool management without extra yaml config.
-	if c.Engine == "mihomo" && !c.URLTest.NodeQualify.Enabled {
-		c.URLTest.NodeQualify.Enabled = true
+}
+
+// applyDefaults fills NodeQualify defaults. NodeQualify is enabled by
+// default — the scorer is core to mihomo's pool management.
+func (c *NodeQualifyConfig) applyDefaults() {
+	// Enabled defaults true. Bool defaults can't distinguish "user set
+	// false" from "field missing", so explicit false is the way to
+	// disable; absent field = enabled.
+	if c.ScoringInterval == 0 {
+		c.ScoringInterval = 60 * time.Second
+		c.Enabled = true
 	}
-	if c.URLTest.NodeQualify.ScoringInterval == 0 {
-		c.URLTest.NodeQualify.ScoringInterval = 60 * time.Second
+	if c.MaxRTTP50Ms == 0 {
+		c.MaxRTTP50Ms = 500
 	}
-	if c.URLTest.NodeQualify.MaxRTTP50Ms == 0 {
-		c.URLTest.NodeQualify.MaxRTTP50Ms = 500
+	if c.MaxRTTP95Ms == 0 {
+		c.MaxRTTP95Ms = 800
 	}
-	if c.URLTest.NodeQualify.MaxRTTP95Ms == 0 {
-		c.URLTest.NodeQualify.MaxRTTP95Ms = 800
+	if c.MaxJitterMs == 0 {
+		c.MaxJitterMs = 300
 	}
-	if c.URLTest.NodeQualify.MaxJitterMs == 0 {
-		c.URLTest.NodeQualify.MaxJitterMs = 300
+	if c.MaxFailRate == 0 {
+		c.MaxFailRate = 0.25
 	}
-	if c.URLTest.NodeQualify.MaxFailRate == 0 {
-		c.URLTest.NodeQualify.MaxFailRate = 0.25
+	if c.MinProbes == 0 {
+		c.MinProbes = 2
 	}
-	if c.URLTest.NodeQualify.MinProbes == 0 {
-		c.URLTest.NodeQualify.MinProbes = 2
+	if c.EvictStrikes == 0 {
+		c.EvictStrikes = 2
 	}
-	if c.URLTest.NodeQualify.EvictStrikes == 0 {
-		c.URLTest.NodeQualify.EvictStrikes = 2
+	if c.ReadmitStrikes == 0 {
+		c.ReadmitStrikes = 1
 	}
-	if c.URLTest.NodeQualify.ReadmitStrikes == 0 {
-		c.URLTest.NodeQualify.ReadmitStrikes = 1
-	}
-	// Watchdog defaults — enabled by default once urltest is in place.
-	if c.URLTest.Watchdog.Interval == 0 {
-		c.URLTest.Watchdog.Interval = 5 * time.Second
-	}
-	if c.URLTest.Watchdog.Timeout == 0 {
-		c.URLTest.Watchdog.Timeout = 3 * time.Second
-	}
-	if c.URLTest.Watchdog.FailThreshold == 0 {
-		c.URLTest.Watchdog.FailThreshold = 3
-	}
-	if c.URLTest.Watchdog.JitterPercent == 0 {
-		c.URLTest.Watchdog.JitterPercent = 20
-	}
-	if c.URLTest.Watchdog.BackoffMax == 0 {
-		c.URLTest.Watchdog.BackoffMax = 60 * time.Second
-	}
-	// RealTrafficSkip is bool* — nil means "user didn't set it, use default
-	// true". Explicit false in yaml opts out.
-	if c.URLTest.Watchdog.RealTrafficSkip == nil {
-		t := true
-		c.URLTest.Watchdog.RealTrafficSkip = &t
-	}
-	if c.URLTest.Watchdog.PrimaryRecoveryInterval == 0 {
-		c.URLTest.Watchdog.PrimaryRecoveryInterval = 30 * time.Minute
-	}
-	if c.URLTest.Watchdog.PrimaryRecoveryThreshold == 0 {
-		c.URLTest.Watchdog.PrimaryRecoveryThreshold = 3
+	for i := range c.Probes {
+		if c.Probes[i].Interval == 0 {
+			c.Probes[i].Interval = 5 * time.Minute
+		}
+		if c.Probes[i].Timeout == 0 {
+			c.Probes[i].Timeout = 10 * time.Second
+		}
+		if c.Probes[i].Check.MaxStatus == 0 {
+			c.Probes[i].Check.MaxStatus = 399
+		}
 	}
 }

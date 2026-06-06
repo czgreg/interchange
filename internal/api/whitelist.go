@@ -28,7 +28,7 @@ import (
 //     CN/LAN IPs but aren't on geosite-cn (paigod.work, feilian.cn, …).
 //     Accepted formats: "+.example.com" / ".example.com" / "example.com"
 //     — all normalised to "+." prefix. Synced to
-//     cfg.SingBox.DNS.FakeIPSkipSuffixes on every successful PUT.
+//     cfg.DataPlane.DNS.FakeIPSkipSuffixes on every successful PUT.
 type whitelistDTO struct {
 	Mode         string   `json:"mode"`
 	Geosites     []string `json:"geosites"`
@@ -39,9 +39,9 @@ type whitelistDTO struct {
 }
 
 func (s *Server) handleWhitelistGet(w http.ResponseWriter, r *http.Request) {
-	wl := s.deps.Cfg.SingBox.Route.Whitelist
+	wl := s.deps.Cfg.DataPlane.Route.Whitelist
 	writeJSON(w, http.StatusOK, whitelistDTO{
-		Mode:         s.deps.Cfg.SingBox.Route.Mode,
+		Mode:         s.deps.Cfg.DataPlane.Route.Mode,
 		Geosites:     append([]string{}, wl.Geosites...),
 		Geoips:       append([]string{}, wl.Geoips...),
 		DomainSuffix: append([]string{}, wl.DomainSuffix...),
@@ -123,7 +123,7 @@ func (s *Server) handleWhitelistPut(w http.ResponseWriter, r *http.Request) {
 
 	mode := strings.ToLower(strings.TrimSpace(dto.Mode))
 	if mode == "" {
-		mode = s.deps.Cfg.SingBox.Route.Mode
+		mode = s.deps.Cfg.DataPlane.Route.Mode
 	}
 	if mode != "overseas" && mode != "whitelist" {
 		http.Error(w, fmt.Sprintf("invalid mode %q (want overseas|whitelist)", mode), http.StatusBadRequest)
@@ -145,15 +145,15 @@ func (s *Server) handleWhitelistPut(w http.ResponseWriter, r *http.Request) {
 
 	// Mutate + persist + reload.
 	err = s.deps.Store.Mutate(s.deps.Cfg, func(c *config.Config) error {
-		c.SingBox.Route.Mode = mode
-		c.SingBox.Route.Whitelist.Geosites = geosites
-		c.SingBox.Route.Whitelist.Geoips = geoips
-		c.SingBox.Route.Whitelist.DomainSuffix = suffixes
-		c.SingBox.Route.Whitelist.IPCIDR = cidrs
-		c.SingBox.Route.Whitelist.FakeIPSkip = fakeSkip
+		c.DataPlane.Route.Mode = mode
+		c.DataPlane.Route.Whitelist.Geosites = geosites
+		c.DataPlane.Route.Whitelist.Geoips = geoips
+		c.DataPlane.Route.Whitelist.DomainSuffix = suffixes
+		c.DataPlane.Route.Whitelist.IPCIDR = cidrs
+		c.DataPlane.Route.Whitelist.FakeIPSkip = fakeSkip
 		// Sync fake_ip_skip to the DNS config layer so the renderer
 		// picks it up without a separate config update.
-		c.SingBox.DNS.FakeIPSkipSuffixes = fakeSkip
+		c.DataPlane.DNS.FakeIPSkipSuffixes = fakeSkip
 		return nil
 	})
 	if err != nil {
@@ -251,7 +251,7 @@ func (s *Server) refreshExpander() {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
-	wl := s.deps.Cfg.SingBox.Route.Whitelist
+	wl := s.deps.Cfg.DataPlane.Route.Whitelist
 	if _, err := s.deps.Expander.Refresh(ctx, wl.Geosites, wl.Geoips, wl.DomainSuffix, wl.IPCIDR); err != nil {
 		// Already logged inside Refresh; nothing else to do here — old
 		// snapshot is preserved and marked stale.
@@ -272,7 +272,7 @@ func (s *Server) handleWhitelistResolved(w http.ResponseWriter, r *http.Request)
 	if snap == nil {
 		// First-boot: no cache yet. Trigger one inline (best-effort) so the
 		// caller doesn't have to poll. Still bound by request timeout.
-		wl := s.deps.Cfg.SingBox.Route.Whitelist
+		wl := s.deps.Cfg.DataPlane.Route.Whitelist
 		ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 		defer cancel()
 		built, err := s.deps.Expander.Refresh(ctx, wl.Geosites, wl.Geoips, wl.DomainSuffix, wl.IPCIDR)
@@ -290,13 +290,13 @@ func (s *Server) handleWhitelistResolved(w http.ResponseWriter, r *http.Request)
 // (whitelist PUT, refresh-interval PUT) where the cfg has changed without
 // touching subscriptions. Subscription writes use RunRefresh instead.
 func (s *Server) rerenderAndReload(ctx context.Context) error {
-	// Renderer holds cfg.SingBox by value — must reseed engine-relevant
+	// Renderer holds cfg.DataPlane by value — must reseed engine-relevant
 	// fields after a Mutate before Write reads stale state.
-	wl := s.deps.Cfg.SingBox.Route.Whitelist
-	s.deps.Renderer.SetWhitelist(s.deps.Cfg.SingBox.Route.Mode, wl)
+	wl := s.deps.Cfg.DataPlane.Route.Whitelist
+	s.deps.Renderer.SetWhitelist(s.deps.Cfg.DataPlane.Route.Mode, wl)
 	// Sync fake_ip_skip to the renderer's DNS config layer so the updated
 	// fake-ip-filter is emitted without requiring a full config reload.
-	s.deps.Renderer.SetFakeIPSkip(s.deps.Cfg.SingBox.DNS.FakeIPSkipSuffixes)
+	s.deps.Renderer.SetFakeIPSkip(s.deps.Cfg.DataPlane.DNS.FakeIPSkipSuffixes)
 	out := s.deps.Subscribe.AllOutbounds()
 	if _, err := s.deps.Renderer.Write(out); err != nil {
 		return fmt.Errorf("render: %w", err)

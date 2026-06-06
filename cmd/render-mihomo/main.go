@@ -56,7 +56,7 @@ func main() {
 	}
 	fmt.Fprintf(os.Stderr, "  TOTAL nodes parsed: %d\n", totalNodes)
 
-	r := mihomo.NewRenderer(cfg.SingBox).
+	r := mihomo.NewRenderer(cfg.DataPlane).
 		WithNode(cfg.Node).
 		WithSubscriptions(cfg.Subscriptions)
 	body, err := r.Write(mgr.AllOutbounds())

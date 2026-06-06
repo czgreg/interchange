@@ -203,20 +203,3 @@ func TestEgress_ProbeCFTraceParse(t *testing.T) {
 	}
 }
 
-func TestProxyURLForPool(t *testing.T) {
-	t.Parallel()
-	cases := []struct {
-		in, want string
-	}{
-		{"urltest-primary", "http://127.0.0.1:11082"},
-		{"urltest-backup", "http://127.0.0.1:11081"},
-		{"direct", ""},
-		{"urltest-other", ""},
-	}
-	for _, c := range cases {
-		got := proxyURLForPool(c.in)
-		if got != c.want {
-			t.Errorf("proxyURLForPool(%q) = %q, want %q", c.in, got, c.want)
-		}
-	}
-}

@@ -13,7 +13,7 @@ import (
 
 func newTestRenderer(t *testing.T) *Renderer {
 	t.Helper()
-	cfg := config.SingBoxConfig{
+	cfg := config.DataPlaneConfig{
 		// Use t.TempDir so Write's atomic-rename path is writable in tests.
 		ConfigPath: filepath.Join(t.TempDir(), "config.yaml"),
 		LogLevel:   "info",

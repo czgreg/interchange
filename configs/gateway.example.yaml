@@ -1,7 +1,9 @@
-# Leap Gateway example config (v3, FeiLian forwarding-node sidecar).
+# Leap Gateway example config (FeiLian forwarding-node sidecar, mihomo-only).
 #
 # Copy to gateway.yaml and edit. Mounted on the FeiLian forwarding node at
-# /etc/leap/gateway.yaml.
+# /etc/leap/gateway.yaml. Schema: 2026-06 cleanup — top-level `data_plane`
+# (was `singbox`), top-level `node_qualify` and `pools` (were buried under
+# singbox.url_test).
 
 api:
   # 18080 (not 8080) — feilian-sentry on the forwarding node already binds
@@ -22,71 +24,45 @@ subscribe:
   user_agent: "ClashforWindows/0.20.39"
 
 # At least one subscription. format: auto | clash | singbox | uri | sip008
-# Multiple subscriptions are supported — leap aggregates outbounds across all
-# enabled entries. Change the URL or add another entry, then call
-# `POST /api/subscribe/refresh` to apply.
+# (singbox is still a valid PARSING format — many airports return native
+# sing-box JSON, even though sing-box-as-data-plane was retired in 2026-06.)
 subscriptions:
   - name: "main"
     url: "https://example.com/your/subscription/url"
     format: "auto"
     enabled: true
-    # user_agent: "sing-box/1.10.7"   # 仅在该机场需要不同 UA 时取消注释
+    # user_agent: "clash.meta/v1.19.26"   # uncomment if airport needs a specific UA
 
 # FeiLian SaaS-assigned values for this forwarding node. The deploy operator
 # must fill these in — they cannot be defaulted.
 node:
   client_subnet:    "10.8.11.0/24"   # CIDR of the FeiLian client pool on this node
-  tun0_gateway_ip:  "10.8.11.1"      # gateway IP on tun0; sing-box DNS binds here
+  tun0_gateway_ip:  "10.8.11.1"      # gateway IP on tun0; mihomo DNS binds here
   egress_iface:     "ens18"          # public-internet egress NIC
 
-singbox:
-  # engine: which proxy data plane to render + control.
-  #   sing-box (default): single-active urltest. Stable, conservative.
-  #   mihomo            : multi-active load-balance (consistent-hashing).
-  #                       Better US-pool utilization across multiple
-  #                       subscriptions; recommended for ≥2 subs.
-  #
-  # Both engines coexist on disk after install.sh; only the listed one
-  # is enabled. Switch via this field + `install.sh` re-run (or just
-  # `systemctl restart leap-gateway`).
-  engine: mihomo
+# Data-plane (mihomo) configuration.
+data_plane:
+  config_path:    "/var/lib/leap/mihomo/config.yaml"
+  rule_sets_dir:  "/var/lib/leap/mihomo/rule-sets"
+  log_level:      "info"
 
-  # Engine-aware paths. install.sh + leap-gateway pick defaults per engine
-  # if these are blank. Setting them explicitly is fine but not required.
-  # config_path:    "/etc/leap/singbox/config.json"   # for engine=sing-box
-  # config_path:    "/var/lib/leap/mihomo/config.yaml"  # for engine=mihomo
-  # rule_sets_dir:  "/etc/leap/singbox/rule-sets"     # for engine=sing-box
-  # rule_sets_dir:  "/var/lib/leap/mihomo/rule-sets"  # for engine=mihomo
-  # binary_path:    "/usr/local/bin/sing-box"  |  "/usr/local/bin/mihomo"
-  log_level: "info"
-
-  # Clash-API HTTP endpoint sing-box exposes for hot reload + observability.
   clash_api:
     external_controller: "127.0.0.1:9090"
-    # secret: "change-me"
+    secret: ""
 
+  # TUN inbound that catches forwarded traffic via fwmark policy routing.
   tun:
     enabled:        true
     interface_name: "utun-leap"
     address:        "172.19.0.1/30"
-    fwmark:         0x42         # nft mangle marks 10.8.x.x forward traffic with this
-    routing_table:  100          # ip rule fwmark 0x42 lookup 100
+    fwmark:         0x42       # leap-nft tags client packets with this
+    routing_table:  100        # ip rule fwmark X lookup TABLE → utun-leap
 
+  # mihomo's DNS server. fakeip is enabled by the renderer; cn_doh handles
+  # CN domains (geosite-cn / nameserver-policy hits), proxy_doh handles
+  # everything else (routed via us-pool).
   dns:
-    # Override default <tun0_gateway_ip>:53 if needed.
-    # listen: "10.8.11.1:53"
-    fakeip_range: "198.18.0.0/15"   # internal fakeip pool; do NOT put this in FeiLian SaaS
-    # fake_ip_skip_suffixes — internal/private hostnames that must NOT be
-    # fakeip'd. Required when employees access intranet services whose
-    # hostnames resolve to CN/LAN IPs but aren't on geosite-cn (private
-    # *.work / *.feilian.cn etc.). Without this, mihomo/sing-box hand out
-    # 198.18.x.x and DIRECT outbound dials the unreachable fake IP.
-    # Format: any of "+.example.com" / ".example.com" / "example.com" —
-    # all normalized to "+." prefix internally.
-    fake_ip_skip_suffixes: []
-    # Resolution paths. Defaults match docs/dns.md §6 with measured FeiLian
-    # node connectivity (Cloudflare DoT reachable, doh.pub un-poisoned for
-    # overseas).
+    fakeip_range: "198.18.0.0/15"
     cn_doh:
       - "https://doh.pub/dns-query"
       - "https://dns.alidns.com/dns-query"
@@ -95,14 +71,10 @@ singbox:
       - "https://doh.pub/dns-query"
     bootstrap_resolver: "udp://119.29.29.29"
 
-    # DNS preload —— leap-gateway 周期性主动 resolve 这里列的域名，把对应
-    # A 记录灌进数据面 DNS 缓存（结合 store-fake-ip 在 mihomo 模式下可跨
-    # hot-reload 持久化）。员工首次访问这些域名时不再付 ~400ms 跨境 DoH
-    # 冷查询的代价。
-    #
-    # 建议填写员工最高频访问的海外域名（通常是 AI 工具 + 代码托管）。
-    # 条目不要过多（20 以内），每条占一次 DoH 查询 * interval 频率。
-    # 0 间隔 或 空列表 = 关闭。
+    # DNS preload — leap-gateway 周期性 resolve 这里列的域名，把对应 A 记
+    # 录灌进 mihomo 的 DNS 缓存（store-fake-ip 跨 hot-reload 持久化）。员
+    # 工首次访问这些域名时不再付 ~400ms 跨境 DoH 冷查询的代价。条目不
+    # 要过多（20 以内）。空列表 = 关闭。
     preload_domains:
       - claude.ai
       - anthropic.com
@@ -113,74 +85,116 @@ singbox:
       - cursor.sh
       - cursor.so
       - perplexity.ai
-    preload_interval: 5m    # 比典型 DoH TTL 短，能稳定保温缓存
+    preload_interval: 5m
 
+    # 内网/私有域名：mihomo 不发 fakeip，让 DIRECT 出站拿真实 IP。没这条
+    # 的话 ai.paigod.work 这种内网服务会拿到 198.18.x.x 然后超时（生产
+    # 2026-06-05 现场修过）。任意写法被 normalizer 转成 "+." 前缀。
+    fake_ip_skip_suffixes: []
+
+  # Route classification (geosite-cn / geoip-cn for CN-direct, whitelist
+  # for managed overseas access).
   route:
-    # MetaCubeX/meta-rules-dat (daily build, Loyalsoldier-enhanced) is the
-    # single source for both cn-direct rule-sets and the catalog (.srs path
-    # template lives in internal/rulesets/catalog.json).
     geosite_url: "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geosite/cn.srs"
     geoip_url:   "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geoip/cn.srs"
 
     # mode: how non-CN traffic is split.
-    #   overseas (default): every non-CN destination → urltest (airport).
-    #                       The most transparent option — clients don't need
-    #                       to think about which sites are blocked.
-    #   whitelist:          only domains/IPs matching `whitelist.*` go to
-    #                       airport; everything else (including non-CN sites
-    #                       not on the list) goes direct. Saves airport
-    #                       bandwidth at the cost of curating the list.
+    #   overseas (default): every non-CN destination → us-pool. The most
+    #                       transparent option — clients don't curate.
+    #   whitelist:          only sites matching whitelist.* → us-pool;
+    #                       everything else goes direct. Saves airport
+    #                       bandwidth at the cost of curating.
     # CN domains/IPs and private LAN ranges always go direct in both modes.
     mode: overseas
 
-    # whitelist is consulted only when mode == whitelist. The four lists below
-    # are unioned at render time. Both DNS fakeip handling and route rules
-    # follow the same set, so the WL is the single source of truth.
-    #
-    # 默认四份都空 —— 装机后通过 PUT /api/whitelist 选 catalog 里的 tag /
-    # 加自定义域名 / 加 ip_cidr。GET /api/rule-sets 返回完整 catalog 和提示
-    # 案例（domain_suffix_examples / ip_cidr_examples）供 UI 预填。
+    # whitelist is consulted only when mode == whitelist. The four lists
+    # below are unioned at render time. Configure via PUT /api/whitelist —
+    # values here are just initial defaults at first boot.
     whitelist:
-      # geosite tags from the embedded catalog (GET /api/rule-sets →
-      # geosites.catalog). Selecting a tag here on first PUT triggers an
-      # on-demand fetch from MetaCubeX/meta-rules-dat into RuleSetsDir.
-      # Examples: geosite-google, geosite-anthropic, geosite-github
-      geosites: []
-      # geoip tags from the embedded catalog. Both ISO country codes
-      # (geoip-jp / geoip-us / ...) and app-level tags (geoip-google /
-      # geoip-telegram / ...) are available — MetaCubeX ships both.
-      # Examples: geoip-jp, geoip-us, geoip-telegram
-      geoips: []
-      # 长尾域名后缀，跟 geosites 求并集。
-      # Examples: anthropic.com, claude.ai, cursor.com
-      domain_suffix: []
-      # 硬编码 IP / 不走 DNS 的应用（Telegram MTProto 是典型 —— DC 段在
-      # 149.154.0.0/16 + 91.108.0.0/16）。
-      # Examples: 149.154.0.0/16, 91.108.0.0/16
-      ip_cidr: []
+      geosites: []         # e.g. geosite-google, geosite-anthropic
+      geoips:   []         # e.g. geoip-google, geoip-telegram
+      domain_suffix: []    # e.g. anthropic.com, claude.ai
+      ip_cidr:  []         # e.g. 149.154.0.0/16
+      fake_ip_skip: []     # synced to data_plane.dns.fake_ip_skip_suffixes on PUT
 
-  # urltest controls the auto-selected proxy outbound that handles overseas
-  # traffic. sing-box's native urltest re-tests the pool on `interval`; the
-  # in-process watchdog supplements it with a fast-path probe of the active
-  # node, forcing a re-evaluation on `fail_threshold` consecutive failures so
-  # one hung node doesn't break overseas traffic for up to `interval` minutes.
-  urltest:
-    interval: 3m                                       # full pool re-test cadence
-    tolerance: 50                                      # ms hysteresis before switching
-    probe_url: "https://www.gstatic.com/generate_204"  # must traverse GFW (that's what we're testing)
-    # Filter the urltest pool by node-tag regex. Empty = every airport node is
-    # a candidate.下例只把美国节点喂进 urltest 池。机场命名风格不统一：
-    # 有的用中文（"🇺🇸 美国01 ..."），有的用拉丁（"🇺🇸US-IEPL-01"），所以三
-    # 段并联兼顾：中文 "美国" / 国旗 emoji 🇺🇸 / 词首 "US"（\b 防误伤 Russia 等）。
-    # 0 命中时 leap 会回落到全量节点（renderer.applyNodePattern 兜底）。
+  # mihomo's load-balance internal url-test. Distinct from node_qualify
+  # below (which is leap-gateway's own scorer); these thresholds shape
+  # mihomo's per-flow health-check + url-test cycle.
+  url_test:
+    interval:  3m
+    tolerance: 50
+    probe_url: "https://www.gstatic.com/generate_204"
+    # Filter us-pool by node-tag regex. Empty = every airport node a
+    # candidate. 下例只放美国节点（中文/国旗/拉丁三种命名都涵盖；\b 防误
+    # 伤 Russia 等）。0 命中时 renderer 兜底回到全集。
     node_pattern: '美国|🇺🇸|\bUS'
-    watchdog:
-      enabled: true
-      interval: 5s        # how often to probe the live selection
-      timeout: 3s         # per-probe timeout
-      fail_threshold: 3   # consecutive fails before forced re-evaluation
 
-  # Optional ad-hoc inbounds for debugging from the node itself. Leave empty in
-  # production — TUN inbound + DNS direct inbound on tun0_gateway_ip is enough.
+  # Optional ad-hoc inbounds for debugging from the node itself. Leave
+  # empty in production — TUN + DNS direct on tun0_gateway_ip is enough.
   # socks_listen: "127.0.0.1:1080"
   # http_listen:  "127.0.0.1:1081"
+
+# leap-gateway's NodeScorer: dynamic pool management. Scores every us-pool
+# candidate every scoring_interval; nodes that fail thresholds are evicted;
+# mihomo is hot-reloaded when membership changes.
+node_qualify:
+  enabled:           true
+  scoring_interval:  60s
+  max_rtt_p50_ms:    500
+  max_rtt_p95_ms:    800
+  max_jitter_ms:     300
+  max_fail_rate:     0.25
+  min_probes:        2
+  evict_strikes:     2
+  readmit_strikes:   1
+
+  # Site-specific reachability probes. Each probe runs from each candidate
+  # node every `interval`. Results gate membership in named pools (see
+  # `pools` below) — they do NOT affect base us-pool qualification.
+  #
+  # Default 5min interval × 22 nodes × 4 probes ≈ 2.85GB / month total
+  # airport traffic, distributed proportionally across subs (~0.4-1.6%
+  # of typical 70-100GB/sub quota).
+  probes:
+    - name: chatgpt.com
+      url:  https://chatgpt.com/
+      interval: 5m
+      timeout:  10s
+      check:
+        max_status: 399
+        reject_cf_challenge: true
+    - name: claude.ai
+      url:  https://claude.ai/
+      interval: 5m
+      timeout:  10s
+      check:
+        max_status: 399
+        reject_cf_challenge: true
+    - name: accounts.google.com
+      url:  https://accounts.google.com/
+      interval: 5m
+      timeout:  10s
+      check:
+        max_status: 399
+    - name: api.github.com
+      url:  https://api.github.com/
+      interval: 5m
+      timeout:  10s
+      check:
+        max_status: 399
+
+# Named select groups rendered alongside the default us-pool. Each pool is
+# gated by `requires_passing` — every member must currently pass all listed
+# probes. The `rule_sets` listed here route through this pool instead of
+# the default `out` selector.
+#
+# Use this to segregate sites with special needs (anti-bot IP rep, session
+# continuity) onto a curated subset of nodes. Empty = use the default
+# us-pool for everything (the previous behavior).
+pools: []
+  # Example — first openai-pool deployment (1.1):
+  # - name: openai-pool
+  #   requires_passing: [chatgpt.com, claude.ai]
+  #   rule_sets:
+  #     - geosite-openai
+  #     - geosite-anthropic

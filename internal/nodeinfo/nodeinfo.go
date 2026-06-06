@@ -144,14 +144,9 @@ func (r *Reporter) collectFeiLian(ctx context.Context) FeiLianInfo {
 
 func (r *Reporter) collectLeap(ctx context.Context) LeapInfo {
 	services := map[string]string{}
-	// Both data-plane units always coexist on disk (install.sh ships both
-	// units regardless of engine; only the engine in cfg.SingBox.Engine is
-	// `enable`d). List both so operators can see at a glance which one is
-	// the active engine — the other will be `inactive`.
 	for _, u := range []string{
 		"leap-gateway.service",
 		"leap-mihomo.service",
-		"leap-singbox.service",
 		"leap-nft.service",
 	} {
 		services[strings.TrimSuffix(u, ".service")] = systemdState(ctx, u)
@@ -159,7 +154,7 @@ func (r *Reporter) collectLeap(ctx context.Context) LeapInfo {
 	return LeapInfo{
 		GatewayVersion: r.gatewayV,
 		Engine:         r.engine,
-		EngineVersion:  engineVersion(ctx, r.engine),
+		EngineVersion:  mihomoVersion(ctx),
 		Services:       services,
 	}
 }
