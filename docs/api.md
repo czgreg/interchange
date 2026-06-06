@@ -742,7 +742,23 @@ curl -s $BASE/api/whitelist/resolved | jq -r '.domains[]' | head -20
 
 按发布周期组织。**只列对外暴露的 API/JSON 字段变化**，内部代码重构不在此处记录。
 
-### 2026-06-06 — sing-box 引擎退役 + schema 清理（commit `bf6e610`）
+### 2026-06-06 (晚) — pools + site probes + passive stats + capacity 上线（commit `ec14184`）
+
+之前标"即将发布"的 1.1 / 1.3 / 1.6 + 1.5 已全部落地、部署到 89。新增的运行时字段：
+
+| 端点 | 新字段 | 说明 |
+|---|---|---|
+| `/api/nodes/health` | 顶级 `probes` + 每节点 `nodes[].probes` | site-specific 探测结果（chatgpt.com / claude.ai / accounts.google.com / api.github.com），含 `cf_mitigated` / `latency_ms`（失败时为真实等待时长）。详见下方 schema |
+| `/api/nodes/health` | 每节点 `nodes[].passive` | 被动连接统计：`active_conns` / `closed_window` / `failed_window` / `fail_rate` / `sample_window_sec`。从 mihomo `/connections` 推导（纯本地，无机场流量），10min 滚动窗口；`fail_rate` = 关闭时传输 < 2KB 的连接占比 |
+| `/api/status` | `capacity`（条件返回） | 压测得出的单机用户上限：`sustained_max_users` / `degraded_max_users` / `measured_at` / `measured_with`。未配置 `capacity:` 时不返回 |
+| `/api/proxies/active` | `pools[]` 可能新增命名池 | 配置了 `pools:`（如 openai-pool）后，**注意**：命名池通过 rule 路由（`RULE-SET,geosite-openai,openai-pool`），不在 `out` selector 的成员里，所以**不会**出现在 `active_proxy.pools[]`（该数组只走 `out.all`）。命名池成员状态从 `/api/nodes/health` 的 probes 推断 |
+
+**前端要点**：
+- 节点健康表加 probes 列（每 probe 一个状态点）+ passive fail_rate 列
+- dashboard 顶部用 `/api/status.capacity` 对比当前在线人数做 headroom 条
+- `nodes[].probes` / `nodes[].passive` 都是**可选**字段，节点没数据时不返回——按缺省处理
+
+### 2026-06-06 (早) — sing-box 引擎退役 + schema 清理（commit `bf6e610`）
 
 **Breaking — 字段移除**：
 
@@ -754,10 +770,6 @@ curl -s $BASE/api/whitelist/resolved | jq -r '.domains[]' | head -20
 **前端 grep 替换清单**：
 - `data.watchdog`、`response.watchdog.*` → 全部删除引用
 - `services["leap-singbox"]` → 不再返回；如果前端要统计"sing-box 是否在跑"，**永远是不在跑**，可直接删该 UI 元素
-
-**新增字段**（schema 定义已经合入，但运行时返回需等下面"即将发布"的 1.1 / 1.3 上线）：
-- `/api/nodes/health` 将在 1.3 落地后增加 `probes` 顶级对象 + 每节点 `probes` 字段（见下文 schema 预览）
-- `/api/proxies/active` 将在 1.1 落地后在 `pools[]` 数组里出现 `openai-pool` 等命名池
 
 ### 2026-06-05 — 引擎相关字段重命名（commit `bf0b469`）
 
@@ -773,9 +785,11 @@ curl -s $BASE/api/whitelist/resolved | jq -r '.domains[]' | head -20
 - `singbox_version` → `engine_version`（语义变更：现在是 mihomo 版本而不是 sing-box CLI 版本）
 - 显示"引擎"字段：直接用 `engine`（恒等于 `"mihomo"`，可省略整段 UI 也可）
 
-### 即将发布（schema 已定，运行时未上）
+### 已上线 schema 参考（1.1 / 1.3 / 1.6）
 
-#### 1.3 — `/api/nodes/health` 增加 site-specific probes
+下面是上述新字段的完整形态参考。
+
+#### 1.3 — `/api/nodes/health` 的 site-specific probes
 
 每个节点新增 `probes` 字段，报告对各 probe 目标的可达性：
 
@@ -882,4 +896,4 @@ curl -s $BASE/api/whitelist/resolved | jq -r '.domains[]' | head -20
 
 ---
 
-*最后更新：2026-06-06，基于 mihomo-only 清理后版本（删除 sing-box-as-engine + watchdog；`data_plane:` / `node_qualify:` / `pools:` 三个顶级 block）*
+*最后更新：2026-06-06，基于 commit ec14184：mihomo-only + pools/probes/passive/capacity 全上线（89 已部署验证）*

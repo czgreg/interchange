@@ -152,23 +152,34 @@ node_qualify:
   # node every `interval`. Results gate membership in named pools (see
   # `pools` below) — they do NOT affect base us-pool qualification.
   #
-  # Default 5min interval × 22 nodes × 4 probes ≈ 2.85GB / month total
-  # airport traffic, distributed proportionally across subs (~0.4-1.6%
-  # of typical 70-100GB/sub quota).
+  # IMPORTANT — pick probe targets that reflect the node's IP REPUTATION,
+  # not ones that JS-challenge a headless client. chatgpt.com/ (the root
+  # HTML) returns 403 + cf-mitigated:challenge to ANY non-browser, so it
+  # marks every node "bad" and tells you nothing. Use API/edge endpoints
+  # that answer cleanly:
+  #   - api.openai.com/v1/models → 401 (reached OpenAI API plane,
+  #     unauthenticated). A hard-blocked IP gets a CF challenge instead,
+  #     so 401 = the node's egress IP is accepted by OpenAI. max_status:401.
+  #   - api.anthropic.com/v1/models → 401 likewise.
+  # reject_cf_challenge still catches the case where even the API path is
+  # challenged (genuinely blocklisted IP).
+  #
+  # Default 5min interval × N nodes × M probes airport traffic; see the
+  # capacity note. ~0.4-1.6% of a 70-100GB/sub monthly quota at 5min.
   probes:
-    - name: chatgpt.com
-      url:  https://chatgpt.com/
+    - name: openai-api
+      url:  https://api.openai.com/v1/models
       interval: 5m
       timeout:  10s
       check:
-        max_status: 399
+        max_status: 401          # 401 = reached API, IP accepted
         reject_cf_challenge: true
-    - name: claude.ai
-      url:  https://claude.ai/
+    - name: anthropic-api
+      url:  https://api.anthropic.com/v1/models
       interval: 5m
       timeout:  10s
       check:
-        max_status: 399
+        max_status: 401
         reject_cf_challenge: true
     - name: accounts.google.com
       url:  https://accounts.google.com/
@@ -194,7 +205,7 @@ node_qualify:
 pools: []
   # Example — first openai-pool deployment (1.1):
   # - name: openai-pool
-  #   requires_passing: [chatgpt.com, claude.ai]
+  #   requires_passing: [openai-api, anthropic-api]
   #   rule_sets:
   #     - geosite-openai
   #     - geosite-anthropic
