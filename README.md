@@ -64,8 +64,8 @@ make logs               # leap-gateway 日志
 ```yaml
 data_plane:
   tun:
-    stack: gvisor        # REQUIRED for per_terminal (preserves real srcIP)
-    tproxy_port: 7893    # TPROXY inbound port
+    stack: system        # system or gvisor — does NOT affect TPROXY source IP
+  tproxy_port: 7893      # TPROXY inbound port (data_plane level, not under tun)
   route:
     mode: whitelist      # whitelist | overseas
     whitelist:
@@ -73,6 +73,9 @@ data_plane:
 
 load_balance:
   per_terminal: true     # pin each terminal to a single egress node
+                         # REQUIRES tproxy_port set (TPROXY preserves real srcIP;
+                         # TUN mode collapses all clients to 198.18.0.0 regardless
+                         # of gvisor/system stack)
 
 node_qualify:
   probes:

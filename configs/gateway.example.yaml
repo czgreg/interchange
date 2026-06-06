@@ -58,11 +58,9 @@ data_plane:
     fwmark:         0x42       # leap-nft tags client packets with this
     routing_table:  100        # ip rule fwmark X lookup TABLE → utun-leap
     # stack: system (default) | gvisor.
-    #   system — kernel TUN socket; lower CPU, but collapses every client's
-    #            sourceIP to the TUN device addr (198.18.0.0). Fine unless
-    #            you need per-source routing.
-    #   gvisor — userspace stack; preserves real client sourceIP
-    #            (10.8.x.x). REQUIRED for load_balance.per_terminal below.
+    # Neither stack preserves real client sourceIP — both TUN modes collapse
+    # all clients to 198.18.0.0. Per-terminal routing requires TPROXY
+    # (data_plane.tproxy_port), not gvisor. Stack choice only affects CPU.
     stack: "system"
 
   # mihomo's DNS server. fakeip is enabled by the renderer; cn_doh handles
@@ -140,6 +138,11 @@ data_plane:
   # empty in production — TUN + DNS direct on tun0_gateway_ip is enough.
   # socks_listen: "127.0.0.1:1080"
   # http_listen:  "127.0.0.1:1081"
+
+  # tproxy_port: TPROXY inbound port. Set to enable transparent-proxy mode,
+  # which preserves the real client sourceIP (10.8.x.x) in mihomo metadata.
+  # REQUIRED for load_balance.per_terminal. 0/unset = TUN-only mode.
+  tproxy_port: 0    # set to e.g. 7893 to enable TPROXY + per_terminal
 
 # leap-gateway's NodeScorer: dynamic pool management. Scores every us-pool
 # candidate every scoring_interval; nodes that fail thresholds are evicted;
@@ -244,10 +247,10 @@ load_balance:
   # chatgpt.com / chat.openai.com / ws.chatgpt.com → 3 IPs) that trips
   # OpenAI/Cloudflare anomaly detection.
   #
-  # REQUIRES data_plane.tun.stack=gvisor (real client sourceIP). With the
-  # default system stack every terminal looks like 198.18.0.0 and they all
-  # collapse onto one node — so this is a no-op (worse, degenerate) without
-  # gvisor.
+  # REQUIRES data_plane.tproxy_port to be set. TPROXY preserves the real
+  # client sourceIP (10.8.x.x). With TUN mode (tproxy_port=0 or unset) all
+  # clients look like 198.18.0.0 regardless of tun.stack — per_terminal is a
+  # no-op and degenerate (everyone collapses to one node).
   #
   # Mechanism: node.client_subnet is sliced per-/32 into SRC-IP-CIDR rules
   # under a `perterm` sub-rule, each terminal HRW-assigned to a us-pool

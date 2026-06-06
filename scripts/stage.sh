@@ -193,6 +193,34 @@ for tag in "${WL_TAGS[@]}"; do
   esac
 done
 
+# Tags from gateway.yaml pools[].rule_sets — pools need their .mrs files
+# just as much as whitelist entries. If stage.sh skips them, mihomo fails
+# on startup with "file not found" for the rule-provider.
+POOL_TAGS=()
+while IFS= read -r tag; do
+  POOL_TAGS+=("$tag")
+done < <(awk '
+  /^pools:/                     { inpools=1; next }
+  inpools && /^[^[:space:]]/    { inpools=0 }
+  inpools && /rule_sets:/        { inrs=1; next }
+  inpools && /^[[:space:]]*[a-zA-Z_-]+:/ && !/rule_sets:/ { inrs=0 }
+  inrs && /^[[:space:]]*-[[:space:]]/ {
+    sub(/^[[:space:]]*-[[:space:]]*/, "")
+    sub(/[[:space:]]*#.*/, "")
+    gsub(/"|'"'"'/, "")
+    if ($0 ~ /^(geosite|geoip)-/) print $0
+  }
+' "$GATEWAY_YAML")
+
+for tag in "${POOL_TAGS[@]}"; do
+  case "$tag" in
+    geosite-*) stem="${tag#geosite-}"
+               RULESET_ENTRIES+=("${tag}.mrs|https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/meta/geo/geosite/${stem}.mrs") ;;
+    geoip-*)   stem="${tag#geoip-}"
+               RULESET_ENTRIES+=("${tag}.mrs|https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/meta/geo/geoip/${stem}.mrs") ;;
+  esac
+done
+
 # Dedupe by save_name|url tuple (bash 3.2 has no associative arrays).
 DEDUPED_ENTRIES=()
 SEEN=$'\n'

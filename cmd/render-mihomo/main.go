@@ -58,7 +58,9 @@ func main() {
 
 	r := mihomo.NewRenderer(cfg.DataPlane).
 		WithNode(cfg.Node).
-		WithSubscriptions(cfg.Subscriptions)
+		WithSubscriptions(cfg.Subscriptions).
+		WithPools(cfg.Pools).
+		WithLoadBalance(cfg.LoadBalance.PerTerminal)
 	body, err := r.Write(mgr.AllOutbounds())
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "render:", err)

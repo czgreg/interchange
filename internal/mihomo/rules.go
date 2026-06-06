@@ -163,6 +163,20 @@ func (r *Renderer) buildRules(outbounds []subscribe.Outbound) ([]string, map[str
 		} else {
 			subRules["perterm"] = slices
 		}
+		// Also build per-pool perterm sub-rules for probe-gated pools.
+		// A probe-gated pool (e.g. openai-pool) should only slice across
+		// its own qualified members — routing openai traffic through the
+		// full us-pool would expose clients to nodes that failed the probe.
+		for _, p := range r.pools {
+			if len(p.RequiresPassing) == 0 {
+				continue // not probe-gated; generic perterm is fine
+			}
+			subName := "perterm-" + p.Name
+			poolSlices := r.perTerminalSlicesForPool(p.Name, outbounds)
+			if len(poolSlices) > 0 {
+				subRules[subName] = poolSlices
+			}
+		}
 	}
 
 	// domainRule routes a domain-matching condition to either the perterm
@@ -174,9 +188,10 @@ func (r *Renderer) buildRules(outbounds []subscribe.Outbound) ([]string, map[str
 		return cond + "," + outSelector
 	}
 
-	// Pool rule_sets (openai-pool etc.). When per-terminal is OFF they
-	// route to the named pool; when ON, domain pool tags route through
-	// perterm too (per-terminal pin subsumes per-pool for the drift goal).
+	// Pool rule_sets (openai-pool etc.). When per-terminal is ON, domain pool
+	// tags route through a pool-specific perterm sub-rule (perterm-<poolname>)
+	// so only probe-passing nodes serve that pool's traffic. Pools without
+	// requires_passing fall back to the generic perterm (us-pool members).
 	poolRouted := map[string]bool{}
 	for _, tag := range r.poolRuleSets() {
 		poolName := r.poolForRuleSet(tag)
@@ -184,7 +199,14 @@ func (r *Renderer) buildRules(outbounds []subscribe.Outbound) ([]string, map[str
 			continue
 		}
 		if perterm && !strings.HasPrefix(tag, "geoip-") {
-			rules = append(rules, domainRule("RULE-SET,"+tag))
+			// Route through pool-specific perterm if it was generated,
+			// else fall back to generic perterm.
+			subName := "perterm-" + poolName
+			if _, ok := subRules[subName]; ok {
+				rules = append(rules, "SUB-RULE,(RULE-SET,"+tag+"),"+subName)
+			} else {
+				rules = append(rules, domainRule("RULE-SET,"+tag))
+			}
 			poolRouted[tag] = true
 			continue
 		}

@@ -143,12 +143,16 @@ type DataPlaneConfig struct {
 	// TProxyPort is the port mihomo listens on for transparent-proxy
 	// (TPROXY) inbound traffic. When non-zero, iproute.sh redirects
 	// non-DNS TCP/UDP from the FeiLian client subnet to this port using
-	// the kernel's TPROXY target, preserving the original client source IP
-	// (10.8.x.x) in mihomo's connection metadata. 0 = disabled (TUN mode).
+	// the kernel's TPROXY target, which preserves the original client
+	// source IP (10.8.x.x) in mihomo's connection metadata.
 	//
-	// TPROXY is the correct mechanism for per-terminal routing; TUN mode
-	// collapses all client IPs to 198.18.0.0 (the fake-IP pool address)
-	// regardless of TUN stack setting, making SRC-IP-CIDR slicing useless.
+	// This is the ONLY mechanism that preserves real source IPs. TUN mode
+	// (system OR gvisor) always reports 198.18.0.0 for all clients because
+	// the network stack reconstructs TCP connections without propagating the
+	// original IP header — confirmed on production node 89, 2026-06-06.
+	//
+	// per_terminal routing (load_balance.per_terminal) REQUIRES this field
+	// to be set. 0 = disabled (TUN mode only, per_terminal has no effect).
 	TProxyPort int `yaml:"tproxy_port"`
 
 	// Legacy ad-hoc inbounds, retained for cmd/selftest. Empty = omitted.
@@ -168,13 +172,14 @@ type TUNConfig struct {
 	FWMark        int    `yaml:"fwmark"`
 	RoutingTable  int    `yaml:"routing_table"`
 	// Stack selects mihomo's TUN network stack:
-	//   "system" (default) — kernel handles the TUN socket; lower CPU but
-	//                        collapses every client's sourceIP to the TUN
-	//                        device address (198.18.0.0), so per-terminal /
-	//                        per-source routing is impossible.
-	//   "gvisor"           — userspace stack; preserves the real client
-	//                        sourceIP (10.8.x.x). REQUIRED for
-	//                        load_balance.per_terminal. ~1 CPU tier higher.
+	//   "system" (default) — kernel handles the TUN socket.
+	//   "gvisor"           — userspace stack.
+	//
+	// IMPORTANT: neither stack preserves the real client sourceIP in mihomo's
+	// connection metadata. Both collapse sourceIP to 198.18.0.0 (the TUN device
+	// address) because the kernel/gvisor stack reconstructs the TCP connection
+	// from raw TUN packets without propagating the original IP header.
+	// Per-terminal routing requires TPROXY (data_plane.tproxy_port), not gvisor.
 	Stack string `yaml:"stack"`
 }
 
@@ -186,8 +191,10 @@ type LoadBalanceConfig struct {
 	// session (chatgpt.com / chat.openai.com / ws.chatgpt.com all exit the
 	// same IP) that trips OpenAI/Cloudflare anomaly detection.
 	//
-	// REQUIRES data_plane.tun.stack=gvisor — otherwise every terminal looks
-	// like sourceIP 198.18.0.0 and all of them collapse onto one node.
+	// REQUIRES data_plane.tproxy_port to be set. TPROXY preserves the real
+	// client sourceIP (10.8.x.x) so SRC-IP-CIDR slicing works. TUN mode
+	// (tproxy_port=0) always collapses all clients to 198.18.0.0 regardless
+	// of TUN stack (confirmed on production node 89, 2026-06-06).
 	//
 	// Mechanism: the renderer slices node.client_subnet into per-/32
 	// SRC-IP-CIDR rules under a `perterm` sub-rule, assigning each terminal
@@ -427,10 +434,13 @@ func (c *Config) applyDefaults() {
 // invoke it.
 func (c *DataPlaneConfig) ApplyDefaults() {
 	if c.ConfigPath == "" {
-		c.ConfigPath = "/etc/leap/mihomo/config.yaml"
+		// mihomo workdir is /var/lib/leap/mihomo; mihomo reads config.yaml
+		// from there automatically (no -f flag). Must match the path in
+		// deploy/node/leap-mihomo.service (WorkingDirectory).
+		c.ConfigPath = "/var/lib/leap/mihomo/config.yaml"
 	}
 	if c.RuleSetsDir == "" {
-		c.RuleSetsDir = "/etc/leap/mihomo/rule-sets"
+		c.RuleSetsDir = "/var/lib/leap/mihomo/rule-sets"
 	}
 	if c.LogLevel == "" {
 		c.LogLevel = "info"

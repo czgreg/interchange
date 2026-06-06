@@ -29,16 +29,39 @@ import (
 // to no per-terminal slicing (operator should narrow client_subnet).
 const maxPerTerminalHosts = 1024
 
-// perTerminalSlices returns the `perterm` sub-rule body: one
-// SRC-IP-CIDR,<host>/32,<node> per client terminal IP (HRW-assigned across
-// the current us-pool members) followed by a MATCH,us-pool fallback.
-// Returns nil if there are no members or the subnet can't be sliced.
+// perTerminalSlices returns the `perterm` sub-rule body using the full
+// us-pool qualified set (for generic whitelist traffic).
 func (r *Renderer) perTerminalSlices(outbounds []subscribe.Outbound) []string {
 	members := r.usPoolMembers(outbounds)
 	if len(members) == 0 {
 		return nil
 	}
-	hosts := enumerateHosts(r.node.ClientSubnet, maxPerTerminalHosts)
+	return buildSliceRules(r.node.ClientSubnet, members, usPool)
+}
+
+// perTerminalSlicesForPool returns the `perterm-<poolName>` sub-rule body
+// using only the pool-specific qualified members (those that passed the
+// pool's site probes). Falls back to full us-pool members when the pool
+// has no members yet (first render before probe loop completes).
+func (r *Renderer) perTerminalSlicesForPool(poolName string, outbounds []subscribe.Outbound) []string {
+	members, ok := r.poolMembers[poolName]
+	if !ok || len(members) == 0 {
+		// No probe results yet; fall back to full us-pool so routing is
+		// functional until the probe loop runs. Logged so operators notice.
+		members = r.usPoolMembers(outbounds)
+	}
+	if len(members) == 0 {
+		return nil
+	}
+	// Fallback target is the pool name (not us-pool) so unmatched sources
+	// still route through the pool's group rather than the default pool.
+	return buildSliceRules(r.node.ClientSubnet, members, poolName)
+}
+
+// buildSliceRules generates the per-/32 SRC-IP-CIDR rules and a MATCH
+// fallback for one perterm sub-rule.
+func buildSliceRules(subnet string, members []string, fallbackProxy string) []string {
+	hosts := enumerateHosts(subnet, maxPerTerminalHosts)
 	if len(hosts) == 0 {
 		return nil
 	}
@@ -47,10 +70,7 @@ func (r *Renderer) perTerminalSlices(outbounds []subscribe.Outbound) []string {
 		node := hrwPick(ip, members)
 		rules = append(rules, fmt.Sprintf("SRC-IP-CIDR,%s/32,%s", ip, node))
 	}
-	// Fallback: any source not in the enumerated set still egresses (the
-	// load-balance pool, per-destination). Keeps the rule total bounded and
-	// covers off-subnet sources gracefully.
-	rules = append(rules, "MATCH,"+usPool)
+	rules = append(rules, "MATCH,"+fallbackProxy)
 	return rules
 }
 

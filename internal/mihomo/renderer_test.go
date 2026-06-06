@@ -677,3 +677,78 @@ func TestHRWStability(t *testing.T) {
 		}
 	}
 }
+
+// TestRenderer_PerTerminalWithPool verifies that probe-gated pool rule_sets
+// route through pool-specific perterm sub-rules (perterm-openai-pool with
+// openai-pool members only), not the generic perterm (all us-pool members).
+func TestRenderer_PerTerminalWithPool(t *testing.T) {
+	r := newTestRenderer(t)
+	r.cfg.URLTest.NodePattern = ""
+	r.cfg.Route.Mode = "whitelist"
+	r.cfg.Route.Whitelist = config.WhitelistConfig{
+		Geosites: config.StringList{"geosite-openai", "geosite-github"},
+	}
+	r = r.WithPools([]config.PoolConfig{{
+		Name:            "openai-pool",
+		RequiresPassing: []string{"openai-api"},
+		RuleSets:        []string{"geosite-openai"},
+	}}).WithLoadBalance(true)
+	r.node.ClientSubnet = "10.8.13.0/29"
+
+	// Simulate nodescorer: only ash passes the openai-api probe.
+	r = r.WithPools(r.pools) // re-attach
+	r.poolMembers = map[string][]string{
+		"openai-pool": {"ash/🇺🇸US-IEPL-01"},
+	}
+
+	body, err := r.Write(sampleOutbounds())
+	if err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	var doc map[string]any
+	_ = yaml.Unmarshal(body, &doc)
+
+	rules, _ := doc["rules"].([]any)
+	sub, _ := doc["sub-rules"].(map[string]any)
+
+	// geosite-openai must route to perterm-openai-pool (probe-gated),
+	// NOT the generic perterm.
+	var sawPoolPerterm, sawGenericForOpenai bool
+	for _, ru := range rules {
+		s, _ := ru.(string)
+		if s == "SUB-RULE,(RULE-SET,geosite-openai),perterm-openai-pool" {
+			sawPoolPerterm = true
+		}
+		if s == "SUB-RULE,(RULE-SET,geosite-openai),perterm" {
+			sawGenericForOpenai = true
+		}
+	}
+	if !sawPoolPerterm {
+		t.Error("geosite-openai should route to perterm-openai-pool, not generic perterm")
+	}
+	if sawGenericForOpenai {
+		t.Error("geosite-openai must NOT route to generic perterm when pool-specific perterm exists")
+	}
+
+	// perterm-openai-pool sub-rule must exist and use only openai-pool member.
+	pt, _ := sub["perterm-openai-pool"].([]any)
+	if len(pt) < 2 {
+		t.Fatalf("perterm-openai-pool sub-rule missing or empty")
+	}
+	for _, e := range pt[:len(pt)-1] {
+		s, _ := e.(string)
+		if !strings.Contains(s, "ash/🇺🇸US-IEPL-01") {
+			t.Errorf("perterm-openai-pool contains non-pool node: %s", s)
+		}
+	}
+	// geosite-github (not in any pool) should use generic perterm.
+	var sawGithubPerterm bool
+	for _, ru := range rules {
+		if s, _ := ru.(string); s == "SUB-RULE,(RULE-SET,geosite-github),perterm" {
+			sawGithubPerterm = true
+		}
+	}
+	if !sawGithubPerterm {
+		t.Error("geosite-github should route to generic perterm (not pool-specific)")
+	}
+}
