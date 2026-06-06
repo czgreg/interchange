@@ -105,6 +105,38 @@ func TestPoolMembersEqual(t *testing.T) {
 	}
 }
 
+// TestPassiveStats verifies close-event classification: a connection that
+// closed having moved < minHandshakeBytes counts as failed; one that moved
+// real data does not. FailRate = failed/closed.
+func TestPassiveStats(t *testing.T) {
+	s := newTestScorer(defaultCfg())
+	s.activeConns = map[string]int{"nodeA": 3}
+	now := time.Now()
+	s.closeEvents = map[string][]closeEvent{
+		"nodeA": {
+			{at: now, failed: true},  // RST before handshake
+			{at: now, failed: true},  // ditto
+			{at: now, failed: false}, // real transfer
+			{at: now, failed: false},
+		},
+	}
+	ps := s.passiveStatsLocked("nodeA")
+	if ps == nil {
+		t.Fatal("expected stats for nodeA")
+	}
+	if ps.ActiveConns != 3 || ps.ClosedWindow != 4 || ps.FailedWindow != 2 {
+		t.Errorf("got active=%d closed=%d failed=%d, want 3/4/2",
+			ps.ActiveConns, ps.ClosedWindow, ps.FailedWindow)
+	}
+	if ps.FailRate != 0.5 {
+		t.Errorf("fail_rate = %v, want 0.5", ps.FailRate)
+	}
+	// A node with nothing observed → nil (absent JSON field).
+	if s.passiveStatsLocked("ghost") != nil {
+		t.Error("unobserved node should yield nil passive stats")
+	}
+}
+
 func TestScoreNode_AllGood(t *testing.T) {
 	t.Parallel()
 	s := newTestScorer(defaultCfg())

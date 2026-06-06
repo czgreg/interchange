@@ -59,6 +59,24 @@ type NodeHealth struct {
 	// (key = probe Name, e.g. "chatgpt.com"). Empty when no probes are
 	// configured or none have run yet. Gates named-pool membership.
 	Probes map[string]ProbeResult `json:"probes,omitempty"`
+
+	// Passive holds connection-lifecycle stats derived from mihomo's
+	// /connections (localhost, no airport traffic). nil when the passive
+	// loop hasn't produced data yet.
+	Passive *PassiveStats `json:"passive,omitempty"`
+}
+
+// PassiveStats summarizes a node's TCP connection behavior over a rolling
+// window, derived purely from snapshotting mihomo's /connections. A node
+// that accepts connections which immediately close having moved near-zero
+// bytes is failing in a way RTT probes don't catch (upstream RST, captive
+// redirect, dead egress) — this surfaces that.
+type PassiveStats struct {
+	ActiveConns     int     `json:"active_conns"`      // current live conns through this node
+	ClosedWindow    int     `json:"closed_window"`     // conns that closed during the window
+	FailedWindow    int     `json:"failed_window"`     // of those, ones that moved < minHandshakeBytes
+	FailRate        float64 `json:"fail_rate"`         // failed/closed over the window (0 when no closes)
+	SampleWindowSec int     `json:"sample_window_sec"`
 }
 
 // ProbeResult is one site-specific reachability measurement for one node.
@@ -126,6 +144,26 @@ type Scorer struct {
 	// throughput tracking: previous /connections snapshot
 	connPrev  map[string]connBytes
 	connPrevT time.Time
+
+	// passive connection-lifecycle tracking (1.6). connSeen maps live
+	// connID → its node + last-seen byte total; closeEvents is a rolling
+	// per-node log of recently-closed connections used to compute fail
+	// rate. Both guarded by s.mu.
+	connSeen    map[string]connInfo
+	closeEvents map[string][]closeEvent
+	activeConns map[string]int // node → current live conn count
+}
+
+// connInfo is the last-observed state of one live connection.
+type connInfo struct {
+	node  string
+	bytes int64 // upload+download at last poll
+}
+
+// closeEvent records a connection that disappeared between polls.
+type closeEvent struct {
+	at     time.Time
+	failed bool // moved < minHandshakeBytes before closing
 }
 
 type nodeState struct {
@@ -168,6 +206,9 @@ func New(
 		probeResults: map[string]map[string]ProbeResult{},
 		probeLast:    map[string]map[string]time.Time{},
 		connPrev:     map[string]connBytes{},
+		connSeen:     map[string]connInfo{},
+		closeEvents:  map[string][]closeEvent{},
+		activeConns:  map[string]int{},
 		httpc:        &http.Client{Timeout: 5 * time.Second},
 		probeHTTPc: &http.Client{
 			Timeout:   12 * time.Second,
@@ -218,6 +259,10 @@ func (s *Scorer) Run(ctx context.Context) {
 	if s.probesEnabled() {
 		go s.runProbeLoop(ctx)
 	}
+
+	// Passive connection-lifecycle stats: poll /connections every ~10s
+	// (localhost, no airport traffic) to derive per-node fail rate.
+	go s.runPassiveLoop(ctx)
 
 	tick := time.NewTicker(s.cfg.ScoringInterval)
 	defer tick.Stop()
@@ -336,6 +381,9 @@ func (s *Scorer) score(ctx context.Context) {
 			}
 			h.Probes = cp
 		}
+		// Attach passive connection-lifecycle stats (computed under the
+		// same lock we already hold in score()).
+		h.Passive = s.passiveStatsLocked(tag)
 		st.health = h
 		nodes = append(nodes, h)
 	}
