@@ -1,0 +1,100 @@
+# leap-gateway GitLab CI/CD
+#
+# Prerequisites (one-time setup):
+#   1. Register a GitLab Runner on the internal network (192.168.70.x subnet).
+#      The runner needs: Go, ssh-client. Tag it `internal`.
+#      See: docs/ops.md — "Register CI Runner"
+#
+#   2. Add a deploy SSH key:
+#      - ssh-keygen -t ed25519 -f deploy_key -N ""
+#      - Add deploy_key.pub to dianwei@89 and dianwei@92 authorized_keys
+#      - GitLab → Settings → CI/CD → Variables → add DEPLOY_SSH_KEY (deploy_key content, masked)
+#
+#   3. Mirror this repo to GitLab (or use GitLab as primary remote):
+#      git remote add gitlab http://<gitlab>/czgreg/leap-gateway.git
+
+stages:
+  - test
+  - build
+  - deploy
+
+variables:
+  GOPATH: $CI_PROJECT_DIR/.go-cache
+  CGO_ENABLED: "0"
+  GOOS: linux
+  GOARCH: amd64
+  STAGING_HOST: "192.168.70.89"
+  PROD_HOST:    "192.168.70.92"
+  REMOTE_USER:  dianwei
+
+# ---------------------------------------------------------------------------
+# Stage: test
+# ---------------------------------------------------------------------------
+test:
+  stage: test
+  tags: [internal]
+  cache:
+    key: go-mod-$CI_COMMIT_REF_SLUG
+    paths: [.go-cache/]
+  script:
+    - go vet ./...
+    - go test ./...
+
+# ---------------------------------------------------------------------------
+# Stage: build — compile linux/amd64 binary, archive as artifact
+# ---------------------------------------------------------------------------
+build:
+  stage: build
+  tags: [internal]
+  needs: [test]
+  cache:
+    key: go-mod-$CI_COMMIT_REF_SLUG
+    paths: [.go-cache/]
+  script:
+    - mkdir -p build
+    - VERSION=$(git describe --tags --always --dirty 2>/dev/null || echo "$CI_COMMIT_SHORT_SHA")
+    - echo "Building $VERSION"
+    - go build
+        -ldflags="-s -w -X main.Version=$VERSION"
+        -o build/leap-gateway-linux-amd64
+        ./cmd/gateway
+    - ls -lh build/leap-gateway-linux-amd64
+  artifacts:
+    name: "leap-gateway-$CI_COMMIT_SHORT_SHA"
+    paths: [build/leap-gateway-linux-amd64]
+    expire_in: 30 days
+    when: on_success
+
+# ---------------------------------------------------------------------------
+# Stage: deploy — staging (auto on main) and production (manual)
+# ---------------------------------------------------------------------------
+.deploy_base: &deploy_base
+  stage: deploy
+  tags: [internal]    # runner is on the same subnet as 89/92 — direct SSH
+  needs: [build]
+  before_script:
+    - install -m 600 -D /dev/null ~/.ssh/id_deploy
+    - echo "$DEPLOY_SSH_KEY" > ~/.ssh/id_deploy
+    - echo -e "Host *\n  StrictHostKeyChecking no\n  IdentityFile ~/.ssh/id_deploy" > ~/.ssh/config
+    - chmod +x scripts/deploy.sh
+
+deploy-staging:
+  <<: *deploy_base
+  environment:
+    name: staging
+    url: http://$STAGING_HOST:18080
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"
+  script:
+    - REMOTE_USER=$REMOTE_USER scripts/deploy.sh --skip-build "$STAGING_HOST"
+
+deploy-production:
+  <<: *deploy_base
+  environment:
+    name: production
+    url: http://$PROD_HOST:18080
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"
+      when: manual      # requires explicit click in GitLab UI
+  script:
+    - REMOTE_USER=$REMOTE_USER scripts/deploy.sh --skip-build "$PROD_HOST"
