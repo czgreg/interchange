@@ -144,16 +144,28 @@ func (r *Renderer) buildProxyGroups(outbounds []subscribe.Outbound) []map[string
 		})
 	}
 
-	// Bootstrap edge case: empty pool. Emit a usable "out" that falls back
-	// to DIRECT so mihomo loads. Drops us-pool/pin entirely.
+	// Bootstrap edge case: empty pool (no subscribed outbounds yet — first
+	// boot, --validate, or --render-once). Drop us-pool/pin/probe-out and
+	// stub each named pool to a DIRECT-only `select` so that buildRules
+	// references like `RULE-SET,geosite-openai,openai-pool` still resolve
+	// and mihomo accepts the config. Rules transparently fall through to
+	// DIRECT until the first subscription refresh re-renders with members.
 	if len(pool) == 0 {
-		return []map[string]any{
+		out := []map[string]any{
 			{
 				"name":    outSelector,
 				"type":    "select",
 				"proxies": []string{"DIRECT"},
 			},
 		}
+		for _, p := range r.pools {
+			out = append(out, map[string]any{
+				"name":    p.Name,
+				"type":    "select",
+				"proxies": []string{"DIRECT"},
+			})
+		}
+		return out
 	}
 	return groups
 }

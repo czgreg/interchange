@@ -323,8 +323,9 @@ func dnsListenAddr(cfg *config.Config) string {
 //  1. Renders the mihomo YAML into a temp directory (never writes to
 //     cfg.DataPlane.ConfigPath). Uses RenderOnly so the renderer itself
 //     does no I/O.
-//  2. Symlinks the real rule-sets dir into the temp workdir so mihomo -t
-//     can resolve rule-provider paths.
+//  2. Sets SAFE_PATHS=<rule-sets dir> so mihomo -t accepts the absolute
+//     rule-provider paths in the rendered YAML (they live outside the temp
+//     working dir but are read-only).
 //  3. Runs `mihomo -d <tempdir> -t` for full syntax + provider validation.
 //  4. Checks configuration constraints (tproxy_port must be > 0,
 //     pool rule_sets .mrs files must exist on disk).
@@ -350,16 +351,22 @@ func runValidate(cfg *config.Config, r api.Renderer) error {
 	}
 	slog.Info("validate: rendered to temp", "path", tmpConfig)
 
-	// 2. Symlink rule-sets dir so mihomo -t can find .mrs files referenced
-	//    by absolute paths in the rendered config.
+	// 2. mihomo's SAFE_PATHS check: rule-providers in the rendered YAML are
+	//    absolute paths under cfg.DataPlane.RuleSetsDir (e.g.
+	//    /var/lib/leap/mihomo/rule-sets/geosite-cn.mrs). Without this env var
+	//    `mihomo -t` rejects them because they are outside the temp working
+	//    dir we pass via `-d`. Granting read access to the real rule-sets dir
+	//    via SAFE_PATHS avoids rewriting paths in the rendered bytes.
+	safePaths := ""
 	if cfg.DataPlane.RuleSetsDir != "" {
-		if err := os.Symlink(cfg.DataPlane.RuleSetsDir, filepath.Join(tmpDir, "rule-sets")); err != nil && !os.IsExist(err) {
-			slog.Warn("validate: could not symlink rule-sets (mihomo -t may warn about missing files)", "err", err)
-		}
+		safePaths = cfg.DataPlane.RuleSetsDir
 	}
 
 	// 3. mihomo -t: full YAML + provider-reference syntax check.
 	mihomoCmd := exec.Command("/usr/local/bin/mihomo", "-d", tmpDir, "-t")
+	if safePaths != "" {
+		mihomoCmd.Env = append(os.Environ(), "SAFE_PATHS="+safePaths)
+	}
 	if cmdOut, err := mihomoCmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("validate: mihomo -t failed: %w\n%s", err, cmdOut)
 	}
