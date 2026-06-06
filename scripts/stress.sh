@@ -117,8 +117,10 @@ for tier in $TIERS; do
     sed -n "${idx}p" "$WORKDIR/lat.sorted"
   }
   p50=$(pick 50); p95=$(pick 95)
-  reqps=$(awk -v t="$total" -v s="$TIER_SECS" 'BEGIN{printf "%.0f", t/s}')
-  errpct=$(awk -v e="$err" -v t="$total" 'BEGIN{printf "%.1f", t>0?e*100.0/t:0}')
+  reqps=$(awk -v t="${total:-0}" -v s="$TIER_SECS" 'BEGIN{ printf "%.0f", t/s }')
+  # if/else instead of a ternary in printf args — Ubuntu's mawk parse-errors
+  # on `printf fmt, cond?a:b` (comma ambiguity).
+  errpct=$(awk -v e="${err:-0}" -v t="${total:-0}" 'BEGIN{ if (t>0) printf "%.1f", e*100.0/t; else printf "0.0" }')
   printf '%-7s %-7s %-8s %-8s %-8s %-8s %-8s\n' \
     "$tier" "$cpu_avg" "$rss_last" "$reqps" "${p50:-0}" "${p95:-0}" "$errpct"
 
