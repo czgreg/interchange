@@ -217,7 +217,14 @@ pools: []
 # can compare live user count against the ceiling. Omit the block entirely
 # until you've actually stress-tested.
 capacity:
-  sustained_max_users: 0    # CPU < ~50%, no latency spike — safe ceiling
-  degraded_max_users:  0    # latency spikes but still functional — hard ceiling
-  measured_at:   ""         # e.g. "2026-06-08"
-  measured_with: ""         # e.g. "bf6e610 / mihomo v1.19.26"
+  # Reference numbers measured on 89 (4 subs / ~22 US nodes) 2026-06-06.
+  # Re-run scripts/stress.sh on YOUR node and overwrite — these are a
+  # starting anchor, not a universal truth. Finding: mihomo CPU stayed
+  # <26% up to 200 synthetic continuous-load workers with 0 errors; the
+  # ceiling is cross-border airport throughput (latency climbs), not the
+  # local data plane. Workers are ~5-10x a real bursty employee, so the
+  # real sustained user count is well above these conservative floors.
+  sustained_max_users: 50    # p95 < 2s   (tier 50, continuous-load workers)
+  degraded_max_users:  150   # p95 ~5s    (tier 150, still 0 errors)
+  measured_at:   "2026-06-06"
+  measured_with: "stress.sh on 89 / mihomo v1.19.26; upstream-bandwidth-bound"
