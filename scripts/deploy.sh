@@ -74,7 +74,7 @@ fi
 # ---------------------------------------------------------------------------
 for HOST in "${HOSTS[@]}"; do
   log "deploying to $REMOTE_USER@$HOST ..."
-  SSH="ssh -t -o ConnectTimeout=10 -o StrictHostKeyChecking=no $REMOTE_USER@$HOST"
+  SSH="ssh -o ConnectTimeout=10 -o StrictHostKeyChecking=no $REMOTE_USER@$HOST"
   SCP_TO="scp -O -o ConnectTimeout=10 -o StrictHostKeyChecking=no"
 
   # Connectivity check
@@ -102,9 +102,9 @@ for HOST in "${HOSTS[@]}"; do
 
     log "  pushing gateway.yaml → /etc/leap/gateway.yaml"
     REMOTE_BAK="/etc/leap/gateway.yaml.bak.$(date +%Y%m%d-%H%M%S)"
-    run $SSH "sudo cp /etc/leap/gateway.yaml $REMOTE_BAK 2>/dev/null || true"
+    run $SSH "sudo bash -c 'cp /etc/leap/gateway.yaml $REMOTE_BAK 2>/dev/null || true'"
     run $SCP_TO "$CONFIG_FILE" "$REMOTE_USER@$HOST:/tmp/gateway.yaml.new"
-    run $SSH "sudo install -m 0640 /tmp/gateway.yaml.new /etc/leap/gateway.yaml"
+    run $SSH "sudo bash -c 'install -m 0640 /tmp/gateway.yaml.new /etc/leap/gateway.yaml'"
     ok "  config pushed (backup: $REMOTE_BAK)"
   fi
 
@@ -114,15 +114,13 @@ for HOST in "${HOSTS[@]}"; do
 
   # Validate render-once on node with the live config
   log "  validating render-once on node ..."
-  run $SSH "sudo /tmp/leap-gateway.new --config /etc/leap/gateway.yaml --render-once > /dev/null \
-    || { echo VALIDATE_FAILED; exit 1; }" \
+  run $SSH "sudo bash -c '/tmp/leap-gateway.new --config /etc/leap/gateway.yaml --render-once > /dev/null || { echo VALIDATE_FAILED; exit 1; }'" \
     || fail "$HOST: render-once validation failed on node — binary NOT installed"
   ok "  render-once passed"
 
   # Atomic install + restart
   log "  installing + restarting ..."
-  run $SSH "sudo install -m 0755 /tmp/leap-gateway.new /usr/local/bin/leap-gateway \
-    && sudo systemctl restart leap-gateway"
+  run $SSH "sudo bash -c 'install -m 0755 /tmp/leap-gateway.new /usr/local/bin/leap-gateway && systemctl restart leap-gateway'"
 
   # Verify
   log "  verifying ..."
@@ -134,7 +132,7 @@ for HOST in "${HOSTS[@]}"; do
   fi
   ok "  $HOST running version $DEPLOYED_VER"
 
-  run $SSH "sudo rm -f /tmp/leap-gateway.new /tmp/gateway.yaml.new"
+  run $SSH "sudo bash -c 'rm -f /tmp/leap-gateway.new /tmp/gateway.yaml.new'"
 done
 
 ok "deploy complete: ${HOSTS[*]}"
