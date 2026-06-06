@@ -1,39 +1,36 @@
 [Unit]
-Description=Inject leap nft table inet leap + fwmark policy routing
-# Engine-agnostic: list both possible data-plane units in After/PartOf.
-# Whichever one is actually enabled (per cfg.SingBox.Engine) drives the
-# restart cascade — when that engine restarts the kernel destroys utun-leap
-# along with our `default dev utun-leap` route in table 100, and leap-nft
-# must re-inject. The other unit is never running, so listing it is a no-op.
-After=feilian-tun@tun0.service leap-singbox.service leap-mihomo.service
+Description=Inject leap nft rules + TPROXY iptables rules for FeiLian forwarding
+# leap-nft manages two independent things:
+#   1. nft table inet leap — DNS pass-through rule on tun0 (dport 53 accept)
+#   2. iptables TPROXY rules — intercept non-DNS TCP/UDP on tun0, route to
+#      mihomo's tproxy-port (preserving real client sourceIP 10.8.x.x)
+#
+# With TPROXY as the primary data path, we no longer depend on utun-leap.
+# The old TUN-based design needed utun-leap because traffic was routed
+# fwmark→utun-leap; TPROXY intercepts on tun0 (FeiLian's interface) and
+# hands packets directly to mihomo, so utun-leap is irrelevant here.
+#
+# PartOf=leap-mihomo.service: when mihomo restarts, re-run iproute.sh up
+# so the iptables TPROXY chain and ip rule are cleanly re-applied.
+After=feilian-tun@tun0.service leap-mihomo.service
 BindsTo=feilian-tun@tun0.service
-PartOf=leap-singbox.service leap-mihomo.service
-# Don't auto-pull either engine; install.sh enables exactly one.
-# Don't let systemd give up on us during a data-plane crash-loop.
+PartOf=leap-mihomo.service
 StartLimitIntervalSec=0
 
 [Service]
 Type=oneshot
 RemainAfterExit=yes
 
-# Wait up to 60s for the active data-plane unit to create utun-leap. Longer
-# than 30s because a config error sends the engine into a 5-10s restart
-# loop and we should outlast a transient one.
-ExecStartPre=/bin/bash -c 'for i in $(seq 1 60); do ip link show utun-leap >/dev/null 2>&1 && exit 0; sleep 1; done; echo "utun-leap not present after 60s" >&2; exit 1'
-
 ExecStart=/usr/sbin/nft -f /etc/leap/nft.conf
 ExecStart=/etc/leap/iproute.sh up
 
-# On stop / restart: tear down our nft table + ip rule + ip route. The "-"
-# prefix tells systemd to ignore non-zero exit (in case nothing's installed).
 ExecStop=-/usr/sbin/nft delete table inet leap
 ExecStop=-/etc/leap/iproute.sh down
 
-# Self-heal when utun-leap was unavailable on first start (engine was
-# crash-looping). Without this, oneshot units stay in failed state forever
-# even after the engine recovers.
+# Restart on failure so a transient iptables error (e.g. xt_TPROXY module
+# not loaded yet) is retried rather than leaving the node unprotected.
 Restart=on-failure
-RestartSec=15s
+RestartSec=5s
 
 [Install]
 WantedBy=multi-user.target

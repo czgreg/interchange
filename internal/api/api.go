@@ -45,6 +45,9 @@ type Renderer interface {
 	// Write renders a complete engine config from the given outbounds and
 	// writes it to disk. Returns the rendered bytes for inspection.
 	Write(outbounds []subscribe.Outbound) ([]byte, error)
+	// RenderOnly renders the config and returns the bytes WITHOUT writing to
+	// disk. Used by --validate to avoid touching the live production config.
+	RenderOnly(outbounds []subscribe.Outbound) ([]byte, error)
 	// SetSubscriptions replaces the captured subscription order in place.
 	// Used by API handlers that mutate cfg and need a re-render.
 	SetSubscriptions(subs []config.SubscriptionEntry)

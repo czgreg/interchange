@@ -37,6 +37,7 @@ func main() {
 	cfgPath := flag.String("config", "/etc/leap/gateway.yaml", "config file path")
 	renderOnce := flag.Bool("render-once", false, "render bootstrap mihomo config and exit (used by install.sh to avoid first-boot fail-restart)")
 	validate := flag.Bool("validate", false, "render config, run mihomo -t syntax check, validate constraints, then exit")
+	printEnv := flag.Bool("print-env", false, "print shell-sourceable env vars from gateway.yaml for use by iproute.sh / install.sh, then exit")
 	flag.Parse()
 
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
@@ -46,6 +47,23 @@ func main() {
 	if err != nil {
 		slog.Error("load config", "err", err)
 		os.Exit(1)
+	}
+
+	// --print-env: emit shell-sourceable variables consumed by iproute.sh
+	// and install.sh. Avoids fragile grep/awk YAML parsing in shell scripts
+	// for values that must be exact (client_subnet, tproxy_port, api port).
+	if *printEnv {
+		apiPort := cfg.API.Listen
+		if idx := len(apiPort) - 1; idx >= 0 {
+			for i := len(apiPort) - 1; i >= 0; i-- {
+				if apiPort[i] == ':' { apiPort = apiPort[i+1:]; break }
+			}
+		}
+		fmt.Printf("export LEAP_CLIENT_SUBNET=%q\n", cfg.Node.ClientSubnet)
+		fmt.Printf("export LEAP_TPROXY_PORT=%d\n", cfg.DataPlane.TProxyPort)
+		fmt.Printf("export LEAP_TUN0_IFACE=tun0\n")
+		fmt.Printf("export LEAP_API_PORT=%q\n", apiPort)
+		return
 	}
 
 	// Wire fetcher through mihomo's loopback HTTP inbound so subscription
@@ -142,6 +160,18 @@ func main() {
 		return api.RunRefresh(ctx, mgr, renderer, dpCtl)
 	})
 
+	// --validate must run BEFORE any write to the production config so it
+	// never clobbers the live config.yaml. It renders to a temp dir, runs
+	// mihomo -t there, checks constraints, then exits.
+	if *validate {
+		if err := runValidate(cfg, renderer); err != nil {
+			slog.Error("validation failed", "err", err)
+			os.Exit(1)
+		}
+		slog.Info("validation passed")
+		return
+	}
+
 	// Bootstrap: write an initial mihomo config so the data plane can start
 	// before the first subscription refresh completes.
 	//
@@ -166,18 +196,6 @@ func main() {
 	}
 
 	if *renderOnce {
-		return
-	}
-
-	// --validate: render-once + mihomo -t syntax check + constraint validation.
-	// Exits 0 on success, non-zero on any failure. Designed to be run from
-	// deploy.sh and CI before restarting mihomo.
-	if *validate {
-		if err := runValidate(cfg, renderer); err != nil {
-			slog.Error("validation failed", "err", err)
-			os.Exit(1)
-		}
-		slog.Info("validation passed")
 		return
 	}
 
@@ -300,42 +318,62 @@ func dnsListenAddr(cfg *config.Config) string {
 	return ""
 }
 
-// runValidate performs pre-deploy validation:
-//  1. Renders a fresh mihomo config from the current gateway.yaml.
-//  2. Runs `mihomo -d <workdir> -t` for YAML syntax validation.
-//  3. Checks configuration constraints (per_terminal requires tproxy_port,
+// runValidate performs pre-deploy validation WITHOUT touching the live
+// production config:
+//  1. Renders the mihomo YAML into a temp directory (never writes to
+//     cfg.DataPlane.ConfigPath). Uses RenderOnly so the renderer itself
+//     does no I/O.
+//  2. Symlinks the real rule-sets dir into the temp workdir so mihomo -t
+//     can resolve rule-provider paths.
+//  3. Runs `mihomo -d <tempdir> -t` for full syntax + provider validation.
+//  4. Checks configuration constraints (per_terminal requires tproxy_port,
 //     pool rule_sets .mrs files must exist on disk).
+//  5. Cleans up the temp dir.
 //
-// Called by --validate flag. Designed to be invoked from deploy.sh before
-// restarting mihomo, surfacing bad configs before they reach production.
+// Called by --validate flag BEFORE any bootstrap write. Design goal: a bad
+// gateway.yaml or renderer bug must never reach the live mihomo process.
 func runValidate(cfg *config.Config, r api.Renderer) error {
-	// 1. Render the config (writes the current config.yaml from subscriptions
-	//    already in memory — nil renders a bootstrap with no nodes, which is
-	//    enough to validate structure and pool/rule references).
-	if _, err := r.Write(nil); err != nil {
-		return fmt.Errorf("render: %w", err)
+	// 1. Render to temp dir (no writes to production).
+	tmpDir, err := os.MkdirTemp("", "leap-validate-*")
+	if err != nil {
+		return fmt.Errorf("validate: mktemp: %w", err)
 	}
-	slog.Info("validate: rendered config", "path", r.Path())
+	defer os.RemoveAll(tmpDir)
 
-	// 2. mihomo -t: syntax + provider-reference check.
-	workdir := filepath.Dir(r.Path())
-	mihomoCmd := exec.Command("/usr/local/bin/mihomo", "-d", workdir, "-t")
-	if out, err := mihomoCmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("mihomo -t failed: %w\n%s", err, out)
+	out, err := r.RenderOnly(nil)
+	if err != nil {
+		return fmt.Errorf("validate: render: %w", err)
+	}
+	tmpConfig := filepath.Join(tmpDir, "config.yaml")
+	if err := os.WriteFile(tmpConfig, out, 0o644); err != nil {
+		return fmt.Errorf("validate: write temp config: %w", err)
+	}
+	slog.Info("validate: rendered to temp", "path", tmpConfig)
+
+	// 2. Symlink rule-sets dir so mihomo -t can find .mrs files referenced
+	//    by absolute paths in the rendered config.
+	if cfg.DataPlane.RuleSetsDir != "" {
+		if err := os.Symlink(cfg.DataPlane.RuleSetsDir, filepath.Join(tmpDir, "rule-sets")); err != nil && !os.IsExist(err) {
+			slog.Warn("validate: could not symlink rule-sets (mihomo -t may warn about missing files)", "err", err)
+		}
+	}
+
+	// 3. mihomo -t: full YAML + provider-reference syntax check.
+	mihomoCmd := exec.Command("/usr/local/bin/mihomo", "-d", tmpDir, "-t")
+	if cmdOut, err := mihomoCmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("validate: mihomo -t failed: %w\n%s", err, cmdOut)
 	}
 	slog.Info("validate: mihomo -t passed")
 
-	// 3. Configuration constraints.
+	// 4. Configuration constraints.
 	if cfg.LoadBalance.PerTerminal && cfg.DataPlane.TProxyPort == 0 {
-		return fmt.Errorf("load_balance.per_terminal=true requires data_plane.tproxy_port to be set (TPROXY preserves real client sourceIP; TUN mode collapses all clients to 198.18.0.0)")
+		return fmt.Errorf("validate: load_balance.per_terminal=true requires data_plane.tproxy_port (TPROXY preserves real srcIP; TUN collapses all clients to 198.18.0.0)")
 	}
-
-	// 4. Pool rule_sets .mrs files must exist.
 	for _, pool := range cfg.Pools {
 		for _, tag := range pool.RuleSets {
-			path := filepath.Join(cfg.DataPlane.RuleSetsDir, tag+".mrs")
-			if _, err := os.Stat(path); err != nil {
-				return fmt.Errorf("pool %q rule_set %q: .mrs not found at %s — run scripts/stage.sh to pre-fetch", pool.Name, tag, path)
+			p := filepath.Join(cfg.DataPlane.RuleSetsDir, tag+".mrs")
+			if _, err := os.Stat(p); err != nil {
+				return fmt.Errorf("validate: pool %q rule_set %q: .mrs not found at %s — run scripts/stage.sh", pool.Name, tag, p)
 			}
 		}
 	}

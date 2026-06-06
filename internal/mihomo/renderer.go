@@ -76,7 +76,7 @@ type Renderer struct {
 	probeListener bool
 	// perTerminal, when true, pins each client terminal's whitelisted
 	// traffic to one egress node via SRC-IP-CIDR slices under a `perterm`
-	// sub-rule. Requires TUN stack=gvisor (real source IP).
+	// sub-rule. Requires data_plane.tproxy_port (TPROXY preserves real srcIP).
 	perTerminal bool
 }
 
@@ -166,16 +166,23 @@ func (r *Renderer) RenderWithPools(outbounds []subscribe.Outbound, usPool []stri
 // For mihomo this is typically /etc/leap/mihomo/config.yaml.
 func (r *Renderer) Path() string { return r.cfg.ConfigPath }
 
+// RenderOnly renders the config and returns the bytes WITHOUT writing to disk.
+// Safe to call when you need the rendered YAML for inspection or temp-path
+// validation without touching the production config.
+func (r *Renderer) RenderOnly(outbounds []subscribe.Outbound) ([]byte, error) {
+	doc := r.build(outbounds)
+	return yaml.Marshal(doc)
+}
+
 // Write renders a complete mihomo Clash YAML config and writes it atomically
 // to r.cfg.ConfigPath. Returns the rendered bytes for inspection.
 //
 // Atomic rename through a .tmp sibling so a render mid-flight never leaves
 // mihomo with a half-written config.
 func (r *Renderer) Write(outbounds []subscribe.Outbound) ([]byte, error) {
-	doc := r.build(outbounds)
-	out, err := yaml.Marshal(doc)
+	out, err := r.RenderOnly(outbounds)
 	if err != nil {
-		return nil, fmt.Errorf("mihomo render: marshal yaml: %w", err)
+		return nil, fmt.Errorf("mihomo render: %w", err)
 	}
 	if err := os.MkdirAll(filepath.Dir(r.cfg.ConfigPath), 0o755); err != nil {
 		return nil, fmt.Errorf("mihomo render: mkdir: %w", err)

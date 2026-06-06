@@ -112,11 +112,11 @@ for HOST in "${HOSTS[@]}"; do
   log "  pushing binary → /tmp/leap-gateway.new"
   run $SCP_TO "$BIN" "$REMOTE_USER@$HOST:/tmp/leap-gateway.new"
 
-  # Validate render-once on node with the live config
-  log "  validating render-once on node ..."
-  run $SSH "sudo bash -c '/tmp/leap-gateway.new --config /etc/leap/gateway.yaml --render-once > /dev/null || { echo VALIDATE_FAILED; exit 1; }'" \
-    || fail "$HOST: render-once validation failed on node — binary NOT installed"
-  ok "  render-once passed"
+  # Validate on node using --validate (temp dir, never writes production config)
+  log "  validating with --validate on node ..."
+  run $SSH "sudo bash -c '/tmp/leap-gateway.new --config /etc/leap/gateway.yaml --validate'" \
+    || fail "$HOST: --validate failed on node — binary NOT installed"
+  ok "  validation passed"
 
   # Atomic install + restart
   log "  installing + restarting ..."

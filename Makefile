@@ -8,7 +8,7 @@
 #   make deploy-92         # deploy to production 92
 #   make deploy-all        # 89 先，92 后
 #   make deploy-yaml       # 仅推 gateway.yaml（不换二进制）
-#   make deploy-gvisor     # 推 gvisor 配置到 89（per_terminal 前置步骤）
+#   make deploy-tproxy     # 推 TPROXY 配置到 89（tproxy_port; per_terminal 前置）
 #   make deploy-perterm    # 推 per_terminal:true 配置到 89
 #   make status            # /api/status
 #   make health            # /api/proxies/active
@@ -95,8 +95,8 @@ deploy-yaml:  ## 仅推 gateway.yaml + 重启  GATEWAY_YAML=./path/to/yaml
 	  sudo systemctl restart leap-gateway && rm -f /tmp/gateway.yaml.new && \
 	  sleep 1 && sudo journalctl -u leap-gateway -n 5 --no-pager'
 
-.PHONY: deploy-gvisor
-deploy-gvisor: build-linux  ## 推 gvisor TUN 配置到 89（per_terminal 前置）
+.PHONY: deploy-tproxy
+deploy-tproxy: build-linux  ## 推 TPROXY 配置到 89（tproxy_port; gvisor 不是前提）
 	scripts/deploy.sh --config /tmp/gw89-gvisor.yaml --skip-build 192.168.70.89
 
 .PHONY: deploy-perterm
