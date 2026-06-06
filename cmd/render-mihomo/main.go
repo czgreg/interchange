@@ -1,6 +1,6 @@
 // Command render-mihomo emits a mihomo Clash YAML config for a gateway.yaml,
-// fetching subscriptions live. Used for offline validation of the mihomo
-// renderer before swapping leap-singbox.service to mihomo.
+// fetching subscriptions live. Useful for offline debugging / validating the
+// mihomo renderer output without running the full gateway process.
 //
 // Usage:
 //

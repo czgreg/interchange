@@ -1,6 +1,6 @@
-# DNS 污染对抗 — fake-IP 实战版
+# DNS 子系统设计
 
-> 本文展开 [design.md §6](./design.md#6-dns-子系统--fake-ip) 的 DNS 部分，覆盖每种污染形态、对应防御、节点上的实测数据，以及 H1（DNS push 语义）的应急退路。
+> 覆盖 DNS 污染形态、fake-IP 防御机制、nameserver-policy 路由，以及 TPROXY 模式下的 DNS 路径。
 
 ## 1. 污染形态清单
 

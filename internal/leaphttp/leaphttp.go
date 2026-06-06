@@ -5,7 +5,7 @@
 //
 // # Why this package exists
 //
-// leap-gateway runs co-located with the mihomo (or sing-box) data plane.
+// leap-gateway runs co-located with the mihomo data plane.
 // Mihomo's fake-IP DNS rewrites every overseas A/AAAA answer to 198.18.x.x
 // at the HOST RESOLVER level. A direct `net.Dial` from inside leap-gateway
 // — running as the same user, sharing the same /etc/resolv.conf — to a
