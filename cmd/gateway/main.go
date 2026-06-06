@@ -326,7 +326,7 @@ func dnsListenAddr(cfg *config.Config) string {
 //  2. Symlinks the real rule-sets dir into the temp workdir so mihomo -t
 //     can resolve rule-provider paths.
 //  3. Runs `mihomo -d <tempdir> -t` for full syntax + provider validation.
-//  4. Checks configuration constraints (per_terminal requires tproxy_port,
+//  4. Checks configuration constraints (tproxy_port must be > 0,
 //     pool rule_sets .mrs files must exist on disk).
 //  5. Cleans up the temp dir.
 //
@@ -366,8 +366,14 @@ func runValidate(cfg *config.Config, r api.Renderer) error {
 	slog.Info("validate: mihomo -t passed")
 
 	// 4. Configuration constraints.
-	if cfg.LoadBalance.PerTerminal && cfg.DataPlane.TProxyPort == 0 {
-		return fmt.Errorf("validate: load_balance.per_terminal=true requires data_plane.tproxy_port (TPROXY preserves real srcIP; TUN collapses all clients to 198.18.0.0)")
+	// TPROXY is the production data path. TUN-only mode collapses all
+	// client sourceIPs to 198.18.0.0, which silently breaks per-terminal
+	// routing, /connections metadata, and any future feature that depends
+	// on real srcIP. leap-nft.service / iproute.sh also run unconditionally,
+	// so a 0/unset tproxy_port would attempt to install an iptables rule
+	// targeting port 0. Refuse to validate it.
+	if cfg.DataPlane.TProxyPort == 0 {
+		return fmt.Errorf("validate: data_plane.tproxy_port must be > 0 (TPROXY is the production path; TUN-only collapses all clients to 198.18.0.0). Set tproxy_port: 7893 in gateway.yaml")
 	}
 	for _, pool := range cfg.Pools {
 		for _, tag := range pool.RuleSets {

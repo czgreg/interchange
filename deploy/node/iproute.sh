@@ -24,12 +24,18 @@ ENV_FILE="/etc/leap/env"
 [ -f "$ENV_FILE" ] && source "$ENV_FILE"
 
 CLIENT_SUBNET="${LEAP_CLIENT_SUBNET:-}"
-TPROXY_PORT="${LEAP_TPROXY_PORT:-7893}"
+TPROXY_PORT="${LEAP_TPROXY_PORT:-0}"
 TUN0_IFACE="${LEAP_TUN0_IFACE:-tun0}"
 TPROXY_MARK="0x44"
 TPROXY_TABLE="101"
 
 [ -n "$CLIENT_SUBNET" ] || { echo "LEAP_CLIENT_SUBNET not set in $ENV_FILE" >&2; exit 1; }
+# TPROXY is the production data path; tproxy_port=0 means gateway.yaml is
+# misconfigured (TUN-only mode is no longer supported — collapses all client
+# sourceIPs to 198.18.0.0). Fail fast rather than installing an iptables
+# rule targeting port 0.
+[ "$TPROXY_PORT" -gt 0 ] 2>/dev/null \
+    || { echo "LEAP_TPROXY_PORT=$TPROXY_PORT — set data_plane.tproxy_port (e.g. 7893) in /etc/leap/gateway.yaml and re-run install.sh" >&2; exit 1; }
 
 tproxy_up() {
     # Ensure xt_TPROXY module is loaded.

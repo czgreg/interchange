@@ -237,16 +237,19 @@ install_leap() {
 # 5. Render nft + install policy-routing helper
 
 install_nft() {
-  client_subnet=$(grep -E '^\s*client_subnet:' /etc/leap/gateway.yaml | awk -F'"' '{print $2}')
-  [ -n "$client_subnet" ] || fail "node.client_subnet not set in /etc/leap/gateway.yaml"
-  api_listen=$(grep -E '^\s*listen:' /etc/leap/gateway.yaml | head -1 | awk -F'"' '{print $2}')
-  api_port=${api_listen##*:}
-  [ -n "$api_port" ] || api_port=18080
-  sed -e "s|@CLIENT_SUBNET@|$client_subnet|g" \
-      -e "s|@API_PORT@|$api_port|g" \
+  # Source the env file written by install_leap (line 205, via --print-env).
+  # YAML-aware values from the binary's own parser; never grep YAML again
+  # for the same fields — install_leap's env and install_nft's nft.conf
+  # MUST agree, and re-parsing risks divergence on indent/quote edge cases.
+  # shellcheck disable=SC1091
+  source /etc/leap/env
+  [ -n "${LEAP_CLIENT_SUBNET:-}" ] || fail "LEAP_CLIENT_SUBNET missing in /etc/leap/env (re-run install_leap)"
+  [ -n "${LEAP_API_PORT:-}" ]      || fail "LEAP_API_PORT missing in /etc/leap/env (re-run install_leap)"
+  sed -e "s|@CLIENT_SUBNET@|$LEAP_CLIENT_SUBNET|g" \
+      -e "s|@API_PORT@|$LEAP_API_PORT|g" \
       "$SCRIPT_DIR/nft.conf.tmpl" \
     > /etc/leap/nft.conf
-  log "nft.conf rendered (client_subnet=$client_subnet, api_port=$api_port)"
+  log "nft.conf rendered (client_subnet=$LEAP_CLIENT_SUBNET, api_port=$LEAP_API_PORT)"
 
   install -m 0755 "$SCRIPT_DIR/iproute.sh" /etc/leap/iproute.sh
   log "iproute.sh installed"

@@ -152,7 +152,8 @@ type DataPlaneConfig struct {
 	// original IP header — confirmed on production node 89, 2026-06-06.
 	//
 	// per_terminal routing (load_balance.per_terminal) REQUIRES this field
-	// to be set. 0 = disabled (TUN mode only, per_terminal has no effect).
+	// to be set. Validation refuses tproxy_port=0 — TUN-only mode collapses
+	// all clients to 198.18.0.0 and is no longer a supported deploy path.
 	TProxyPort int `yaml:"tproxy_port"`
 
 	// Legacy ad-hoc inbounds, retained for cmd/selftest. Empty = omitted.

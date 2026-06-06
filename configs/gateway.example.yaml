@@ -139,10 +139,11 @@ data_plane:
   # socks_listen: "127.0.0.1:1080"
   # http_listen:  "127.0.0.1:1081"
 
-  # tproxy_port: TPROXY inbound port. Set to enable transparent-proxy mode,
-  # which preserves the real client sourceIP (10.8.x.x) in mihomo metadata.
-  # REQUIRED for load_balance.per_terminal. 0/unset = TUN-only mode.
-  tproxy_port: 0    # set to e.g. 7893 to enable TPROXY + per_terminal
+  # tproxy_port: TPROXY inbound port. REQUIRED — TPROXY is the production
+  # data path; it preserves the real client sourceIP (10.8.x.x) in mihomo
+  # metadata. TUN-only mode collapses all clients to 198.18.0.0 and is no
+  # longer supported (validate + iproute.sh both refuse tproxy_port=0).
+  tproxy_port: 7893
 
 # leap-gateway's NodeScorer: dynamic pool management. Scores every us-pool
 # candidate every scoring_interval; nodes that fail thresholds are evicted;
