@@ -738,4 +738,148 @@ curl -s $BASE/api/whitelist/resolved | jq -r '.domains[]' | head -20
 
 ---
 
+## 接入变更日志（控制平台 / 前端集成）
+
+按发布周期组织。**只列对外暴露的 API/JSON 字段变化**，内部代码重构不在此处记录。
+
+### 2026-06-06 — sing-box 引擎退役 + schema 清理（commit `bf6e610`）
+
+**Breaking — 字段移除**：
+
+| 端点 | 字段 | 处理 |
+|---|---|---|
+| `/api/proxies/active` | `watchdog`（顶级对象，含 `enabled / current_node / consecutive_healthy`） | **整段删除**。前端如有"看门狗状态"卡片，移除即可——mihomo 的 load-balance 自带 per-flow 健康检查，原 watchdog 在 mihomo 模式下已经 dead code |
+| `/api/proxies/active` | `leap.services.leap-singbox` | **不再返回**。services 现在只列 `leap-gateway` / `leap-mihomo` / `leap-nft`。前端遍历这个 map 即可，不要 hardcode key |
+
+**前端 grep 替换清单**：
+- `data.watchdog`、`response.watchdog.*` → 全部删除引用
+- `services["leap-singbox"]` → 不再返回；如果前端要统计"sing-box 是否在跑"，**永远是不在跑**，可直接删该 UI 元素
+
+**新增字段**（schema 定义已经合入，但运行时返回需等下面"即将发布"的 1.1 / 1.3 上线）：
+- `/api/nodes/health` 将在 1.3 落地后增加 `probes` 顶级对象 + 每节点 `probes` 字段（见下文 schema 预览）
+- `/api/proxies/active` 将在 1.1 落地后在 `pools[]` 数组里出现 `openai-pool` 等命名池
+
+### 2026-06-05 — 引擎相关字段重命名（commit `bf0b469`）
+
+之前几次小迭代的字段改名总账（如果还没跟上）：
+
+| 端点 | 旧字段 | 新字段 | 备注 |
+|---|---|---|---|
+| `/api/status` | `singbox_ok` | `engine_ok` | 含义不变（数据面 clash-api 可达） |
+| `/api/proxies/active` | `leap.singbox_version` | `leap.engine_version` + 新增 `leap.engine` | 旧字段返回的是 `/usr/local/bin/sing-box --version` 输出（误导性，mihomo 模式下报的是 sing-box CLI 工具版本，不是数据面）；新字段 `engine_version` 报真正在跑的引擎版本，`engine` 报引擎名（恒为 `"mihomo"`） |
+
+**前端 grep 替换清单**：
+- `singbox_ok` → `engine_ok`
+- `singbox_version` → `engine_version`（语义变更：现在是 mihomo 版本而不是 sing-box CLI 版本）
+- 显示"引擎"字段：直接用 `engine`（恒等于 `"mihomo"`，可省略整段 UI 也可）
+
+### 即将发布（schema 已定，运行时未上）
+
+#### 1.3 — `/api/nodes/health` 增加 site-specific probes
+
+每个节点新增 `probes` 字段，报告对各 probe 目标的可达性：
+
+```json
+{
+  "qualified": 17, "total": 22,
+  "last_pool_update": "...", "last_scored_at": "...",
+  "thresholds": { ... 现有 ... },
+
+  // 新顶级字段：各 probe 全局摘要，前端可做总览卡片
+  "probes": {
+    "chatgpt.com":         {"url": "https://chatgpt.com/",        "interval_sec": 300, "passing": 8,  "total": 22},
+    "claude.ai":           {"url": "https://claude.ai/",          "interval_sec": 300, "passing": 14, "total": 22},
+    "accounts.google.com": {"url": "https://accounts.google.com/","interval_sec": 300, "passing": 20, "total": 22},
+    "api.github.com":      {"url": "https://api.github.com/",     "interval_sec": 300, "passing": 19, "total": 22}
+  },
+
+  "nodes": [
+    {
+      "name": "ctc-02/US-C30-01-DMIT", "sub": "ctc-02",
+      "rtt_p50_ms": 154, "rtt_p95_ms": 165, "jitter_ms": 5,
+      "fail_rate": 0.0, "in_pool": true, "qualified": true,
+      "strikes": 0, "ok_rounds": 12, "reason": "",
+
+      // 新字段：每节点的 probes 结果（key = 全名 hostname）
+      "probes": {
+        "chatgpt.com": {
+          "ok":              true,
+          "status_code":     200,
+          "cf_mitigated":    false,
+          "latency_ms":      280,
+          "last_checked_at": "2026-06-06T12:35:42Z"
+        },
+        "claude.ai":           { "ok": true, "status_code": 200, "cf_mitigated": false, "latency_ms": 312, "last_checked_at": "..." },
+        "accounts.google.com": { "ok": true, "status_code": 200, "cf_mitigated": false, "latency_ms": 198, "last_checked_at": "..." },
+        "api.github.com":      { "ok": true, "status_code": 200, "cf_mitigated": false, "latency_ms": 234, "last_checked_at": "..." }
+      }
+    },
+    {
+      "name": "cyberguard/🇺🇸美国 01 | 1X | CMI 01",
+      "rtt_p50_ms": 356,
+      "in_pool": true,
+      "probes": {
+        "chatgpt.com": {
+          "ok":              false,
+          "status_code":     200,    // CF 给了 200 但
+          "cf_mitigated":    true,   //   header 里有 cf-mitigated: challenge → 算失败
+          "latency_ms":      850,
+          "last_checked_at": "...",
+          "last_error":      "cloudflare challenge (cf-mitigated: challenge)"
+        },
+        "claude.ai":     { "ok": true,  "status_code": 200, "latency_ms": 720 },
+        "accounts.google.com": { "ok": true, "status_code": 200, "latency_ms": 380 },
+        "api.github.com":      { "ok": false, "status_code": 0, "latency_ms": 10003,
+                                 "last_error": "context deadline exceeded" }
+      }
+    }
+  ]
+}
+```
+
+字段语义参考：
+
+| 字段 | 含义 |
+|---|---|
+| `probes.<host>.url` / `interval_sec` | 该 probe 的元信息 |
+| `probes.<host>.passing` / `total` | 集群层面通过 / 总数 |
+| `nodes[].probes.<host>.ok` | 综合 status_code + cf_mitigated 判定的"是否合格" |
+| `nodes[].probes.<host>.status_code` | HTTP 状态码（0 = 没拿到响应） |
+| `nodes[].probes.<host>.cf_mitigated` | CF challenge header 命中（`cf-mitigated: challenge`） |
+| `nodes[].probes.<host>.latency_ms` | 探测耗时；失败时是真等了多久（如 timeout 10s = 10003ms），不是 0 |
+| `nodes[].probes.<host>.last_checked_at` | RFC3339 时间戳 |
+| `nodes[].probes.<host>.last_error` | 失败原因（空 = 没失败过） |
+
+**前端可视化建议**：节点表格加 4 列状态点（每个 probe 一列），绿/灰/红，hover 显示 latency + last_error。
+
+#### 1.1 — `/api/proxies/active.pools[]` 增加命名池
+
+部署 `pools` 配置后（如 `openai-pool`），`active_proxy.pools` 数组会出现额外条目：
+
+```json
+"active_proxy": {
+  "active_urltest": "us-pool",
+  "pools": [
+    { "tag": "us-pool",     "pool_size": 17, "active": true,  "nodes": [...] },
+    { "tag": "openai-pool", "pool_size": 4,  "active": false, "nodes": [...] }
+  ]
+}
+```
+
+新池子的 `active=false` 是正常状态——只有 `out` selector 当前指向的池子 `active=true`。`openai-pool` 的成员只在 ChatGPT/Anthropic 这种 rule-set 命中时被路由进来，不出现在 `active_proxy.now`。
+
+**前端可视化建议**：池子列表分两列展示（默认池 vs 命名池），不要把 `openai-pool.active=false` 展示成"故障"。
+
+### 抽象层稳定性约定
+
+下面这些约定不会随版本变化：
+
+- **JSON key 命名规则**：`snake_case`，host 全名作 key 时含点（如 `"chatgpt.com"`），数值字段用 `_ms` / `_sec` / `_bps` 后缀标单位
+- **时间戳**：所有 `*_at` / `last_*` 字段都是 RFC3339（带时区）
+- **数组顺序**：`/api/nodes/health.nodes` 排序为"qualified 优先，再按 RTT 升序"；`/api/proxies/active.pools` 顺序为"`out` selector 的 `all` 列表顺序"
+- **可选字段**：返回里没有的 key 用 `?:` 处理，不要假设永远存在（如 `pools[].egress` 在 cold start 时缺失）
+- **breaking change 走这一节**：本文档每次 commit 都会在"接入变更日志"加一行；前端 CI 可以 grep `## 接入变更日志` 后的最新条目确认
+
+---
+
 *最后更新：2026-06-06，基于 mihomo-only 清理后版本（删除 sing-box-as-engine + watchdog；`data_plane:` / `node_qualify:` / `pools:` 三个顶级 block）*
