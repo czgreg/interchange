@@ -111,6 +111,60 @@ docs/
 
 [docs/api.md](docs/api.md) — 节点健康、订阅、白名单、UX 遥测，含前端接入变更日志。
 
+## 流量路径
+
+### 走本地（不进机场）
+
+| 类型 | 判断依据 | 出口 |
+|---|---|---|
+| DNS 查询 | nft `dport 53 accept`，不走 TPROXY | mihomo DNS server 本机处理 |
+| 国内域名 / IP | `geosite-cn` / `geoip-cn` 命中 | `DIRECT` → ens18 直出 |
+| 内网域名 | `fake-ip-filter` 排除 + DIRECT 出站 | 直连内网，不经机场 |
+| 非白名单海外域名 | whitelist 模式 `MATCH,DIRECT` | 直出 ens18（GFW 可能拦） |
+
+### 走机场
+
+| 类型 | 判断依据 | 路径 |
+|---|---|---|
+| 白名单海外域名 | `geosite-google/openai/anthropic/...` | per_terminal → 固定节点 → 出墙 |
+| 白名单 IP/CIDR | `geoip-telegram` 等 | us-pool → 出墙 |
+| overseas 模式所有非 CN | `MATCH,out` | us-pool consistent-hash → 出墙 |
+
+### 完整包路径
+
+```
+员工设备 (10.8.13.x)
+    │ 飞连 WireGuard
+    ▼
+tun0 (FeiLian VPN interface)
+    │
+    ├── DNS (dport 53) ─────────────────────► mihomo DNS server :53
+    │   nft accept，不走 TPROXY               fake-IP 返回 198.18.x.x
+    │                                         CN 域名 → CN DoH (doh.pub)
+    │                                         海外域名 → proxy DoH (1.1.1.1 via 机场)
+    │
+    └── 其他 TCP/UDP ─────────────────────── iptables TPROXY ──► mihomo :7893
+        fwmark 0x44 → table 101 → lo          保留真实 srcIP (10.8.13.x)
+                                                       │
+                          ┌────────────────────────────┤
+                          │                            │
+                   geosite-cn 命中             白名单域名命中
+                   (国内流量)                  (海外白名单)
+                          │                            │
+                          ▼                            ▼
+                    DIRECT → ens18          per_terminal SRC-IP-CIDR
+                    延迟 = 直连              10.8.13.5 → HRW → 节点 X (固定)
+                                            10.8.13.6 → HRW → 节点 Y (固定)
+                                                         │
+                                                   机场节点 → 目标网站
+```
+
+### 关键保证
+
+- **per_terminal**：同一终端的 ChatGPT 所有子域名（chatgpt.com / chat.openai.com / cdn.openai.com）全走同一节点，出口 IP 一致，不触发 CF session 异常。HRW 哈希保证节点变动时只影响该节点的终端，其余终端不受影响。
+- **CN 零损耗**：`geosite-cn / geoip-cn` 最前匹配，命中即 DIRECT，不经机场，延迟与直连一致。
+- **DNS 防污染**：全程经 mihomo fake-IP，proxy DoH 走机场出去解析，绕过 GFW UDP 53 抢答。
+
 ## 节点
 
 | 节点 | 子网 | 角色 | 状态 |
