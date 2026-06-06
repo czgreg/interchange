@@ -166,6 +166,17 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		resp["pool_total"] = snap.Total
 		resp["pool_last_update"] = snap.LastPoolUpdate
 	}
+	// Static capacity ceiling from the last offline stress test (see
+	// scripts/stress.sh + cfg.capacity). Only surfaced when configured —
+	// absent block = nobody has stress-tested this deployment yet.
+	if c := s.deps.Cfg.Capacity; c.SustainedMaxUsers > 0 || c.DegradedMaxUsers > 0 {
+		resp["capacity"] = map[string]any{
+			"sustained_max_users": c.SustainedMaxUsers,
+			"degraded_max_users":  c.DegradedMaxUsers,
+			"measured_at":         c.MeasuredAt,
+			"measured_with":       c.MeasuredWith,
+		}
+	}
 	writeJSON(w, http.StatusOK, resp)
 }
 

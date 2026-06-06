@@ -38,6 +38,32 @@ type Config struct {
 	// special needs (e.g. openai-pool for ChatGPT/Claude — only nodes
 	// passing chatgpt.com / claude.ai probes qualify).
 	Pools []PoolConfig `yaml:"pools"`
+
+	// Capacity holds the single-node user-capacity ceiling measured by an
+	// offline stress test (scripts/stress.sh). These are STATIC operator-
+	// supplied numbers — leap-gateway does not measure them at runtime
+	// (you can't load-test live production). Surfaced in /api/status so
+	// operators can compare current load against the known ceiling.
+	Capacity CapacityConfig `yaml:"capacity"`
+}
+
+// CapacityConfig records the stress-tested single-node ceiling. Update it
+// after each re-run of scripts/stress.sh; bump measured_with when the
+// binary or mihomo version changes (those invalidate the numbers).
+type CapacityConfig struct {
+	// SustainedMaxUsers is the concurrent-user count the node carries with
+	// mihomo CPU < ~50% and no latency spike. Safe operating ceiling.
+	SustainedMaxUsers int `yaml:"sustained_max_users"`
+	// DegradedMaxUsers is where latency starts to spike but the node still
+	// functions. Hard ceiling; do not exceed.
+	DegradedMaxUsers int `yaml:"degraded_max_users"`
+	// MeasuredAt is the date the stress test was run (free-form, e.g.
+	// "2026-06-08"). Audit aid.
+	MeasuredAt string `yaml:"measured_at"`
+	// MeasuredWith is the gateway version / mihomo version the test ran
+	// against (e.g. "bf6e610 / mihomo v1.19.26"). When the running version
+	// differs, the numbers are stale — re-test.
+	MeasuredWith string `yaml:"measured_with"`
 }
 
 type APIConfig struct {

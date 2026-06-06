@@ -198,3 +198,15 @@ pools: []
   #   rule_sets:
   #     - geosite-openai
   #     - geosite-anthropic
+
+# Static single-node capacity ceiling from scripts/stress.sh. These are
+# operator-supplied measurements, not runtime-measured — re-run the stress
+# test and update after any binary / mihomo version change (bump
+# measured_with). Surfaced in GET /api/status.capacity so the control plane
+# can compare live user count against the ceiling. Omit the block entirely
+# until you've actually stress-tested.
+capacity:
+  sustained_max_users: 0    # CPU < ~50%, no latency spike — safe ceiling
+  degraded_max_users:  0    # latency spikes but still functional — hard ceiling
+  measured_at:   ""         # e.g. "2026-06-08"
+  measured_with: ""         # e.g. "bf6e610 / mihomo v1.19.26"
