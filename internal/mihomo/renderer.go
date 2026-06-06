@@ -213,6 +213,13 @@ func (r *Renderer) build(outbounds []subscribe.Outbound) map[string]any {
 	doc["dns"] = r.buildDNS()
 	doc["tun"] = r.buildTUN()
 	doc["sniffer"] = r.buildSniffer()
+	// TPROXY port: when set, mihomo accepts transparent-proxy connections that
+	// the kernel routes via iptables TPROXY + fwmark. This preserves the
+	// real client sourceIP (10.8.x.x) unlike TUN mode, enabling per-terminal
+	// source-IP-based routing. TUN is kept for DNS hijacking (any:53).
+	if r.cfg.TProxyPort > 0 {
+		doc["tproxy-port"] = r.cfg.TProxyPort
+	}
 	doc["proxies"] = r.buildProxies(outbounds)
 	doc["proxy-groups"] = r.buildProxyGroups(outbounds)
 	doc["rule-providers"] = r.buildRuleProviders()

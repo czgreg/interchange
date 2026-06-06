@@ -1,11 +1,9 @@
 #!/usr/sbin/nft -f
 #
 # leap-gateway nft rules — table inet leap (independent of FeiLian's table ip nat).
-# Render-time placeholder @CLIENT_SUBNET@ is replaced by install.sh from
-# node.client_subnet in /etc/leap/gateway.yaml.
+# Render-time placeholders are replaced by install.sh.
 
-# Idempotent: nuke and re-add. flush+delete safely no-op when the table
-# doesn't exist on first install.
+# Idempotent: nuke and re-add.
 add table inet leap
 flush table inet leap
 
@@ -13,21 +11,19 @@ table inet leap {
   chain prerouting {
     type filter hook prerouting priority mangle; policy accept;
 
-    # DNS UDP/TCP from FeiLian clients goes straight to sing-box DNS server
-    # (which listens on tun0_gateway_ip:53). No fwmark — we want the kernel
-    # to deliver these locally without diverting to utun-leap.
+    # DNS UDP/TCP from FeiLian clients goes to mihomo's DNS server
+    # (which listens on tun0_gateway_ip:53 — set by data_plane.dns.listen).
+    # No mark needed — the kernel delivers these locally via normal routing.
     iifname "tun0" ip saddr @CLIENT_SUBNET@ udp dport 53 accept
     iifname "tun0" ip saddr @CLIENT_SUBNET@ tcp dport 53 accept
 
-    # Everything else from the client pool gets fwmark 0x42, which the ip rule
-    # in iproute.sh routes through table 100 -> utun-leap (sing-box TUN
-    # inbound). sing-box then decides direct vs proxy per geosite-cn / geoip-cn.
-    iifname "tun0" ip saddr @CLIENT_SUBNET@ meta mark set 0x42
+    # Non-DNS TCP/UDP is handled by iptables TPROXY rules in iproute.sh.
+    # No fwmark here — TPROXY intercepts on the mangle table PREROUTING
+    # hook at the same priority and routes packets to mihomo's tproxy-port,
+    # preserving the original client sourceIP (10.8.x.x).
   }
 
-  # PoC 阶段：leap-gateway API (api.listen 端口) 对所有源开放，不做 token
-  # 鉴权也不限 saddr。切生产前必须收回 — 把 listen 改回 127.0.0.1，或在
-  # 这里加白名单 + 启用 api.token。
+  # leap-gateway API access.
   chain input {
     type filter hook input priority filter; policy accept;
     tcp dport @API_PORT@ accept

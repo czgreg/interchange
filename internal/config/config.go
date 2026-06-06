@@ -140,6 +140,17 @@ type DataPlaneConfig struct {
 	// is mihomo's own concept, not our NodeScorer — they're complementary.
 	URLTest URLTestConfig `yaml:"url_test"`
 
+	// TProxyPort is the port mihomo listens on for transparent-proxy
+	// (TPROXY) inbound traffic. When non-zero, iproute.sh redirects
+	// non-DNS TCP/UDP from the FeiLian client subnet to this port using
+	// the kernel's TPROXY target, preserving the original client source IP
+	// (10.8.x.x) in mihomo's connection metadata. 0 = disabled (TUN mode).
+	//
+	// TPROXY is the correct mechanism for per-terminal routing; TUN mode
+	// collapses all client IPs to 198.18.0.0 (the fake-IP pool address)
+	// regardless of TUN stack setting, making SRC-IP-CIDR slicing useless.
+	TProxyPort int `yaml:"tproxy_port"`
+
 	// Legacy ad-hoc inbounds, retained for cmd/selftest. Empty = omitted.
 	SOCKSListen string `yaml:"socks_listen"`
 	HTTPListen  string `yaml:"http_listen"`
