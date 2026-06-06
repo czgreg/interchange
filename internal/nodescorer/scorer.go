@@ -21,6 +21,7 @@ import (
 	"log/slog"
 	"math"
 	"net/http"
+	"net/url"
 	"regexp"
 	"sort"
 	"sync"
@@ -53,6 +54,21 @@ type NodeHealth struct {
 	Strikes   int    `json:"strikes"`         // consecutive failing rounds
 	OkRounds  int    `json:"ok_rounds"`       // consecutive passing rounds
 	Reason    string `json:"reason,omitempty"` // why not qualified (if !Qualified)
+
+	// Probes holds the latest site-specific probe result per probe name
+	// (key = probe Name, e.g. "chatgpt.com"). Empty when no probes are
+	// configured or none have run yet. Gates named-pool membership.
+	Probes map[string]ProbeResult `json:"probes,omitempty"`
+}
+
+// ProbeResult is one site-specific reachability measurement for one node.
+type ProbeResult struct {
+	OK            bool      `json:"ok"`             // status in range AND not a CF challenge
+	StatusCode    int       `json:"status_code"`    // 0 = no response
+	CFMitigated   bool      `json:"cf_mitigated"`   // cf-mitigated: challenge header seen
+	LatencyMs     int       `json:"latency_ms"`     // real round-trip; on failure = time waited before giving up
+	LastCheckedAt time.Time `json:"last_checked_at"`
+	LastError     string    `json:"last_error,omitempty"`
 }
 
 // Snapshot is the complete scorer state at one instant.
@@ -72,6 +88,10 @@ type Renderer interface {
 	// given node tags as us-pool members. It does NOT write to disk — the
 	// scorer writes the bytes itself so it can diff + hot-reload.
 	RenderWithQualifiedNodes(outbounds []subscribe.Outbound, qualified []string) ([]byte, error)
+	// RenderWithPools is like RenderWithQualifiedNodes but also assigns
+	// named-pool memberships (us-pool ∩ probe-passing). Used when pools
+	// are configured.
+	RenderWithPools(outbounds []subscribe.Outbound, usPool []string, poolMembers map[string][]string) ([]byte, error)
 	// Path returns the on-disk path of the config file.
 	Path() string
 }
@@ -79,6 +99,7 @@ type Renderer interface {
 // Scorer is the dynamic pool manager.
 type Scorer struct {
 	cfg         config.NodeQualifyConfig
+	pools       []config.PoolConfig // named pools gated by probe results
 	nodePattern string // regexp filter matching sing-box renderer's NodePattern
 	apiAddr     string // mihomo clash-api host:port
 	apiSecret   string
@@ -89,12 +110,21 @@ type Scorer struct {
 	mu      sync.RWMutex
 	state   map[string]*nodeState // keyed by node tag
 	snap    Snapshot
-	poolSet map[string]bool // current qualified set in config
+	poolSet map[string]bool // current us-pool qualified set in config
+	// poolMembers is the last-rendered named-pool membership (pool name →
+	// member tags), used to detect when a probe change requires a re-render
+	// even though us-pool itself is unchanged.
+	poolMembers map[string][]string
+	// probeResults[nodeTag][probeName] = latest result. Written by the
+	// probe loop, read by score() to gate pool membership.
+	probeResults map[string]map[string]ProbeResult
+	probeLast    map[string]map[string]time.Time // last run time per (node,probe)
 
-	httpc *http.Client
+	httpc      *http.Client // clash-api client
+	probeHTTPc *http.Client // dials through the leap-probe listener
 
 	// throughput tracking: previous /connections snapshot
-	connPrev map[string]connBytes
+	connPrev  map[string]connBytes
 	connPrevT time.Time
 }
 
@@ -110,26 +140,55 @@ type connBytes struct {
 }
 
 // New creates a Scorer. probeURL should match mihomo's url-test URL (same
-// probe target = same measurement conditions).
+// probe target = same measurement conditions). pools are the named pools
+// whose membership the scorer gates on site-specific probe results.
 func New(
 	cfg config.NodeQualifyConfig,
+	pools []config.PoolConfig,
 	apiAddr, apiSecret, probeURL, nodePattern string,
 	r Renderer,
 	allOutbounds func() []subscribe.Outbound,
 ) *Scorer {
+	// probeHTTPc dials through the leap-probe listener (127.0.0.1:probePort)
+	// so each request egresses via whatever node probe-out currently points
+	// at. Short timeout — a probe that hangs is itself a failure signal.
+	probeProxy, _ := url.Parse("http://127.0.0.1:11081")
 	return &Scorer{
-		cfg:         cfg,
-		nodePattern: nodePattern,
-		apiAddr:     apiAddr,
-		apiSecret:   apiSecret,
-		probeURL:    probeURL,
-		renderer:    r,
-		subscribe:   allOutbounds,
-		state:       map[string]*nodeState{},
-		poolSet:     map[string]bool{},
-		connPrev:    map[string]connBytes{},
-		httpc:       &http.Client{Timeout: 5 * time.Second},
+		cfg:          cfg,
+		pools:        append([]config.PoolConfig(nil), pools...),
+		nodePattern:  nodePattern,
+		apiAddr:      apiAddr,
+		apiSecret:    apiSecret,
+		probeURL:     probeURL,
+		renderer:     r,
+		subscribe:    allOutbounds,
+		state:        map[string]*nodeState{},
+		poolSet:      map[string]bool{},
+		poolMembers:  map[string][]string{},
+		probeResults: map[string]map[string]ProbeResult{},
+		probeLast:    map[string]map[string]time.Time{},
+		connPrev:     map[string]connBytes{},
+		httpc:        &http.Client{Timeout: 5 * time.Second},
+		probeHTTPc: &http.Client{
+			Timeout:   12 * time.Second,
+			Transport: &http.Transport{Proxy: http.ProxyURL(probeProxy)},
+		},
 	}
+}
+
+// probesEnabled reports whether any configured pool gates on probes (i.e.
+// the renderer emitted probe-out + the leap-probe listener, so the probe
+// loop has something to drive).
+func (s *Scorer) probesEnabled() bool {
+	if len(s.cfg.Probes) == 0 {
+		return false
+	}
+	for _, p := range s.pools {
+		if len(p.RequiresPassing) > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // Run blocks until ctx is cancelled. Each ScoringInterval it scores all
@@ -152,6 +211,13 @@ func (s *Scorer) Run(ctx context.Context) {
 	case <-warmup.C:
 	}
 	s.score(ctx)
+
+	// Probe loop runs independently on its own cadence — flipping the
+	// probe-out selector is serialized within that single goroutine, so it
+	// never races itself. Only started when a pool gates on probes.
+	if s.probesEnabled() {
+		go s.runProbeLoop(ctx)
+	}
 
 	tick := time.NewTicker(s.cfg.ScoringInterval)
 	defer tick.Stop()
@@ -262,6 +328,14 @@ func (s *Scorer) score(ctx context.Context) {
 		}
 		h.Strikes = st.strikes
 		h.OkRounds = st.okRuns
+		// Attach the latest probe results (read-only copy) for this node.
+		if pr := s.probeResults[tag]; len(pr) > 0 {
+			cp := make(map[string]ProbeResult, len(pr))
+			for k, v := range pr {
+				cp[k] = v
+			}
+			h.Probes = cp
+		}
 		st.health = h
 		nodes = append(nodes, h)
 	}
@@ -283,6 +357,16 @@ func (s *Scorer) score(ctx context.Context) {
 
 	now := time.Now().UTC()
 	poolChanged := !poolSetsEqual(s.poolSet, newPoolSet)
+
+	// Compute named-pool memberships: us-pool ∩ {nodes passing the pool's
+	// required probes}. A node with no probe result yet for a required
+	// probe is treated as NOT passing (conservative — keep unverified
+	// nodes out of the sensitive pool rather than risk a 403).
+	newPoolMembers := s.computePoolMembers(newPoolSet)
+	if !poolMembersEqual(s.poolMembers, newPoolMembers) {
+		poolChanged = true
+	}
+
 	lastPoolUpdate := s.snap.LastPoolUpdate
 	if poolChanged {
 		lastPoolUpdate = now
@@ -297,6 +381,7 @@ func (s *Scorer) score(ctx context.Context) {
 		Nodes:          nodes,
 	}
 	s.poolSet = newPoolSet
+	s.poolMembers = newPoolMembers
 
 	slog.Info("nodescorer: scored",
 		"qualified", qualified,
@@ -309,8 +394,51 @@ func (s *Scorer) score(ctx context.Context) {
 	s.saveStateLocked()
 
 	if poolChanged {
-		go s.hotReload(context.Background(), newPoolSet)
+		usPool := setToSortedSlice(newPoolSet)
+		members := newPoolMembers
+		go s.hotReload(context.Background(), usPool, members)
 	}
+}
+
+// computePoolMembers maps each configured pool → the subset of the given
+// us-pool set that currently passes all of the pool's required probes.
+// CALLER MUST HOLD s.mu (reads s.probeResults).
+func (s *Scorer) computePoolMembers(usPool map[string]bool) map[string][]string {
+	if len(s.pools) == 0 {
+		return map[string][]string{}
+	}
+	out := make(map[string][]string, len(s.pools))
+	for _, p := range s.pools {
+		if len(p.RequiresPassing) == 0 {
+			continue // no gating → renderer falls back to full us-pool
+		}
+		var members []string
+		for tag := range usPool {
+			if s.nodePassesProbes(tag, p.RequiresPassing) {
+				members = append(members, tag)
+			}
+		}
+		sort.Strings(members)
+		out[p.Name] = members
+	}
+	return out
+}
+
+// nodePassesProbes reports whether the node has a passing (ok=true) result
+// for every named probe. Missing result = not passing.
+// CALLER MUST HOLD s.mu.
+func (s *Scorer) nodePassesProbes(tag string, required []string) bool {
+	pr := s.probeResults[tag]
+	if pr == nil {
+		return false
+	}
+	for _, name := range required {
+		res, ok := pr[name]
+		if !ok || !res.OK {
+			return false
+		}
+	}
+	return true
 }
 
 func (s *Scorer) scoreNode(tag string, pData map[string]interface{}, throughputBps float64) NodeHealth {
@@ -470,18 +598,12 @@ func (s *Scorer) updateThroughput(ctx context.Context, proxies map[string]map[st
 	return result
 }
 
-func (s *Scorer) hotReload(ctx context.Context, newPool map[string]bool) {
-	qualified := make([]string, 0, len(newPool))
-	for tag := range newPool {
-		qualified = append(qualified, tag)
-	}
-	sort.Strings(qualified)
-
+func (s *Scorer) hotReload(ctx context.Context, usPool []string, poolMembers map[string][]string) {
 	if s.renderer == nil {
 		return
 	}
 	outbounds := s.subscribe()
-	data, err := s.renderer.RenderWithQualifiedNodes(outbounds, qualified)
+	data, err := s.renderer.RenderWithPools(outbounds, usPool, poolMembers)
 	if err != nil {
 		slog.Error("nodescorer: re-render failed", "err", err)
 		return
@@ -495,7 +617,7 @@ func (s *Scorer) hotReload(ctx context.Context, newPool map[string]bool) {
 		return
 	}
 	slog.Info("nodescorer: pool updated + hot-reloaded",
-		"members", len(qualified), "qualified", qualified)
+		"us_pool", len(usPool), "named_pools", len(poolMembers))
 }
 
 func (s *Scorer) mihomoHotReload(ctx context.Context) error {

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"io"
 	"os"
+	"sort"
 	"strings"
 )
 
@@ -46,6 +47,41 @@ func poolSetsEqual(a, b map[string]bool) bool {
 	for k := range a {
 		if !b[k] {
 			return false
+		}
+	}
+	return true
+}
+
+// setToSortedSlice flattens a set to a sorted slice (deterministic render
+// output → stable config diffs).
+func setToSortedSlice(set map[string]bool) []string {
+	out := make([]string, 0, len(set))
+	for k := range set {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// poolMembersEqual compares two pool-name → member-slice maps. Member
+// slices are compared order-insensitively via length + set membership.
+func poolMembersEqual(a, b map[string][]string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for name, am := range a {
+		bm, ok := b[name]
+		if !ok || len(am) != len(bm) {
+			return false
+		}
+		bset := make(map[string]bool, len(bm))
+		for _, x := range bm {
+			bset[x] = true
+		}
+		for _, x := range am {
+			if !bset[x] {
+				return false
+			}
 		}
 	}
 	return true

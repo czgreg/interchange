@@ -2,6 +2,7 @@ package nodescorer
 
 import (
 	"testing"
+	"time"
 
 	"github.com/leap-gateway/leap-gateway/internal/config"
 )
@@ -38,7 +39,70 @@ func defaultCfg() config.NodeQualifyConfig {
 }
 
 func newTestScorer(cfg config.NodeQualifyConfig) *Scorer {
-	return &Scorer{probeURL: "http://test", cfg: cfg}
+	return &Scorer{
+		probeURL:     "http://test",
+		cfg:          cfg,
+		probeResults: map[string]map[string]ProbeResult{},
+		probeLast:    map[string]map[string]time.Time{},
+	}
+}
+
+// TestComputePoolMembers verifies probe-gated named-pool membership: only
+// us-pool nodes that pass ALL of a pool's required probes are members; a
+// node missing any required probe result (or failing it) is excluded.
+func TestComputePoolMembers(t *testing.T) {
+	s := newTestScorer(defaultCfg())
+	s.pools = []config.PoolConfig{{
+		Name:            "openai-pool",
+		RequiresPassing: []string{"chatgpt.com", "claude.ai"},
+		RuleSets:        []string{"geosite-openai"},
+	}}
+	// nodeA passes both → member. nodeB fails chatgpt (cf challenge) →
+	// excluded. nodeC has no claude.ai result yet → excluded.
+	s.probeResults = map[string]map[string]ProbeResult{
+		"nodeA": {
+			"chatgpt.com": {OK: true},
+			"claude.ai":   {OK: true},
+		},
+		"nodeB": {
+			"chatgpt.com": {OK: false, CFMitigated: true},
+			"claude.ai":   {OK: true},
+		},
+		"nodeC": {
+			"chatgpt.com": {OK: true},
+		},
+	}
+	usPool := map[string]bool{"nodeA": true, "nodeB": true, "nodeC": true}
+
+	got := s.computePoolMembers(usPool)
+	members := got["openai-pool"]
+	if len(members) != 1 || members[0] != "nodeA" {
+		t.Errorf("openai-pool members = %v, want [nodeA]", members)
+	}
+}
+
+// TestComputePoolMembers_NoGating: a pool with empty RequiresPassing is not
+// included in the explicit member map (renderer falls back to full us-pool).
+func TestComputePoolMembers_NoGating(t *testing.T) {
+	s := newTestScorer(defaultCfg())
+	s.pools = []config.PoolConfig{{Name: "plain-pool", RuleSets: []string{"geosite-x"}}}
+	got := s.computePoolMembers(map[string]bool{"nodeA": true})
+	if _, ok := got["plain-pool"]; ok {
+		t.Error("ungated pool should not appear in poolMembers (renderer falls back to us-pool)")
+	}
+}
+
+func TestPoolMembersEqual(t *testing.T) {
+	a := map[string][]string{"p": {"x", "y"}}
+	if !poolMembersEqual(a, map[string][]string{"p": {"y", "x"}}) {
+		t.Error("order-insensitive equal should be true")
+	}
+	if poolMembersEqual(a, map[string][]string{"p": {"x"}}) {
+		t.Error("different size should be unequal")
+	}
+	if poolMembersEqual(a, map[string][]string{"q": {"x", "y"}}) {
+		t.Error("different key should be unequal")
+	}
 }
 
 func TestScoreNode_AllGood(t *testing.T) {

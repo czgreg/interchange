@@ -33,6 +33,16 @@ const (
 	// Route rules send overseas traffic here; the selector decides which
 	// underlying group/proxy actually carries it.
 	outSelector = "out"
+
+	// probeOutSelector is a select group over every candidate node, flipped
+	// one node at a time by nodescorer to run site-specific probes through
+	// the leap-probe listener.
+	probeOutSelector = "probe-out"
+
+	// probePort is the loopback HTTP listener nodescorer dials to probe
+	// the node probe-out currently points at. 11081 (11080 is the leap-
+	// internal proxy that follows `out`).
+	probePort = 11081
 )
 
 // buildProxies emits the `proxies:` array — one entry per node-bearing
@@ -115,6 +125,47 @@ func (r *Renderer) buildProxyGroups(outbounds []subscribe.Outbound) []map[string
 		},
 	}
 
+	// Named pools (openai-pool etc.) — one load-balance group each.
+	// Members come from r.poolMembers[name] (us-pool ∩ passing that pool's
+	// probes, set by nodescorer); absent → fall back to the full us-pool
+	// set so the pool works before the first probe round completes.
+	for _, p := range r.pools {
+		members := pool
+		if m, ok := r.poolMembers[p.Name]; ok {
+			members = m
+		}
+		if len(members) == 0 {
+			// No qualified members yet — fall back to full us-pool so the
+			// rule routing to this pool doesn't dead-end at an empty group.
+			members = pool
+		}
+		groups = append(groups, map[string]any{
+			"name":     p.Name,
+			"type":     "load-balance",
+			"strategy": "consistent-hashing",
+			"proxies":  members,
+			"url":      probeURL,
+			"interval": intervalSec,
+			"lazy":     false,
+		})
+	}
+
+	// probe-out: a select group over EVERY candidate node. nodescorer
+	// flips it one node at a time and runs site probes through the
+	// leap-probe listener (which is pinned to this group). Separate from
+	// us-pool so probing never perturbs production routing.
+	if r.probeListener {
+		probeMembers := pool
+		if len(tags) > 0 {
+			probeMembers = tags // all node-bearing tags, not just pattern-matched
+		}
+		groups = append(groups, map[string]any{
+			"name":    probeOutSelector,
+			"type":    "select",
+			"proxies": probeMembers,
+		})
+	}
+
 	// Bootstrap edge case: empty pool. Emit a usable "out" that falls back
 	// to DIRECT so mihomo loads. Drops us-pool/pin entirely.
 	if len(pool) == 0 {
@@ -127,6 +178,24 @@ func (r *Renderer) buildProxyGroups(outbounds []subscribe.Outbound) []map[string
 		}
 	}
 	return groups
+}
+
+// buildListeners emits the `listeners:` array. Currently just the leap-probe
+// HTTP listener used by nodescorer's per-node site probes: a loopback HTTP
+// proxy on probePort whose traffic is pinned (via `proxy:`) to the
+// probe-out selector group, bypassing the normal rule table. nodescorer
+// PUTs probe-out → <node>, then GETs the probe URLs through probePort to
+// read real status codes + cf-mitigated headers.
+func (r *Renderer) buildListeners() []map[string]any {
+	return []map[string]any{
+		{
+			"name":   "leap-probe",
+			"type":   "http",
+			"listen": "127.0.0.1",
+			"port":   probePort,
+			"proxy":  probeOutSelector,
+		},
+	}
 }
 
 // nodeTags returns the tags of all node-bearing outbounds, preserving order.

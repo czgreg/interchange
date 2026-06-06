@@ -468,3 +468,113 @@ func TestRenderer_YAMLValid(t *testing.T) {
 		t.Error("expected 'load-balance' in rendered output")
 	}
 }
+
+// TestRenderer_NamedPool covers the openai-pool path (1.1): a pool that
+// gates on probes should produce (a) a load-balance group named after the
+// pool, (b) the probe-out selector + leap-probe listener, (c) rules
+// routing the pool's rule_sets to the pool instead of `out`.
+func TestRenderer_NamedPool(t *testing.T) {
+	r := newTestRenderer(t)
+	r.cfg.URLTest.NodePattern = `美国|🇺🇸|\bUS`
+	r.cfg.Route.Mode = "whitelist"
+	r.cfg.Route.Whitelist = config.WhitelistConfig{
+		Geosites: config.StringList{"geosite-openai", "geosite-github"},
+	}
+	r = r.WithPools([]config.PoolConfig{{
+		Name:            "openai-pool",
+		RequiresPassing: []string{"chatgpt.com"},
+		RuleSets:        []string{"geosite-openai"},
+	}})
+
+	body, err := r.Write(sampleOutbounds())
+	if err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	var doc map[string]any
+	if err := yaml.Unmarshal(body, &doc); err != nil {
+		t.Fatalf("invalid yaml: %v\n%s", err, body)
+	}
+
+	// (a) openai-pool group exists, type load-balance.
+	groups, _ := doc["proxy-groups"].([]any)
+	var openai, probeOut map[string]any
+	for _, g := range groups {
+		m, _ := g.(map[string]any)
+		switch m["name"] {
+		case "openai-pool":
+			openai = m
+		case "probe-out":
+			probeOut = m
+		}
+	}
+	if openai == nil {
+		t.Fatal("openai-pool group missing")
+	}
+	if openai["type"] != "load-balance" {
+		t.Errorf("openai-pool type = %v, want load-balance", openai["type"])
+	}
+	// (b) probe-out selector + leap-probe listener.
+	if probeOut == nil {
+		t.Error("probe-out selector group missing (pool gates on probes)")
+	}
+	listeners, _ := doc["listeners"].([]any)
+	if len(listeners) == 0 {
+		t.Fatal("listeners block missing (expected leap-probe)")
+	}
+	l0, _ := listeners[0].(map[string]any)
+	if l0["name"] != "leap-probe" || l0["proxy"] != "probe-out" {
+		t.Errorf("listener[0] = %v, want leap-probe pinned to probe-out", l0)
+	}
+
+	// (c) rules: geosite-openai → openai-pool; geosite-github → out.
+	rules, _ := doc["rules"].([]any)
+	wantOpenAI, wantGithub := false, false
+	for _, ru := range rules {
+		s, _ := ru.(string)
+		if s == "RULE-SET,geosite-openai,openai-pool" {
+			wantOpenAI = true
+		}
+		if s == "RULE-SET,geosite-github,out" {
+			wantGithub = true
+		}
+	}
+	if !wantOpenAI {
+		t.Error("missing rule RULE-SET,geosite-openai,openai-pool")
+	}
+	if !wantGithub {
+		t.Error("missing rule RULE-SET,geosite-github,out (non-pooled tag should still route to out)")
+	}
+}
+
+// TestRenderer_PoolMembersOverride checks RenderWithPools wires explicit
+// member lists into the named pool group.
+func TestRenderer_PoolMembersOverride(t *testing.T) {
+	r := newTestRenderer(t)
+	r.cfg.URLTest.NodePattern = ""
+	r = r.WithPools([]config.PoolConfig{{
+		Name:            "openai-pool",
+		RequiresPassing: []string{"chatgpt.com"},
+		RuleSets:        []string{"geosite-openai"},
+	}})
+
+	// Pick a real tag from sampleOutbounds.
+	members := map[string][]string{"openai-pool": {"ash/🇺🇸US-IEPL-01"}}
+	body, err := r.RenderWithPools(sampleOutbounds(), nil, members)
+	if err != nil {
+		t.Fatalf("RenderWithPools: %v", err)
+	}
+	var doc map[string]any
+	_ = yaml.Unmarshal(body, &doc)
+	groups, _ := doc["proxy-groups"].([]any)
+	for _, g := range groups {
+		m, _ := g.(map[string]any)
+		if m["name"] == "openai-pool" {
+			pl, _ := m["proxies"].([]any)
+			if len(pl) != 1 || pl[0] != "ash/🇺🇸US-IEPL-01" {
+				t.Errorf("openai-pool members = %v, want [ash/🇺🇸US-IEPL-01]", pl)
+			}
+			return
+		}
+	}
+	t.Fatal("openai-pool group not found")
+}

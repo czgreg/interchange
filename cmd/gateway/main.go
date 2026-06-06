@@ -55,7 +55,8 @@ func main() {
 
 	mihomoRenderer := mihomo.NewRenderer(cfg.DataPlane).
 		WithNode(cfg.Node).
-		WithSubscriptions(cfg.Subscriptions)
+		WithSubscriptions(cfg.Subscriptions).
+		WithPools(cfg.Pools)
 	var renderer api.Renderer = mihomoRenderer
 
 	dpCtl := dataplane.NewController(cfg.DataPlane.ClashAPI)
@@ -118,6 +119,7 @@ func main() {
 	if cfg.NodeQualify.Enabled {
 		ns := nodescorer.New(
 			cfg.NodeQualify,
+			cfg.Pools,
 			cfg.DataPlane.ClashAPI.ExternalController,
 			cfg.DataPlane.ClashAPI.Secret,
 			cfg.DataPlane.URLTest.ProbeURL,

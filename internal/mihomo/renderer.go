@@ -61,6 +61,19 @@ type Renderer struct {
 	// set of node tags (used by nodescorer during hot-reload). nil = use all
 	// NodePattern-matched nodes (normal rendering path).
 	qualifiedOverride []string
+	// pools are the named select/load-balance groups rendered alongside
+	// us-pool (e.g. openai-pool). Their rule_sets route to them instead of
+	// the default `out` selector.
+	pools []config.PoolConfig
+	// poolMembers maps pool name → member node tags, set by nodescorer at
+	// hot-reload time (members = us-pool-qualified ∩ passing the pool's
+	// required probes). nil/absent for a pool name → that pool falls back
+	// to the full us-pool member set (so it works before the first probe
+	// round completes).
+	poolMembers map[string][]string
+	// probeListener toggles emission of the leap-probe HTTP listener +
+	// probe-out selector group used by nodescorer's per-node site probes.
+	probeListener bool
 }
 
 // NewRenderer constructs a Renderer with the given engine-agnostic config.
@@ -81,6 +94,20 @@ func (r *Renderer) WithNode(n config.NodeConfig) *Renderer {
 // decisions that depend on it (e.g. fallback-priority subs) can use it.
 func (r *Renderer) WithSubscriptions(subs []config.SubscriptionEntry) *Renderer {
 	r.subs = append([]config.SubscriptionEntry(nil), subs...)
+	return r
+}
+
+// WithPools attaches the named-pool config (openai-pool etc.). Enables the
+// probe listener automatically when any pool declares requires_passing —
+// the probes those pools gate on need a way to run.
+func (r *Renderer) WithPools(pools []config.PoolConfig) *Renderer {
+	r.pools = append([]config.PoolConfig(nil), pools...)
+	for _, p := range pools {
+		if len(p.RequiresPassing) > 0 {
+			r.probeListener = true
+			break
+		}
+	}
 	return r
 }
 
@@ -110,6 +137,17 @@ func (r *Renderer) SetFakeIPSkip(suffixes []string) {
 func (r *Renderer) RenderWithQualifiedNodes(outbounds []subscribe.Outbound, qualified []string) ([]byte, error) {
 	clone := *r
 	clone.qualifiedOverride = qualified
+	return clone.Write(outbounds)
+}
+
+// RenderWithPools is the nodescorer hot-reload entry that also assigns
+// named-pool memberships. usPool is the qualified us-pool set; poolMembers
+// maps each named pool → its member tags (us-pool ∩ passing that pool's
+// probes). A pool absent from poolMembers falls back to the full us-pool.
+func (r *Renderer) RenderWithPools(outbounds []subscribe.Outbound, usPool []string, poolMembers map[string][]string) ([]byte, error) {
+	clone := *r
+	clone.qualifiedOverride = usPool
+	clone.poolMembers = poolMembers
 	return clone.Write(outbounds)
 }
 
@@ -168,6 +206,13 @@ func (r *Renderer) build(outbounds []subscribe.Outbound) map[string]any {
 	doc["proxy-groups"] = r.buildProxyGroups(outbounds)
 	doc["rule-providers"] = r.buildRuleProviders()
 	doc["rules"] = r.buildRules()
+	// Probe listener: a loopback HTTP inbound pinned (via `proxy:`) to the
+	// probe-out selector. nodescorer flips probe-out to each node, then
+	// GETs site URLs through this port to read real status + headers
+	// (cf-mitigated detection). Only emitted when a pool gates on probes.
+	if r.probeListener {
+		doc["listeners"] = r.buildListeners()
+	}
 	// Persist DNS cache across hot-reloads and restarts. store-fake-ip keeps
 	// fakeip mappings alive so employees don't pay the cold DNS round-trip
 	// (~400ms cross-border DoH) after every nodescorer hot-reload.
