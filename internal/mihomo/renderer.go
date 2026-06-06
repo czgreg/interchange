@@ -74,6 +74,17 @@ type Renderer struct {
 	// probeListener toggles emission of the leap-probe HTTP listener +
 	// probe-out selector group used by nodescorer's per-node site probes.
 	probeListener bool
+	// perTerminal, when true, pins each client terminal's whitelisted
+	// traffic to one egress node via SRC-IP-CIDR slices under a `perterm`
+	// sub-rule. Requires TUN stack=gvisor (real source IP).
+	perTerminal bool
+}
+
+// WithLoadBalance sets the load-balance behavior. perTerminal=true emits
+// the per-terminal SRC-IP-CIDR pinning (see config.LoadBalanceConfig).
+func (r *Renderer) WithLoadBalance(perTerminal bool) *Renderer {
+	r.perTerminal = perTerminal
+	return r
 }
 
 // NewRenderer constructs a Renderer with the given engine-agnostic config.
@@ -205,7 +216,11 @@ func (r *Renderer) build(outbounds []subscribe.Outbound) map[string]any {
 	doc["proxies"] = r.buildProxies(outbounds)
 	doc["proxy-groups"] = r.buildProxyGroups(outbounds)
 	doc["rule-providers"] = r.buildRuleProviders()
-	doc["rules"] = r.buildRules()
+	rules, subRules := r.buildRules(outbounds)
+	doc["rules"] = rules
+	if len(subRules) > 0 {
+		doc["sub-rules"] = subRules
+	}
 	// Probe listener: a loopback HTTP inbound pinned (via `proxy:`) to the
 	// probe-out selector. nodescorer flips probe-out to each node, then
 	// GETs site URLs through this port to read real status + headers

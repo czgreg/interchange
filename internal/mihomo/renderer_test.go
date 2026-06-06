@@ -453,6 +453,7 @@ func TestRenderer_DNSNameserverPolicy(t *testing.T) {
 }
 
 // Sanity: rendered yaml must round-trip through yaml unmarshal without error.
+// Sanity: rendered yaml must round-trip through yaml unmarshal without error.
 func TestRenderer_YAMLValid(t *testing.T) {
 	r := newTestRenderer(t)
 	r.cfg.URLTest.Interval = 90 * time.Second
@@ -577,4 +578,102 @@ func TestRenderer_PoolMembersOverride(t *testing.T) {
 		}
 	}
 	t.Fatal("openai-pool group not found")
+}
+
+// TestRenderer_PerTerminal covers "one terminal, one egress": with
+// load_balance.per_terminal + whitelist, domain whitelist hits dispatch to
+// the perterm sub-rule, which slices the client subnet per-/32 to us-pool
+// members. IP whitelist stays on `out`. Also checks gvisor stack flips when
+// requested.
+func TestRenderer_PerTerminal(t *testing.T) {
+	r := newTestRenderer(t)
+	r.cfg.URLTest.NodePattern = `美国|🇺🇸|\bUS`
+	r.cfg.TUN.Stack = "gvisor"
+	r.cfg.Route.Mode = "whitelist"
+	r.cfg.Route.Whitelist = config.WhitelistConfig{
+		Geosites: config.StringList{"geosite-openai"},
+		Geoips:   config.StringList{"geoip-telegram"},
+	}
+	r = r.WithLoadBalance(true)
+	// small subnet → few host rules
+	r.node.ClientSubnet = "10.8.13.0/29" // 6 usable hosts
+
+	body, err := r.Write(sampleOutbounds())
+	if err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	var doc map[string]any
+	if err := yaml.Unmarshal(body, &doc); err != nil {
+		t.Fatalf("invalid yaml: %v\n%s", err, body)
+	}
+
+	// gvisor stack + mtu 1500
+	tun, _ := doc["tun"].(map[string]any)
+	if tun["stack"] != "gvisor" {
+		t.Errorf("tun.stack = %v, want gvisor", tun["stack"])
+	}
+	if tun["mtu"] != 1500 {
+		t.Errorf("tun.mtu = %v, want 1500 under gvisor", tun["mtu"])
+	}
+
+	// whitelist domain hit → SUB-RULE,(RULE-SET,geosite-openai),perterm
+	// geoip → still ,out,no-resolve
+	rules, _ := doc["rules"].([]any)
+	var sawDomainSub, sawGeoipOut bool
+	for _, ru := range rules {
+		s, _ := ru.(string)
+		if s == "SUB-RULE,(RULE-SET,geosite-openai),perterm" {
+			sawDomainSub = true
+		}
+		if s == "RULE-SET,geoip-telegram,out,no-resolve" {
+			sawGeoipOut = true
+		}
+	}
+	if !sawDomainSub {
+		t.Error("expected domain whitelist to dispatch via perterm sub-rule")
+	}
+	if !sawGeoipOut {
+		t.Error("expected geoip whitelist to stay on out (no-resolve)")
+	}
+
+	// sub-rules.perterm: SRC-IP-CIDR slices for the 6 hosts + MATCH,us-pool
+	sub, _ := doc["sub-rules"].(map[string]any)
+	pt, _ := sub["perterm"].([]any)
+	if len(pt) < 2 {
+		t.Fatalf("perterm sub-rule too short: %v", pt)
+	}
+	srcCount := 0
+	for _, e := range pt {
+		if s, _ := e.(string); strings.HasPrefix(s, "SRC-IP-CIDR,") {
+			srcCount++
+		}
+	}
+	if srcCount != 6 {
+		t.Errorf("perterm SRC-IP-CIDR rules = %d, want 6 (/29 usable hosts)", srcCount)
+	}
+	if last, _ := pt[len(pt)-1].(string); last != "MATCH,us-pool" {
+		t.Errorf("perterm last rule = %q, want MATCH,us-pool", last)
+	}
+}
+
+// TestHRWStability: removing a node only reassigns IPs that were on it.
+func TestHRWStability(t *testing.T) {
+	members := []string{"nodeA", "nodeB", "nodeC", "nodeD"}
+	hosts := []string{"10.8.13.5", "10.8.13.6", "10.8.13.7", "10.8.13.8", "10.8.13.9"}
+	before := map[string]string{}
+	for _, h := range hosts {
+		before[h] = hrwPick(h, members)
+	}
+	// Drop nodeB.
+	reduced := []string{"nodeA", "nodeC", "nodeD"}
+	for _, h := range hosts {
+		now := hrwPick(h, reduced)
+		if before[h] != "nodeB" && now != before[h] {
+			t.Errorf("host %s moved from %s to %s but its node wasn't removed",
+				h, before[h], now)
+		}
+		if now == "nodeB" {
+			t.Errorf("host %s still assigned to removed nodeB", h)
+		}
+	}
 }

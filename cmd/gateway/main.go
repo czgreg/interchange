@@ -56,7 +56,8 @@ func main() {
 	mihomoRenderer := mihomo.NewRenderer(cfg.DataPlane).
 		WithNode(cfg.Node).
 		WithSubscriptions(cfg.Subscriptions).
-		WithPools(cfg.Pools)
+		WithPools(cfg.Pools).
+		WithLoadBalance(cfg.LoadBalance.PerTerminal)
 	var renderer api.Renderer = mihomoRenderer
 
 	dpCtl := dataplane.NewController(cfg.DataPlane.ClashAPI)

@@ -57,6 +57,13 @@ data_plane:
     address:        "172.19.0.1/30"
     fwmark:         0x42       # leap-nft tags client packets with this
     routing_table:  100        # ip rule fwmark X lookup TABLE → utun-leap
+    # stack: system (default) | gvisor.
+    #   system — kernel TUN socket; lower CPU, but collapses every client's
+    #            sourceIP to the TUN device addr (198.18.0.0). Fine unless
+    #            you need per-source routing.
+    #   gvisor — userspace stack; preserves real client sourceIP
+    #            (10.8.x.x). REQUIRED for load_balance.per_terminal below.
+    stack: "system"
 
   # mihomo's DNS server. fakeip is enabled by the renderer; cn_doh handles
   # CN domains (geosite-cn / nameserver-policy hits), proxy_doh handles
@@ -228,3 +235,24 @@ capacity:
   degraded_max_users:  150   # p95 ~5s    (tier 150, still 0 errors)
   measured_at:   "2026-06-06"
   measured_with: "stress.sh on 89 / mihomo v1.19.26; upstream-bandwidth-bound"
+
+# Load-balance behavior for overseas (us-pool-bound) traffic.
+load_balance:
+  # per_terminal: pin each client terminal's whitelisted traffic to ONE
+  # egress node ("one terminal, one egress"). Fixes the multi-node drift
+  # within a single logical session (e.g. ChatGPT spread across
+  # chatgpt.com / chat.openai.com / ws.chatgpt.com → 3 IPs) that trips
+  # OpenAI/Cloudflare anomaly detection.
+  #
+  # REQUIRES data_plane.tun.stack=gvisor (real client sourceIP). With the
+  # default system stack every terminal looks like 198.18.0.0 and they all
+  # collapse onto one node — so this is a no-op (worse, degenerate) without
+  # gvisor.
+  #
+  # Mechanism: node.client_subnet is sliced per-/32 into SRC-IP-CIDR rules
+  # under a `perterm` sub-rule, each terminal HRW-assigned to a us-pool
+  # member. Domain whitelist hits route through perterm; IP whitelist
+  # (geoip / ip_cidr, no-resolve) stays on the load-balance pool.
+  #
+  # false (default) = per-destination consistent-hashing (original).
+  per_terminal: false

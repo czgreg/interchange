@@ -10,6 +10,8 @@ package mihomo
 import (
 	"path/filepath"
 	"strings"
+
+	"github.com/leap-gateway/leap-gateway/internal/subscribe"
 )
 
 const (
@@ -118,8 +120,19 @@ func ruleProvider(behavior, path string) map[string]any {
 //	[whitelisted geoip tags] → out (no-resolve)
 //	[whitelisted IP-CIDR]   → out (no-resolve)
 //	MATCH,DIRECT
-func (r *Renderer) buildRules() []string {
+//
+// per-terminal mode (load_balance.per_terminal=true): domain-matched
+// whitelist entries dispatch to the `perterm` sub-rule instead of `out`.
+// perterm holds SRC-IP-CIDR,<terminal/32>,<node> slices (HRW-assigned over
+// the us-pool members) + a MATCH,us-pool fallback — so one terminal's
+// whitelisted traffic all exits one node. IP-based whitelist (geoip /
+// ip_cidr, no-resolve) still goes to `out` (hardcoded-IP apps don't drift,
+// and no-resolve doesn't translate into a SUB-RULE condition).
+//
+// Returns (rules, subRules). subRules is empty unless per-terminal is on.
+func (r *Renderer) buildRules(outbounds []subscribe.Outbound) ([]string, map[string]any) {
 	var rules []string
+	subRules := map[string]any{}
 
 	// Private/LAN — no DNS resolution needed.
 	rules = append(rules,
@@ -138,16 +151,41 @@ func (r *Renderer) buildRules() []string {
 		"RULE-SET,"+rsGeoipCN+",DIRECT,no-resolve",
 	)
 
-	// Pool rule_sets route to their named pool. In overseas mode these are
-	// the ONLY non-default routing rules (everything else → MATCH,out); in
-	// whitelist mode they sit before the whitelist block so a pooled tag
-	// (e.g. geosite-openai) goes to openai-pool, not the generic `out`.
-	// Emitted in both modes because a pool's reason for existing is to
-	// segregate its sites regardless of overall route mode.
+	// Per-terminal: build the perterm sub-rule (SRC-IP-CIDR slices) once.
+	// domainTarget below dispatches domain whitelist hits into it.
+	perterm := r.perTerminal && r.node.ClientSubnet != ""
+	if perterm {
+		slices := r.perTerminalSlices(outbounds)
+		if len(slices) == 0 {
+			// No us-pool members to slice across — disable perterm this
+			// render rather than emit a sub-rule that dead-ends.
+			perterm = false
+		} else {
+			subRules["perterm"] = slices
+		}
+	}
+
+	// domainRule routes a domain-matching condition to either the perterm
+	// sub-rule (per-terminal) or the `out` selector (default).
+	domainRule := func(cond string) string {
+		if perterm {
+			return "SUB-RULE,(" + cond + "),perterm"
+		}
+		return cond + "," + outSelector
+	}
+
+	// Pool rule_sets (openai-pool etc.). When per-terminal is OFF they
+	// route to the named pool; when ON, domain pool tags route through
+	// perterm too (per-terminal pin subsumes per-pool for the drift goal).
 	poolRouted := map[string]bool{}
 	for _, tag := range r.poolRuleSets() {
 		poolName := r.poolForRuleSet(tag)
 		if poolName == "" {
+			continue
+		}
+		if perterm && !strings.HasPrefix(tag, "geoip-") {
+			rules = append(rules, domainRule("RULE-SET,"+tag))
+			poolRouted[tag] = true
 			continue
 		}
 		noResolve := ""
@@ -161,13 +199,15 @@ func (r *Renderer) buildRules() []string {
 	if r.cfg.Route.Mode == "whitelist" {
 		for _, tag := range r.cfg.Route.Whitelist.Geosites {
 			if poolRouted[tag] {
-				continue // already routed to a pool above
+				continue
 			}
-			rules = append(rules, "RULE-SET,"+tag+","+outSelector)
+			rules = append(rules, domainRule("RULE-SET,"+tag))
 		}
 		for _, sx := range r.cfg.Route.Whitelist.DomainSuffix {
-			rules = append(rules, "DOMAIN-SUFFIX,"+sx+","+outSelector)
+			rules = append(rules, domainRule("DOMAIN-SUFFIX,"+sx))
 		}
+		// IP-based whitelist stays on `out` (no-resolve; hardcoded-IP apps
+		// like Telegram MTProto don't suffer subdomain drift).
 		for _, tag := range r.cfg.Route.Whitelist.Geoips {
 			if poolRouted[tag] {
 				continue
@@ -179,8 +219,14 @@ func (r *Renderer) buildRules() []string {
 		}
 		rules = append(rules, "MATCH,DIRECT")
 	} else {
-		rules = append(rules, "MATCH,"+outSelector)
+		// overseas mode: everything non-CN goes overseas. Per-terminal
+		// dispatches the catch-all through perterm; else straight to out.
+		if perterm {
+			rules = append(rules, "SUB-RULE,(MATCH),perterm")
+		} else {
+			rules = append(rules, "MATCH,"+outSelector)
+		}
 	}
 
-	return rules
+	return rules, subRules
 }

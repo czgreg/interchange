@@ -68,29 +68,7 @@ func (r *Renderer) buildProxies(outbounds []subscribe.Outbound) []map[string]any
 //	                      PUT /proxies/pin
 func (r *Renderer) buildProxyGroups(outbounds []subscribe.Outbound) []map[string]any {
 	tags := nodeTags(outbounds)
-
-	var pool []string
-	if len(r.qualifiedOverride) > 0 {
-		// NodeScorer hot-reload path: use the explicitly qualified set.
-		// Still intersect with actually-present tags in case outbounds
-		// changed between scoring and render (defensive).
-		tagSet := make(map[string]bool, len(tags))
-		for _, t := range tags {
-			tagSet[t] = true
-		}
-		for _, t := range r.qualifiedOverride {
-			if tagSet[t] {
-				pool = append(pool, t)
-			}
-		}
-	}
-	if len(pool) == 0 {
-		// Normal render path: filter by NodePattern.
-		pool = filterByPattern(tags, r.cfg.URLTest.NodePattern)
-		if len(pool) == 0 {
-			pool = tags
-		}
-	}
+	pool := r.usPoolMembers(outbounds)
 
 	probeURL := r.cfg.URLTest.ProbeURL
 	if probeURL == "" {
@@ -196,6 +174,33 @@ func (r *Renderer) buildListeners() []map[string]any {
 			"proxy":  probeOutSelector,
 		},
 	}
+}
+
+// usPoolMembers computes the us-pool member tag list: the NodeScorer's
+// qualifiedOverride (intersected with present tags) when set, else the
+// NodePattern-filtered set, else all node tags. Shared by buildProxyGroups
+// and buildRules (per-terminal slicing) so both see the same membership.
+func (r *Renderer) usPoolMembers(outbounds []subscribe.Outbound) []string {
+	tags := nodeTags(outbounds)
+	var pool []string
+	if len(r.qualifiedOverride) > 0 {
+		tagSet := make(map[string]bool, len(tags))
+		for _, t := range tags {
+			tagSet[t] = true
+		}
+		for _, t := range r.qualifiedOverride {
+			if tagSet[t] {
+				pool = append(pool, t)
+			}
+		}
+	}
+	if len(pool) == 0 {
+		pool = filterByPattern(tags, r.cfg.URLTest.NodePattern)
+		if len(pool) == 0 {
+			pool = tags
+		}
+	}
+	return pool
 }
 
 // nodeTags returns the tags of all node-bearing outbounds, preserving order.

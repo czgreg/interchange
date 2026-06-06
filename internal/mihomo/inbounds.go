@@ -25,16 +25,29 @@ func (r *Renderer) buildTUN() map[string]any {
 	if device == "" || len(device) > maxIfaceNameLen {
 		device = defaultDevice
 	}
+	stack := r.cfg.TUN.Stack
+	if stack == "" {
+		stack = "system"
+	}
+	// gvisor (userspace) preserves the real client sourceIP — required for
+	// per-terminal routing. system collapses sourceIP to the TUN device
+	// address. mtu drops to 1500 under gvisor (9000 is a system-stack
+	// optimization that gvisor's userspace path doesn't benefit from and
+	// can mis-segment).
+	mtu := 9000
+	if stack == "gvisor" {
+		mtu = 1500
+	}
 	return map[string]any{
 		"enable":                 true,
 		"device":                 device,
-		"stack":                  "system",
+		"stack":                  stack,
 		"auto-route":             false,
 		"auto-redir":             false,
 		"auto-detect-interface":  false,
 		"dns-hijack":             []string{"any:53"},
 		"strict-route":           false,
-		"mtu":                    9000,
+		"mtu":                    mtu,
 		"include-interface":      []string{},
 		"exclude-interface":      []string{},
 	}

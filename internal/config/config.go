@@ -45,6 +45,10 @@ type Config struct {
 	// (you can't load-test live production). Surfaced in /api/status so
 	// operators can compare current load against the known ceiling.
 	Capacity CapacityConfig `yaml:"capacity"`
+
+	// LoadBalance tunes how overseas (us-pool-bound) traffic is spread.
+	// Default zero value = per-destination (consistent-hashing) as before.
+	LoadBalance LoadBalanceConfig `yaml:"load_balance"`
 }
 
 // CapacityConfig records the stress-tested single-node ceiling. Update it
@@ -152,6 +156,33 @@ type TUNConfig struct {
 	Address       string `yaml:"address"` // e.g. "172.19.0.1/30"
 	FWMark        int    `yaml:"fwmark"`
 	RoutingTable  int    `yaml:"routing_table"`
+	// Stack selects mihomo's TUN network stack:
+	//   "system" (default) — kernel handles the TUN socket; lower CPU but
+	//                        collapses every client's sourceIP to the TUN
+	//                        device address (198.18.0.0), so per-terminal /
+	//                        per-source routing is impossible.
+	//   "gvisor"           — userspace stack; preserves the real client
+	//                        sourceIP (10.8.x.x). REQUIRED for
+	//                        load_balance.per_terminal. ~1 CPU tier higher.
+	Stack string `yaml:"stack"`
+}
+
+// LoadBalanceConfig tunes how overseas (us-pool-bound) traffic is spread.
+type LoadBalanceConfig struct {
+	// PerTerminal, when true, pins each client terminal's whitelisted
+	// (domain-matched) traffic to a single egress node — "one terminal,
+	// one egress". Eliminates the multi-node drift within one logical
+	// session (chatgpt.com / chat.openai.com / ws.chatgpt.com all exit the
+	// same IP) that trips OpenAI/Cloudflare anomaly detection.
+	//
+	// REQUIRES data_plane.tun.stack=gvisor — otherwise every terminal looks
+	// like sourceIP 198.18.0.0 and all of them collapse onto one node.
+	//
+	// Mechanism: the renderer slices node.client_subnet into per-/32
+	// SRC-IP-CIDR rules under a `perterm` sub-rule, assigning each terminal
+	// to a qualified us-pool node via rendezvous (HRW) hashing. Whitelist
+	// rules route to the perterm sub-rule instead of directly to `out`.
+	PerTerminal bool `yaml:"per_terminal"`
 }
 
 type DNSConfig struct {
@@ -409,6 +440,9 @@ func (c *DataPlaneConfig) ApplyDefaults() {
 	}
 	if c.TUN.RoutingTable == 0 {
 		c.TUN.RoutingTable = 100
+	}
+	if c.TUN.Stack == "" {
+		c.TUN.Stack = "system"
 	}
 
 	// DNS defaults.
