@@ -197,6 +197,17 @@ install_leap() {
   install -d -m 0755 /var/lib/leap/mihomo /var/lib/leap/mihomo/rule-sets
 
   if [ -f "$SCRIPT_DIR/gateway.yaml" ]; then
+    # Auto-backup whatever is currently at /etc/leap/gateway.yaml before
+    # overwriting. Cheap insurance — the staged yaml may have schema /
+    # field drift from the on-node copy (saw this on 92's 2026-06-07
+    # mihomo cutover), and operators were doing manual `sudo cp` for
+    # rollback. Now it's automatic. Backups are 0640 root:root, never
+    # pruned automatically — operators clean up when they need the disk.
+    if [ -f /etc/leap/gateway.yaml ]; then
+      bak=/etc/leap/gateway.yaml.bak.$(date -u +%Y%m%d-%H%M%S)
+      install -m 0640 /etc/leap/gateway.yaml "$bak"
+      log "backed up existing gateway.yaml → $bak"
+    fi
     install -m 0640 "$SCRIPT_DIR/gateway.yaml" /etc/leap/gateway.yaml
     log "gateway.yaml installed (edit /etc/leap/gateway.yaml + restart leap-gateway to update)"
   elif [ ! -f /etc/leap/gateway.yaml ]; then

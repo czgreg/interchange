@@ -50,7 +50,17 @@ log() { printf '[stage] %s\n' "$*"; }
 fail() { printf '[stage][FAIL] %s\n' "$*" >&2; exit 1; }
 
 # ---------------------------------------------------------------------------
-[ -f "$GATEWAY_YAML" ] || fail "gateway.yaml not found at $GATEWAY_YAML — copy configs/gateway.example.yaml and fill in subscription URL + node values"
+# Without an explicit yaml the staged tarball would be useless. The
+# preferred flow for an existing node is `make redeploy-89` /
+# `make redeploy-92` (or `scripts/redeploy-full.sh <host>`) — that pulls
+# /etc/leap/gateway.yaml from the node and feeds it to this script via
+# GATEWAY_YAML, so the staged tarball never lies about what the node will
+# end up running. Only fall back to ./gateway.yaml + plain `make stage`
+# when bootstrapping a fresh node that has no on-disk config yet.
+[ -f "$GATEWAY_YAML" ] || fail "gateway.yaml not found at $GATEWAY_YAML.
+       For an existing node, prefer:  make redeploy-89  /  make redeploy-92
+       For a fresh node, copy:        configs/gateway.example.yaml → ./gateway.yaml
+                                       and fill in subscription URL + node values."
 
 mkdir -p "$OUT_DIR" "$STAGE_CACHE"
 STAGE_DIR="$OUT_DIR/leap-stage"
@@ -64,6 +74,12 @@ mkdir -p "$STAGE_DIR"
 # .gateway_version reports it — `dev` means the binary was built off-tree,
 # which is exactly the case we want to flag during incident triage.
 VERSION=$(git describe --tags --always --dirty 2>/dev/null || echo dev)
+case "$VERSION" in
+  *-dirty)
+    log "WARNING: worktree dirty — version=$VERSION will lie about what's deployed."
+    log "         commit your changes first if this is going to a node you care about."
+    ;;
+esac
 log "building leap-gateway (linux/$GOARCH, version=$VERSION)"
 GOOS=linux GOARCH="$GOARCH" CGO_ENABLED=0 go build \
   -ldflags="-s -w -X main.Version=$VERSION" \

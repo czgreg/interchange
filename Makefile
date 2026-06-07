@@ -4,12 +4,13 @@
 #   make help              # list targets
 #   make setup-ssh         # 一次性：推公钥 + NOPASSWD sudo（先跑这个！）
 #   make test              # go vet + go test
-#   make deploy-89         # deploy to staging 89
-#   make deploy-92         # deploy to production 92
+#   make deploy-89         # binary-only deploy to 89 (~10s)
+#   make deploy-92         # binary-only deploy to 92 (~10s)
 #   make deploy-all        # 89 先，92 后
 #   make deploy-yaml       # 仅推 gateway.yaml（不换二进制）
-#   make deploy-tproxy     # 推 TPROXY 配置到 89（tproxy_port; per_terminal 前置）
-#   make deploy-perterm    # 推 per_terminal:true 配置到 89
+#   make redeploy-89       # ★ 全量重装到 89（先拉 89 的 yaml + stage + install）
+#   make redeploy-92       # ★ 全量重装到 92（先拉 92 的 yaml + stage + install）
+#   make redeploy-full NODE=dianwei@<ip>  # 同上，自定义节点
 #   make status            # /api/status
 #   make health            # /api/proxies/active
 #   make nodes             # /api/nodes/health
@@ -39,7 +40,7 @@ SCP         := scp $(SSH_OPTS)
 
 .PHONY: help
 help:  ## 列出所有 target
-	@awk 'BEGIN{FS=":.*##"} /^[a-zA-Z_-]+:.*##/ {printf "  \033[36m%-22s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST)
+	@awk 'BEGIN{FS=":.*##"} /^[a-zA-Z0-9_-]+:.*##/ {printf "  \033[36m%-22s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST)
 
 # ---------------------------------------------------------------------------
 # Build
@@ -95,16 +96,20 @@ deploy-yaml:  ## 仅推 gateway.yaml + 重启  GATEWAY_YAML=./path/to/yaml
 	  sudo systemctl restart leap-gateway && rm -f /tmp/gateway.yaml.new && \
 	  sleep 1 && sudo journalctl -u leap-gateway -n 5 --no-pager'
 
-.PHONY: deploy-tproxy
-deploy-tproxy: build-linux  ## 推 TPROXY 配置到 89（tproxy_port; gvisor 不是前提）
-	scripts/deploy.sh --config /tmp/gw89-gvisor.yaml --skip-build 192.168.70.89
+.PHONY: redeploy-full
+redeploy-full:  ## ★ 安全全量重装：先拉节点 yaml，再 stage+install+verify  NODE=dianwei@<ip>
+	./scripts/redeploy-full.sh $(NODE_HOST)
 
-.PHONY: deploy-perterm
-deploy-perterm: build-linux  ## 推 per_terminal:true 配置到 89
-	scripts/deploy.sh --config /tmp/gw89-perterm.yaml --skip-build 192.168.70.89
+.PHONY: redeploy-89
+redeploy-89:  ## redeploy-full 到 89（pulls 89's yaml first）
+	./scripts/redeploy-full.sh 192.168.70.89
 
-.PHONY: deploy-full
-deploy-full: stage  ## 全量重装 (changed install.sh / *.service / nft templates)
+.PHONY: redeploy-92
+redeploy-92:  ## redeploy-full 到 92（pulls 92's yaml first）
+	./scripts/redeploy-full.sh 192.168.70.92
+
+.PHONY: deploy-full-LOCAL-YAML
+deploy-full-LOCAL-YAML: stage  ## ⚠️ 全量重装，使用本地 ./gateway.yaml（容易踩雷；优先用 redeploy-full）
 	$(SCP) build/leap-stage.tgz $(NODE):/tmp/
 	$(SSH) 'cd /tmp && rm -rf leap-stage && tar --no-same-owner -xzf leap-stage.tgz && \
 	  sudo bash leap-stage/install.sh'

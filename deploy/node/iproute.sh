@@ -41,6 +41,15 @@ tproxy_up() {
     # Ensure xt_TPROXY module is loaded.
     modprobe xt_TPROXY 2>/dev/null || true
 
+    # Legacy cleanup: fwmark 0x42 / table 100 are sing-box-era leftovers
+    # (its `tun.fwmark: 66 / routing_table: 100`). Nothing tags packets
+    # with 0x42 anymore now that the sing-box engine is retired and
+    # mihomo's TUN inbound has auto-route disabled — the rule + table
+    # are inert but persist across boots until something cleans them.
+    # Run on every up so a node deployed pre-2026-06 self-cleans.
+    while ip rule del fwmark 0x42 lookup 100 2>/dev/null; do :; done
+    ip route flush table 100 2>/dev/null || true
+
     # ip rule: TPROXY-marked packets → local routing table 101.
     while ip rule del fwmark "$TPROXY_MARK" lookup "$TPROXY_TABLE" 2>/dev/null; do :; done
     ip rule add fwmark "$TPROXY_MARK" lookup "$TPROXY_TABLE" pref 101
