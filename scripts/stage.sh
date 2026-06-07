@@ -203,7 +203,7 @@ done < <(awk '
   }
 ' "$GATEWAY_YAML")
 
-for tag in "${WL_TAGS[@]}"; do
+for tag in "${WL_TAGS[@]:-}"; do
   case "$tag" in
     geosite-*) stem="${tag#geosite-}"
                RULESET_ENTRIES+=("${tag}.mrs|https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/meta/geo/geosite/${stem}.mrs") ;;
@@ -232,7 +232,7 @@ done < <(awk '
   }
 ' "$GATEWAY_YAML")
 
-for tag in "${POOL_TAGS[@]}"; do
+for tag in "${POOL_TAGS[@]:-}"; do
   case "$tag" in
     geosite-*) stem="${tag#geosite-}"
                RULESET_ENTRIES+=("${tag}.mrs|https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/meta/geo/geosite/${stem}.mrs") ;;
@@ -244,7 +244,7 @@ done
 # Dedupe by save_name|url tuple (bash 3.2 has no associative arrays).
 DEDUPED_ENTRIES=()
 SEEN=$'\n'
-for e in "${RULESET_ENTRIES[@]}"; do
+for e in "${RULESET_ENTRIES[@]:-}"; do
   case "$SEEN" in
     *$'\n'"$e"$'\n'*) ;;
     *)
@@ -257,7 +257,7 @@ done
 log "fetching ${#DEDUPED_ENTRIES[@]} rule-set .mrs files (cn infra + gateway.yaml whitelist)"
 fetched=0
 skipped=0
-for entry in "${DEDUPED_ENTRIES[@]}"; do
+for entry in "${DEDUPED_ENTRIES[@]:-}"; do
   fname="${entry%%|*}"
   url="${entry#*|}"
   cached="$RULESETS_CACHE/$fname"

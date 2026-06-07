@@ -205,15 +205,33 @@ func (s *Server) handleRefresh(w http.ResponseWriter, r *http.Request) {
 
 // RunRefresh is the full subscribe → render → reload flow, exposed so main()
 // can also trigger it on startup or on a timer.
+//
+// Failures inside Refresh (per-subscription fetch / parse errors, transient
+// airport RSTs, UA mismatches, even all-subs-zero outcomes) are warn-only.
+// Reasons:
+//   - Mutation handlers (POST/PUT/DELETE /api/subscriptions) call RunRefresh
+//     AFTER the on-disk yaml has already been persisted. Reporting 5xx because
+//     the post-mutate refresh hit transient errors makes the API caller think
+//     the operation failed when it actually succeeded — observed during DELETE
+//     on 2026-06-07 when removing the last bad subscription left the remaining
+//     ones in a momentary RST window and we returned 500.
+//   - Empty `all` outbounds is a valid steady state: the mihomo renderer's
+//     empty-pool fallback emits a DIRECT-only config that loads cleanly.
+//     Operators recovering from "all subs broken" want the data plane to
+//     stay alive, not refuse to render.
+//
+// Hard errors (returned to caller) are reserved for problems caused by THIS
+// refresh that the caller can act on: render failure, mihomo reload failure.
 func RunRefresh(ctx context.Context, mgr *subscribe.Manager, r Renderer, c *dataplane.Controller) error {
 	results, err := mgr.Refresh(ctx)
 	if err != nil {
 		slog.Warn("subscribe refresh had errors", "err", err)
 	}
-	if len(results) == 0 {
-		return fmt.Errorf("no subscription produced any nodes")
-	}
 	all := mgr.AllOutbounds()
+	if len(results) == 0 {
+		slog.Warn("subscribe: no subscription produced nodes — rendering DIRECT-only fallback",
+			"results", len(results), "outbounds", len(all))
+	}
 	if _, err := r.Write(all); err != nil {
 		return fmt.Errorf("render: %w", err)
 	}
