@@ -32,6 +32,12 @@ log()  { printf '\033[1;34m[redeploy]\033[0m %s\n' "$*"; }
 ok()   { printf '\033[1;32m[redeploy]\033[0m %s\n' "$*"; }
 fail() { printf '\033[1;31m[redeploy][FAIL]\033[0m %s\n' "$*" >&2; exit 1; }
 
+# ⛔ HARD RULE printed at the top of every sync — see CLAUDE.md.
+# Subscriptions in the pulled yaml go back to the node verbatim. Do NOT
+# add/remove/rename/reorder entries between pull and push. Each node's
+# subscription set is operator-owned and intentionally different per node.
+printf '\033[1;33m[redeploy] ⛔ subscriptions[] is operator-owned — NEVER edit between pull and push\033[0m\n'
+
 SSH="ssh -o ConnectTimeout=10 -o StrictHostKeyChecking=no $REMOTE_USER@$HOST"
 SCP="scp -O -o ConnectTimeout=10 -o StrictHostKeyChecking=no"
 

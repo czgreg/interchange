@@ -128,6 +128,10 @@ rm -rf "$tmp"
 ls -lh "$STAGE_DIR/sing-box" | awk '{print "[stage] sing-box (CLI)", $5}'
 
 # 4. Operator gateway.yaml.
+# ⛔ subscriptions[] in this yaml is operator-owned and per-node-specific.
+# If this stage came from `redeploy-full.sh` (yaml pulled from a node),
+# the subscriptions block is going right back to that node — DO NOT edit
+# entries between pull and push. See CLAUDE.md.
 cp "$GATEWAY_YAML" "$STAGE_DIR/gateway.yaml"
 log "gateway.yaml copied from $GATEWAY_YAML"
 
