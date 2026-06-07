@@ -15,7 +15,13 @@ api:
   # token: "change-me"  # uncomment to require Authorization: Bearer <token>
 
 subscribe:
-  refresh_interval: 30m   # 0 = 关闭周期刷新；只接受 POST /api/subscribe/refresh 手动触发
+  # 0 = 关闭周期刷新；只接受 POST /api/subscribe/refresh 手动触发。
+  # 默认 0 因为：
+  #   1. 阅后即焚类机场订阅二刷直接挂；
+  #   2. 节点列表本来就低频变化（手动换 URL 时再调一次接口足够）；
+  #   3. 节点健康度由 nodescorer 周期探针在跑，不需要靠重拉订阅"刷新一下"。
+  # 想要原来的周期刷新行为：填一个非零 duration（如 30m）。
+  refresh_interval: 0
   refresh_on_startup: true
   http_timeout: 30s
   # 全局默认 user_agent —— Clash UA 覆盖面广（ash 等机场对 sing-box UA 返回 HTTP 500）。
