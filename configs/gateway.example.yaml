@@ -228,17 +228,18 @@ pools: []
 # can compare live user count against the ceiling. Omit the block entirely
 # until you've actually stress-tested.
 capacity:
-  # Reference numbers measured on 89 (4 subs / ~22 US nodes) 2026-06-06.
-  # Re-run scripts/stress.sh on YOUR node and overwrite — these are a
-  # starting anchor, not a universal truth. Finding: mihomo CPU stayed
-  # <26% up to 200 synthetic continuous-load workers with 0 errors; the
-  # ceiling is cross-border airport throughput (latency climbs), not the
-  # local data plane. Workers are ~5-10x a real bursty employee, so the
-  # real sustained user count is well above these conservative floors.
-  sustained_max_users: 50    # p95 < 2s   (tier 50, continuous-load workers)
-  degraded_max_users:  150   # p95 ~5s    (tier 150, still 0 errors)
-  measured_at:   "2026-06-06"
-  measured_with: "stress.sh on 89 / mihomo v1.19.26; upstream-bandwidth-bound"
+  # Reference numbers measured on 89 + 92 (both 4 subs / ~22 US nodes) 2026-06-07
+  # against commit 941d55f (mihomo + TPROXY + per_terminal). Re-run
+  # scripts/stress.sh on YOUR node and overwrite — these are a starting
+  # anchor, not a universal truth. Finding: mihomo CPU stayed <36% even at
+  # tier 150 with ~0% errors on both nodes; the ceiling is cross-border
+  # airport throughput (p95 climbs), not the local data plane. Workers are
+  # ~5-10x a real bursty employee, so the real sustained user count is well
+  # above these conservative floors.
+  sustained_max_users: 50    # p95 ~2s    (tier 50, continuous-load workers)
+  degraded_max_users:  150   # p95 ~5s    (tier 150, ~0 errors)
+  measured_at:   "2026-06-07"
+  measured_with: "stress.sh on 89+92 / mihomo v1.19.26 / 941d55f / TPROXY+per_terminal; upstream-bandwidth-bound"
 
 # Load-balance behavior for overseas (us-pool-bound) traffic.
 load_balance:

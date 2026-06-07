@@ -63,8 +63,8 @@ token 为空时不鉴权。
   "capacity": {
     "sustained_max_users": 50,
     "degraded_max_users":  150,
-    "measured_at":         "2026-06-06",
-    "measured_with":       "stress.sh / mihomo v1.19.26"
+    "measured_at":         "2026-06-07",
+    "measured_with":       "stress.sh on 89+92 / mihomo v1.19.26 / 941d55f / TPROXY+per_terminal"
   }
 }
 ```

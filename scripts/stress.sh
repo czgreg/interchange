@@ -31,7 +31,17 @@ PROXY="${PROXY:-http://127.0.0.1:11080}"
 TIERS="${TIERS:-10 30 50 80 100 150}"
 TIER_SECS="${TIER_SECS:-30}"
 MIHOMO_PROC="${MIHOMO_PROC:-/usr/local/bin/mihomo}"
-TARGETS="${TARGETS:-https://www.gstatic.com/generate_204 https://api.github.com/ https://www.google.com/generate_204 https://chatgpt.com/}"
+# Default targets must consistently return 2xx/3xx for unauthenticated GETs —
+# the script's ERR% otherwise conflates "proxy can't keep up" with "the
+# upstream just doesn't accept anonymous root pings". chatgpt.com (CF
+# challenge → 403) and api.github.com/ (root + datacenter IP rate-limit
+# → 403) used to be defaults and inflated baseline ERR% to ~50% at tier=10.
+# Four diverse orgs/CDNs that all reliably 2xx/3xx through the proxy:
+#   gstatic.com/generate_204            Google CDN, 204
+#   cloudflare.com/cdn-cgi/trace        Cloudflare edge, 200
+#   google.com/robots.txt               Google direct, 200
+#   detectportal.firefox.com/success.txt  Mozilla edge, 200
+TARGETS="${TARGETS:-https://www.gstatic.com/generate_204 https://www.cloudflare.com/cdn-cgi/trace https://www.google.com/robots.txt https://detectportal.firefox.com/success.txt}"
 
 log() { printf '[stress] %s\n' "$*" >&2; }
 
@@ -62,6 +72,14 @@ worker() {
 
 # Sample mihomo cpu% over a 1s window + current RSS (MB).
 sample_proc() {
+  # Re-resolve MPID if the previously-cached one is gone — mihomo can be
+  # restarted mid-run by leap-gateway's auto-reload after a subscription
+  # refresh. Without this, late-tier rows show CPU=0 RSS=0 (sampling
+  # artifact) and the operator misreads the ceiling.
+  if [ ! -r "/proc/$MPID/stat" ]; then
+    MPID=$(pgrep -f "$MIHOMO_PROC" | head -1 || true)
+    [ -n "$MPID" ] || { echo "0 0"; return; }
+  fi
   # /proc/<pid>/stat utime+stime in clock ticks; delta over 1s / Hz / ncpu.
   local hz; hz=$(getconf CLK_TCK)
   local t1 t2
