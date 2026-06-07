@@ -1,8 +1,9 @@
 // Package dataplane manages the proxy data-plane process (mihomo). The
 // Controller exposes a small surface — health probe via clash-api, reload
-// via systemctl restart — used by the API package and the subscription
-// scheduler. Engine-agnostic by design: future backends (e.g. sing-box,
-// xray) would slot in here, but as of 2026-06 mihomo is the only one.
+// via clash-api PUT /configs (or systemctl restart as fallback) — used by
+// the API package and the subscription scheduler. Engine-agnostic by
+// design: future backends (e.g. sing-box, xray) would slot in here, but
+// as of 2026-06 mihomo is the only one.
 //
 // History: this code lived under internal/singbox/ when sing-box was the
 // default engine. After the mihomo cutover the sing-box renderer was
@@ -11,8 +12,11 @@
 package dataplane
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"io"
+	"log/slog"
 	"net/http"
 	"os/exec"
 	"time"
@@ -36,10 +40,13 @@ const (
 )
 
 // Controller manages the proxy data-plane process (mihomo). Reload
-// triggers a systemd restart of the configured unit (mihomo's clash-api
-// PUT /configs hot-reload is used by the NodeScorer separately for pool
-// changes — but whitelist/subscription rerenders go through systemctl
-// because they touch more than just proxy membership).
+// hot-reloads via clash-api PUT /configs?force=true (in-process,
+// preserves established TCP connections incl. the leap-gateway HTTP API
+// client and any in-flight ssh sessions). Falls back to `systemctl
+// restart` only when clash-api is unreachable — that path drops user
+// connections briefly and on at least one node (89, 2026-06-07) leaks
+// out to the host SSH session via leap-nft's PartOf=leap-mihomo restart
+// chain re-running iproute.sh.
 type Controller struct {
 	api    config.ClashAPIConfig
 	client *http.Client
@@ -56,14 +63,51 @@ func NewController(api config.ClashAPIConfig) *Controller {
 	}
 }
 
-// Reload restarts the data-plane systemd unit so it re-reads its config
-// file. Connections drop briefly during restart; for a 30-min refresh
-// cadence this is acceptable.
-func (c *Controller) Reload(ctx context.Context) error {
+// Reload tells the data-plane to re-read its config file at configPath.
+// Tries clash-api PUT /configs?force=true first (in-process, no
+// connection churn). Falls back to systemctl restart if the API is
+// unreachable (cold-boot, mid-restart, etc.). configPath="" forces the
+// systemctl path — used when the caller doesn't have a renderer handy.
+func (c *Controller) Reload(ctx context.Context, configPath string) error {
+	if configPath != "" && c.api.ExternalController != "" {
+		if err := c.hotReload(ctx, configPath); err == nil {
+			return nil
+		} else {
+			slog.Warn("dataplane: clash-api hot-reload failed, falling back to systemctl restart",
+				"err", err, "path", configPath)
+		}
+	}
 	cmd := exec.CommandContext(ctx, "systemctl", "restart", c.SystemdUnit)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("systemctl restart %s: %w: %s", c.SystemdUnit, err, string(out))
+	}
+	return nil
+}
+
+// hotReload PUTs to mihomo's clash-api /configs?force=true endpoint with
+// the on-disk config path. force=true tells mihomo to drop its current
+// state and load the new file; established proxy flows are kept where
+// possible. Returns error so caller can fall back to systemctl restart.
+func (c *Controller) hotReload(ctx context.Context, configPath string) error {
+	body := []byte(`{"path":"` + configPath + `"}`)
+	url := "http://" + c.api.ExternalController + "/configs?force=true"
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, url, bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if c.api.Secret != "" {
+		req.Header.Set("Authorization", "Bearer "+c.api.Secret)
+	}
+	resp, err := c.client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode/100 != 2 {
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		return fmt.Errorf("clash-api PUT /configs status %d: %s", resp.StatusCode, b)
 	}
 	return nil
 }

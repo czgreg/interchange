@@ -236,7 +236,7 @@ func RunRefresh(ctx context.Context, mgr *subscribe.Manager, r Renderer, c *data
 		return fmt.Errorf("render: %w", err)
 	}
 	slog.Info("subscribe refreshed", "subscriptions", len(results), "nodes", len(all))
-	if err := c.Reload(ctx); err != nil {
+	if err := c.Reload(ctx, r.Path()); err != nil {
 		return fmt.Errorf("reload: %w", err)
 	}
 	return nil

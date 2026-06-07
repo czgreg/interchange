@@ -301,7 +301,7 @@ func (s *Server) rerenderAndReload(ctx context.Context) error {
 	if _, err := s.deps.Renderer.Write(out); err != nil {
 		return fmt.Errorf("render: %w", err)
 	}
-	return s.deps.Controller.Reload(ctx)
+	return s.deps.Controller.Reload(ctx, s.deps.Renderer.Path())
 }
 
 func validateDomainSuffix(s string) error {
