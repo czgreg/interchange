@@ -293,12 +293,27 @@ func (s *StringList) UnmarshalYAML(node *yaml.Node) error {
 	return nil
 }
 
-// URLTestConfig drives mihomo's load-balance internal url-test. Distinct
-// from NodeQualifyConfig (which is leap-gateway's own scorer); these
-// thresholds shape mihomo's own per-flow health-check + url-test cycle.
+// URLTestConfig drives mihomo's load-balance internal probe + url-test.
+// Distinct from NodeQualifyConfig (which is leap-gateway's own scorer);
+// these thresholds shape mihomo's per-flow health-check + url-test cycle.
 type URLTestConfig struct {
 	// Interval = mihomo url-test periodic full-pool re-test (default 3m).
+	// Legacy field — used as fallback when HealthCheckInterval is unset.
 	Interval time.Duration `yaml:"interval"`
+	// HealthCheckInterval is how often mihomo internally probes each
+	// LoadBalance member to update its alive bit. This is the FAST/binary
+	// liveness signal — when a node TCP/HTTP-fails one probe, mihomo's
+	// LoadBalance routing skips it for new connections WITHOUT any yaml
+	// rerender. Default 30s. Tune lower for snappier failover at the
+	// cost of slightly more airport probe traffic; tune higher only if
+	// quotas become a concern.
+	//
+	// Architectural rule: this MUST be ≤ NodeQualify.ScoringInterval.
+	// Liveness is mihomo's job (this knob); graded eviction is the
+	// scorer's job (slower cycle). Inverting them — making the scorer
+	// faster than mihomo's own probe — re-introduces the noise the
+	// split was meant to eliminate.
+	HealthCheckInterval time.Duration `yaml:"health_check_interval"`
 	// Tolerance = ms hysteresis: only switch if a new candidate is faster
 	// by this much (default 50). Mostly cosmetic under load-balance.
 	Tolerance int `yaml:"tolerance"`
@@ -505,6 +520,12 @@ func (c *DataPlaneConfig) ApplyDefaults() {
 	// URLTest defaults.
 	if c.URLTest.Interval == 0 {
 		c.URLTest.Interval = 3 * time.Minute
+	}
+	if c.URLTest.HealthCheckInterval == 0 {
+		// 30s: fast enough that LoadBalance routing skips a dead node
+		// within one probe cycle; slow enough that 19 nodes × N subs
+		// stays well under any airport's monthly quota.
+		c.URLTest.HealthCheckInterval = 30 * time.Second
 	}
 	if c.URLTest.Tolerance == 0 {
 		c.URLTest.Tolerance = 50

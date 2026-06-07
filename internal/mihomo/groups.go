@@ -74,9 +74,16 @@ func (r *Renderer) buildProxyGroups(outbounds []subscribe.Outbound) []map[string
 	if probeURL == "" {
 		probeURL = "http://www.gstatic.com/generate_204"
 	}
-	intervalSec := int(r.cfg.URLTest.Interval.Seconds())
+	// HealthCheckInterval is the FAST/binary liveness signal — mihomo's
+	// load-balance internally skips dead members on this cycle, no yaml
+	// rerender needed. Falls back to the legacy URLTest.Interval (default
+	// 3m) when HealthCheckInterval is unset, so older yamls keep working.
+	intervalSec := int(r.cfg.URLTest.HealthCheckInterval.Seconds())
 	if intervalSec <= 0 {
-		intervalSec = 60
+		intervalSec = int(r.cfg.URLTest.Interval.Seconds())
+	}
+	if intervalSec <= 0 {
+		intervalSec = 30
 	}
 
 	groups := []map[string]any{

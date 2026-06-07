@@ -128,11 +128,17 @@ data_plane:
       ip_cidr:  []         # e.g. 149.154.0.0/16
       fake_ip_skip: []     # synced to data_plane.dns.fake_ip_skip_suffixes on PUT
 
-  # mihomo's load-balance internal url-test. Distinct from node_qualify
-  # below (which is leap-gateway's own scorer); these thresholds shape
-  # mihomo's per-flow health-check + url-test cycle.
+  # mihomo's load-balance internal probe + url-test. Distinct from
+  # node_qualify below (which is leap-gateway's own scorer).
+  #
+  # Architectural split:
+  #   • health_check_interval: FAST/binary liveness. mihomo internally
+  #     skips dead nodes per-flow on this cycle WITHOUT yaml rerender.
+  #     Default 30s. Pick this knob when you want faster failover.
+  #   • node_qualify.scoring_interval: SLOW/graded eviction (see below).
   url_test:
-    interval:  3m
+    interval:              3m     # legacy, kept for back-compat; superseded by health_check_interval
+    health_check_interval: 30s    # mihomo's per-flow liveness probe cycle
     tolerance: 50
     probe_url: "https://www.gstatic.com/generate_204"
     # Filter us-pool by node-tag regex. Empty = every airport node a
