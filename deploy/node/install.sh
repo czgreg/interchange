@@ -49,8 +49,11 @@ precheck() {
   log "preflight: feilian-tun@tun0 active"
 
   # tun0 must exist with the IP that matches gateway.yaml.
+  # Note: precheck runs BEFORE leap-gateway is installed, so we can't use
+  # --print-env here. The sed extractor accepts both quoted ("10.8.13.1")
+  # and unquoted (10.8.13.1) yaml values; trims trailing comments.
   if [ -f "$SCRIPT_DIR/gateway.yaml" ]; then
-    expected_gw=$(grep -E '^\s*tun0_gateway_ip:' "$SCRIPT_DIR/gateway.yaml" | awk -F'"' '{print $2}')
+    expected_gw=$(sed -nE 's/^[[:space:]]*tun0_gateway_ip:[[:space:]]*"?([^"#[:space:]]+)"?.*/\1/p' "$SCRIPT_DIR/gateway.yaml")
     actual_gw=$(ip -4 -o addr show tun0 2>/dev/null | awk '{print $4}' | cut -d/ -f1)
     [ -z "$expected_gw" ] && fail "gateway.yaml missing node.tun0_gateway_ip"
     [ "$expected_gw" = "$actual_gw" ] \
@@ -82,9 +85,10 @@ precheck() {
 
   # api.listen must be free. FeiLian's feilian-sentry typically owns
   # 127.0.0.1:8080, so configs default to 18080; double-check whatever the
-  # operator picked.
+  # operator picked. Same sed pattern as tun0_gateway_ip — accepts quoted
+  # or unquoted yaml.
   if [ -f "$SCRIPT_DIR/gateway.yaml" ]; then
-    api_addr=$(grep -E '^\s*listen:' "$SCRIPT_DIR/gateway.yaml" | head -1 | awk -F'"' '{print $2}')
+    api_addr=$(sed -nE 's/^[[:space:]]*listen:[[:space:]]*"?([^"#[:space:]]+)"?.*/\1/p' "$SCRIPT_DIR/gateway.yaml" | head -1)
     if [ -n "$api_addr" ]; then
       api_port=${api_addr##*:}
       if ss -tulnp 2>/dev/null | grep -E ":${api_port}\b" | grep -v leap-gateway >/dev/null; then
@@ -133,7 +137,12 @@ install_mihomo() {
     install -m 0755 "$tmp/m" /usr/local/bin/mihomo
     rm -rf "$tmp"
   fi
-  v=$(/usr/local/bin/mihomo -v 2>&1 | head -1)
+  # Capture full output then take first line in shell — avoids SIGPIPE
+  # from `head -1` closing the pipe early under `set -o pipefail` (mihomo
+  # -v emits 2 lines, the second triggers SIGPIPE → pipefail propagates
+  # exit 141 and the install aborts).
+  v=$(/usr/local/bin/mihomo -v 2>&1)
+  v=${v%%$'\n'*}
   log "mihomo: $v"
 }
 
@@ -167,7 +176,10 @@ install_singbox_cli() {
     install -m 0755 "$tmp/$pkg/sing-box" /usr/local/bin/sing-box
     rm -rf "$tmp"
   fi
-  v=$(/usr/local/bin/sing-box version | head -1)
+  # Same SIGPIPE-safe pattern as mihomo above (sing-box version also
+  # emits multiple lines).
+  v=$(/usr/local/bin/sing-box version 2>&1)
+  v=${v%%$'\n'*}
   log "sing-box CLI: $v"
 }
 
@@ -296,14 +308,18 @@ prerender_config() {
 
 start_services() {
   log "enabling + starting leap-mihomo + leap-gateway"
-  systemctl enable --now leap-mihomo.service
-  systemctl enable --now leap-gateway.service
-
-  # leap-nft must come up AFTER mihomo creates utun-leap (its
-  # ExecStartPre waits up to 60s for that), and restart whenever mihomo
-  # restarts (PartOf chain). Always (re)start it last.
-  systemctl enable leap-nft.service
+  # Use enable + restart (not enable --now). `enable --now` is a no-op for
+  # services already running — so a re-install with new binaries / new
+  # gateway.yaml would silently keep the old processes alive. Explicit
+  # restart ensures the units pick up whatever this run just installed.
+  systemctl daemon-reload
+  systemctl enable leap-mihomo.service leap-gateway.service leap-nft.service
+  systemctl restart leap-mihomo.service
+  # leap-nft has PartOf=leap-mihomo.service so it auto-restarts when
+  # mihomo does, but be explicit in case the unit file dependency changed
+  # this run (daemon-reload + restart picks up new After=/BindsTo=).
   systemctl restart leap-nft.service
+  systemctl restart leap-gateway.service
 
   systemctl --no-pager status leap-mihomo.service leap-gateway.service leap-nft.service \
     | head -30 || true
