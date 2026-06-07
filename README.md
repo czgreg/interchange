@@ -173,4 +173,4 @@ tun0 (FeiLian VPN interface)
 | 节点 | 子网 | 角色 | 状态 |
 |---|---|---|---|
 | 192.168.70.89 | 10.8.13.0/24 | 灰度 staging | TPROXY + per_terminal 验证通过 |
-| 192.168.70.92 | 10.8.12.0/24 | 生产 production | 等通知后部署 |
+| 192.168.70.92 | 10.8.12.0/24 | 生产 production | 2026-06-07 cutover 到 mihomo + TPROXY + per_terminal |
