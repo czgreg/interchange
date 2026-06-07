@@ -72,8 +72,8 @@ token 为空时不鉴权。
 | 字段 | 说明 |
 |---|---|
 | `engine_ok` | mihomo clash-api `/version` 可达 |
-| `pool_qualified/total` | NodeScorer 当前合格/候选节点数 |
-| `pool_last_update` | us-pool 成员最近一次变更时间 |
+| `pool_qualified/total` | 当前 us-pool 成员数 / NodePattern-匹配的候选总数。post Plan-A：us-pool = 全部候选，所以稳态下两者相等；不等只发生在订阅刚增减节点 + 下一轮 scoring 之间（数秒内）。 |
+| `pool_last_update` | us-pool 成员最近一次变更时间。变更频率 ≈ 订阅增减节点频率（小时-天级）。 |
 | `capacity` | 离线压测得出的单机上限，未配置时不返回 |
 
 ---
@@ -94,13 +94,18 @@ token 为空时不鉴权。
 
 NodeScorer 评分快照。503 = `node_qualify.enabled=false`。
 
+post Plan-A 语义注意：
+- `qualified` 与 `in_pool` 解耦了。`qualified` 是节点的"诊断口径"（基于探针窗口判断该节点活/通），`in_pool` 是 us-pool 的实际成员资格。**us-pool = 全部候选节点（只要 NodePattern 匹配），永远不剔除**；mihomo 的 LoadBalance + 30s 健康检查在 per-flow 层自动跳过死节点。所以 `in_pool=true qualified=false` 是正常状态（节点暂时探针失败但留在 pool 里）。
+- `thresholds` 块（`MaxRTTP50Ms / MaxRTTP95Ms / MaxJitterMs / MaxFailRate`）**仅为观察用**，不再 gate us-pool。要看一个节点的真实 RTT/抖动表现就读这些字段；要看是否被 mihomo 路由就读 `in_pool`。
+- 命名池（如 openai-pool）成员资格仍然由探针 gating，但用 K=3 滑动窗口 + 多数规则：节点要 ≥ 2/3 探针通过才进，要 ≥ 2/3 探针失败才掉出。单次 CF 噪声不再翻转命名池。
+
 ```json
 {
-  "qualified": 19, "total": 22,
+  "qualified": 18, "total": 19,
   "last_pool_update": "...", "last_scored_at": "...",
   "thresholds": {"MaxRTTP50Ms":500, "MaxRTTP95Ms":800, "MaxJitterMs":300, "MaxFailRate":0.25, ...},
   "probes": {
-    "openai-api": {"url":"https://api.openai.com/v1/models", "interval_sec":300, "passing":19, "total":22}
+    "openai-api": {"url":"https://api.openai.com/v1/models", "interval_sec":300, "passing":18, "total":19}
   },
   "nodes": [
     {
@@ -127,7 +132,11 @@ NodeScorer 评分快照。503 = `node_qualify.enabled=false`。
 
 | 字段 | 说明 |
 |---|---|
-| `probes` | 顶级：各 probe 全局通过率；节点级：每个 probe 的最新结果 |
+| `qualified` | 该节点最近 5 个 mihomo 探针里是否有任何成功。仅为诊断字段，不影响 us-pool 成员。 |
+| `in_pool` | 实际是否在 us-pool 中。post Plan-A：所有 NodePattern 匹配的候选都是 true。 |
+| `reason` | 不合格原因。常见值："dead"（探针全失败 + alive=False）、"no successful probes in last 5"（窗口内全失败）、"no probe history yet (benefit of doubt)"（首次进池前的过渡状态，仍计为 qualified=true）。 |
+| `strikes` / `ok_rounds` | 连续不合格 / 合格的 scoring 轮数，仅诊断用。 |
+| `probes` | 顶级：各 probe 全局通过率；节点级：每个 probe 的最新结果。命名池 gating 用 K=3 窗口的多数规则，不只看最新结果。 |
 | `probes[].cf_mitigated` | CF challenge header 命中（status 200 但实为 challenge）→ ok=false |
 | `probes[].latency_ms` | 真实等待时长，失败时为实际超时值（如 10003ms），不是 0 |
 | `passive` | 从 `/connections` 被动推导，纯本地无机场流量；无连接时不返回 |
@@ -234,8 +243,10 @@ override 不 sticky：NodeScorer 只管 us-pool 成员，不回写 selector 指�
 ## GET /api/subscribe/refresh-interval
 
 ```json
-{"seconds": 1800}
+{"seconds": 0}
 ```
+
+返回当前 scheduler 的间隔。post 2026-06-07 example.yaml 默认 0（关闭周期刷新，靠手动 `POST /api/subscribe/refresh` 触发）；老节点的 yaml 可能仍显式配置非零值。理由见 `configs/gateway.example.yaml` 注释。
 
 ## PUT /api/subscribe/refresh-interval
 
@@ -243,7 +254,7 @@ override 不 sticky：NodeScorer 只管 us-pool 成员，不回写 selector 指�
 {"seconds": 900}
 ```
 
-0 = 关闭定时刷新。
+0 = 关闭定时刷新。立即生效 + 持久化到 `/etc/leap/gateway.yaml`（重启后保留）。
 
 ---
 
@@ -348,8 +359,10 @@ curl -s $BASE/api/status | jq .
 # 节点评分（含 probe 结果）
 curl -s $BASE/api/nodes/health | jq '{qualified, total, last_scored_at}'
 
-# 哪些节点在 pool / 被踢出原因
+# 当前 us-pool 成员（post Plan-A：通常 = 全部候选）
 curl -s $BASE/api/nodes/health | jq '.nodes[] | select(.in_pool) | {name, rtt_p50_ms}'
+
+# 哪些节点最近探针失败 (qualified=false ≠ 被踢出，pool 永远全员)
 curl -s $BASE/api/nodes/health | jq '.nodes[] | select(.qualified|not) | {name, reason}'
 
 # probe 结果：哪些节点能过 OpenAI
