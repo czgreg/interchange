@@ -213,6 +213,19 @@ func (s *Scorer) storeProbeResult(tag, name string, res ProbeResult, now time.Ti
 		s.probeLast[tag] = map[string]time.Time{}
 	}
 	s.probeLast[tag][name] = now
+	// Append to the OK-history sliding window (cap K=3 → 3 consecutive
+	// misses needed to drop a node from a named pool that requires this
+	// probe). See [Scorer.nodePassesProbes] for the read side.
+	if s.probeOKHistory[tag] == nil {
+		s.probeOKHistory[tag] = map[string][]bool{}
+	}
+	hist := s.probeOKHistory[tag][name]
+	const probeOKWindow = 3
+	hist = append(hist, res.OK)
+	if len(hist) > probeOKWindow {
+		hist = hist[len(hist)-probeOKWindow:]
+	}
+	s.probeOKHistory[tag][name] = hist
 }
 
 // setSelector PUTs clash-api /proxies/<selector> {name: <member>} to point

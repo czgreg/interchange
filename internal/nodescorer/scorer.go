@@ -137,6 +137,13 @@ type Scorer struct {
 	// probe loop, read by score() to gate pool membership.
 	probeResults map[string]map[string]ProbeResult
 	probeLast    map[string]map[string]time.Time // last run time per (node,probe)
+	// probeOKHistory[nodeTag][probeName] = sliding window of last K
+	// `res.OK` values, oldest-first. Read by nodePassesProbes —
+	// hysteresis prevents a single noisy CF response from flipping a
+	// node out of openai-pool (and triggering a hot-reload). A node
+	// is "passing" if ANY entry in the last K is true; it falls out
+	// only after K consecutive failures.
+	probeOKHistory map[string]map[string][]bool
 
 	httpc      *http.Client // clash-api client
 	probeHTTPc *http.Client // dials through the leap-probe listener
@@ -144,6 +151,13 @@ type Scorer struct {
 	// throughput tracking: previous /connections snapshot
 	connPrev  map[string]connBytes
 	connPrevT time.Time
+
+	// lastHotReload is the wall-clock time of the most recent successful
+	// (or attempted) clash-api PUT /configs. score() consults this to
+	// rate-limit reloads via cfg.HotReloadMinInterval; transient pool
+	// flaps inside the window get deferred to the next scoring round
+	// rather than firing a fresh reload each time.
+	lastHotReload time.Time
 
 	// passive connection-lifecycle tracking (1.6). connSeen maps live
 	// connID → its node + last-seen byte total; closeEvents is a rolling
@@ -203,8 +217,9 @@ func New(
 		state:        map[string]*nodeState{},
 		poolSet:      map[string]bool{},
 		poolMembers:  map[string][]string{},
-		probeResults: map[string]map[string]ProbeResult{},
-		probeLast:    map[string]map[string]time.Time{},
+		probeResults:   map[string]map[string]ProbeResult{},
+		probeLast:      map[string]map[string]time.Time{},
+		probeOKHistory: map[string]map[string][]bool{},
 		connPrev:     map[string]connBytes{},
 		connSeen:     map[string]connInfo{},
 		closeEvents:  map[string][]closeEvent{},
@@ -243,6 +258,8 @@ func (s *Scorer) Run(ctx context.Context) {
 		"max_jitter", s.cfg.MaxJitterMs,
 		"max_fail_rate", s.cfg.MaxFailRate,
 		"evict_strikes", s.cfg.EvictStrikes,
+		"readmit_strikes", s.cfg.ReadmitStrikes,
+		"hot_reload_min_interval", s.cfg.HotReloadMinInterval,
 	)
 	// Initial score after a short warm-up so probe history is populated.
 	warmup := time.NewTimer(10 * time.Second)
@@ -351,25 +368,34 @@ func (s *Scorer) score(ctx context.Context) {
 		}
 		st.health = h
 
-		// Was already in pool?
-		prevInPool := s.poolSet[tag]
+		// us-pool membership policy (post Plan-A, final): every candidate
+		// is in us-pool, period. mihomo's load-balance with consistent-
+		// hashing checks each member's alive bit per-flow and skips dead
+		// nodes automatically — so keeping a dead node in the rendered
+		// member list is harmless (mihomo routes around it on its own
+		// 30s health-check cycle, no yaml rerender needed).
+		//
+		// Why this beats any "qualify-and-evict" scheme: a node that
+		// flaps probe results (truly dead → some succeed → all dead →
+		// some succeed) on the airport-RTT noise floor would, under
+		// any threshold-based gate, churn the pool every couple of
+		// scoring rounds and trigger a clash-api PUT /configs that
+		// disrupts long-lived flows (ChatGPT SSE etc.). By rendering
+		// the full candidate list once and never changing it, hot-
+		// reloads happen ONLY on subscription edits or named-pool
+		// membership shifts — both genuinely structural events.
+		//
+		// The strikes/okRuns counters below are still maintained for
+		// /api/nodes/health diagnostics, just not used as a gate.
+		newPoolSet[tag] = true
+		h.InPool = true
 
 		if h.Qualified {
 			st.strikes = 0
 			st.okRuns++
-			// Readmit logic: if not currently in pool, need ReadmitStrikes.
-			if prevInPool || st.okRuns >= s.cfg.ReadmitStrikes {
-				newPoolSet[tag] = true
-				h.InPool = true
-			}
 		} else {
 			st.okRuns = 0
 			st.strikes++
-			// Keep in pool until EvictStrikes exceeded.
-			if prevInPool && st.strikes < s.cfg.EvictStrikes {
-				newPoolSet[tag] = true
-				h.InPool = true
-			}
 		}
 		h.Strikes = st.strikes
 		h.OkRounds = st.okRuns
@@ -420,6 +446,37 @@ func (s *Scorer) score(ctx context.Context) {
 		lastPoolUpdate = now
 	}
 
+	// Throttle: if a pool change is detected but we just hot-reloaded,
+	// defer the change to the next scoring round. This keeps a single
+	// flapping node from triggering back-to-back reloads (each clash-api
+	// PUT /configs?force=true rebuilds the LoadBalance hash ring and can
+	// disrupt long-lived flows). poolSet/poolMembers stay pointing at
+	// the runtime applied set so hysteresis (EvictStrikes/ReadmitStrikes)
+	// continues to compare against what mihomo actually has.
+	poolChangePending := poolChanged &&
+		!s.lastHotReload.IsZero() &&
+		s.cfg.HotReloadMinInterval > 0 &&
+		now.Sub(s.lastHotReload) < s.cfg.HotReloadMinInterval
+
+	if poolChangePending {
+		for i := range nodes {
+			nodes[i].InPool = s.poolSet[nodes[i].Name]
+		}
+		qualified = 0
+		for _, n := range nodes {
+			if n.InPool {
+				qualified++
+			}
+		}
+		slog.Info("nodescorer: pool change deferred (throttle)",
+			"proposed_pool", len(newPoolSet),
+			"applied_pool", len(s.poolSet),
+			"since_last_reload", now.Sub(s.lastHotReload).Round(time.Second),
+			"min_interval", s.cfg.HotReloadMinInterval,
+		)
+		lastPoolUpdate = s.snap.LastPoolUpdate
+	}
+
 	s.snap = Snapshot{
 		Qualified:      qualified,
 		Total:          len(nodes),
@@ -428,22 +485,26 @@ func (s *Scorer) score(ctx context.Context) {
 		Thresholds:     s.cfg,
 		Nodes:          nodes,
 	}
-	s.poolSet = newPoolSet
-	s.poolMembers = newPoolMembers
+	if !poolChangePending {
+		s.poolSet = newPoolSet
+		s.poolMembers = newPoolMembers
+	}
 
 	slog.Info("nodescorer: scored",
 		"qualified", qualified,
 		"total", len(nodes),
 		"pool_changed", poolChanged,
+		"deferred", poolChangePending,
 	)
 	// Persist counters while still holding s.mu.Lock(). saveStateLocked
 	// does NOT re-take the mutex (would self-deadlock on RWMutex semantics
 	// — see persist.go).
 	s.saveStateLocked()
 
-	if poolChanged {
+	if poolChanged && !poolChangePending {
 		usPool := setToSortedSlice(newPoolSet)
 		members := newPoolMembers
+		s.lastHotReload = now
 		go s.hotReload(context.Background(), usPool, members)
 	}
 }
@@ -473,16 +534,33 @@ func (s *Scorer) computePoolMembers(usPool map[string]bool) map[string][]string 
 }
 
 // nodePassesProbes reports whether the node has a passing (ok=true) result
-// for every named probe. Missing result = not passing.
+// for every named probe BY MAJORITY of its recent K=3 probe entries.
+// Asymmetric hysteresis: a node needs >= 2 of 3 probes passing to be in
+// the named pool; needs >= 2 of 3 failing to be kicked out. This means
+// a single noisy CF response does NOT flip pool membership (and trigger
+// a hot-reload). Missing history = not passing (conservative bootstrap).
 // CALLER MUST HOLD s.mu.
 func (s *Scorer) nodePassesProbes(tag string, required []string) bool {
-	pr := s.probeResults[tag]
-	if pr == nil {
+	hist := s.probeOKHistory[tag]
+	if hist == nil {
 		return false
 	}
 	for _, name := range required {
-		res, ok := pr[name]
-		if !ok || !res.OK {
+		entries := hist[name]
+		if len(entries) == 0 {
+			return false
+		}
+		oks := 0
+		for _, ok := range entries {
+			if ok {
+				oks++
+			}
+		}
+		// Majority of recent entries must be OK. With window=3 this is
+		// >= 2; with window=1 (first probe ever) the single result has
+		// to be true. The /2-rounded bound keeps the rule consistent
+		// when the window hasn't filled yet.
+		if oks*2 <= len(entries) {
 			return false
 		}
 	}
@@ -508,9 +586,16 @@ func (s *Scorer) scoreNode(tag string, pData map[string]interface{}, throughputB
 	if len(history) == 0 {
 		if !alive {
 			h.Reason = "dead"
-		} else {
-			h.Reason = "no probe history yet"
+			return h
 		}
+		// Bootstrap: an alive node with no probe history can't accumulate
+		// data until mihomo's load-balance group includes it (mihomo only
+		// probes group members). Marking it !qualified would lock it out
+		// of the pool forever — vicious cycle. Give benefit of doubt so
+		// it enters us-pool, gets probed, then real qualification kicks
+		// in once history >= MinProbes.
+		h.Qualified = true
+		h.Reason = "no probe history yet (benefit of doubt)"
 		return h
 	}
 
@@ -535,28 +620,53 @@ func (s *Scorer) scoreNode(tag string, pData map[string]interface{}, throughputB
 
 	// Qualify check.
 	q := s.cfg
-	if !alive {
-		h.Reason = "dead"
-		return h
-	}
 	if h.ProbeCount < q.MinProbes {
-		h.Qualified = true // not enough data → give benefit of doubt
+		// alive bit set by mihomo on last probe — only used as a hint
+		// during bootstrap. Once we have probe history, we ignore it
+		// (it flips with each 30s probe and would re-introduce noise).
+		if !alive {
+			h.Reason = "dead (no probe history)"
+			return h
+		}
+		h.Qualified = true
 		return h
 	}
-	if h.FailRate > q.MaxFailRate {
-		h.Reason = fmt.Sprintf("fail_rate=%.2f > %.2f", h.FailRate, q.MaxFailRate)
-		return h
+	// us-pool qualification rule (post Plan-A): a node is qualified if
+	// it had at least one successful probe in the most recent 5 entries
+	// of its probe history. RTT p50/p95/jitter/fail_rate thresholds are
+	// NOT us-pool gates — they proved too noisy at 30s mihomo
+	// health-check granularity (every scoring round the 5-of-10-probe-
+	// window's noise floor flipped the qualified set, churning pool
+	// membership and triggering hot-reload every cycle). Those metrics
+	// are still computed and exposed via /api/nodes/health for
+	// observability, just not gates.
+	//
+	// We deliberately ignore mihomo's `alive` bit here: alive reflects
+	// ONLY the latest probe outcome, which flips at every 30s tick.
+	// Reading it directly re-introduces the noise we set out to remove.
+	// recent-success-in-last-5 smooths over single-probe blips.
+	//
+	// The smoothed-liveness gate works because:
+	//   1. mihomo's load-balance internally skips a node whose latest
+	//      probe failed (alive=false) for new flows — fast-path handles
+	//      transient flaps without us touching yaml.
+	//   2. A truly dead node accumulates failed probes; its WINDOW of
+	//      last 5 entries shows zero successes, which DOES disqualify
+	//      it via the recent-success count below.
+	//   3. Named-pool membership (openai-pool, etc.) still gates on
+	//      probe results — that's where CF-aware filtering lives.
+	recentSpan := len(history)
+	if recentSpan > 5 {
+		recentSpan = 5
 	}
-	if h.RTTP50Ms > q.MaxRTTP50Ms {
-		h.Reason = fmt.Sprintf("rtt_p50=%dms > %dms", h.RTTP50Ms, q.MaxRTTP50Ms)
-		return h
+	recentOk := 0
+	for _, d := range history[len(history)-recentSpan:] {
+		if d > 0 {
+			recentOk++
+		}
 	}
-	if h.RTTP95Ms > q.MaxRTTP95Ms {
-		h.Reason = fmt.Sprintf("rtt_p95=%dms > %dms", h.RTTP95Ms, q.MaxRTTP95Ms)
-		return h
-	}
-	if h.JitterMs > q.MaxJitterMs {
-		h.Reason = fmt.Sprintf("jitter=%dms > %dms", h.JitterMs, q.MaxJitterMs)
+	if recentOk == 0 {
+		h.Reason = fmt.Sprintf("no successful probes in last %d", recentSpan)
 		return h
 	}
 	h.Qualified = true

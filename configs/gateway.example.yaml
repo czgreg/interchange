@@ -19,7 +19,7 @@ subscribe:
   # 默认 0 因为：
   #   1. 阅后即焚类机场订阅二刷直接挂；
   #   2. 节点列表本来就低频变化（手动换 URL 时再调一次接口足够）；
-  #   3. 节点健康度由 nodescorer 周期探针在跑，不需要靠重拉订阅"刷新一下"。
+  #   3. 节点健康度由 nodescorer 每 60s 探针在跑，不需要靠重拉订阅"刷新一下"。
   # 想要原来的周期刷新行为：填一个非零 duration（如 30m）。
   refresh_interval: 0
   refresh_on_startup: true
@@ -134,10 +134,13 @@ data_plane:
   # Architectural split:
   #   • health_check_interval: FAST/binary liveness. mihomo internally
   #     skips dead nodes per-flow on this cycle WITHOUT yaml rerender.
-  #     Default 30s. Pick this knob when you want faster failover.
-  #   • node_qualify.scoring_interval: SLOW/graded eviction (see below).
+  #     Default 30s. Pick this one when you want faster failover.
+  #   • node_qualify.scoring_interval (default 5m): SLOW/graded eviction.
+  #     The scorer wakes up much less often, applies stricter thresholds,
+  #     and only triggers a hot-reload for persistent degradation. Pick
+  #     this knob when you want stricter quality bars.
   url_test:
-    interval:              3m     # legacy, kept for back-compat; superseded by health_check_interval
+    interval:              3m     # legacy: kept for back-compat; superseded by health_check_interval
     health_check_interval: 30s    # mihomo's per-flow liveness probe cycle
     tolerance: 50
     probe_url: "https://www.gstatic.com/generate_204"
@@ -162,7 +165,12 @@ data_plane:
 # mihomo is hot-reloaded when membership changes.
 node_qualify:
   enabled:           true
-  scoring_interval:  60s
+  # 5min: this is the SLOW/graded decision cycle. Liveness (alive/dead) is
+  # mihomo's job at health_check_interval=30s above; the scorer here only
+  # wakes up to evaluate persistent quality bars. Bumped from the original
+  # 60s — at 60s every probe-noise round was triggering a pool-membership
+  # change and a clash-api PUT /configs reload, ~108 reloads / 10h.
+  scoring_interval:  5m
   max_rtt_p50_ms:    500
   max_rtt_p95_ms:    800
   max_jitter_ms:     300
@@ -170,6 +178,10 @@ node_qualify:
   min_probes:        2
   evict_strikes:     2
   readmit_strikes:   1
+  # hot_reload_min_interval: 节流多久内不允许再触发 mihomo PUT /configs。
+  # 0 = 不节流（每次 pool 变化都立即热加载，会打断 LoadBalance 长流如 ChatGPT
+  # SSE）。默认 90s 在两次 scoring 周期里只允许一次 reload，足够吸收探针噪声。
+  hot_reload_min_interval: 90s
 
   # Site-specific reachability probes. Each probe runs from each candidate
   # node every `interval`. Results gate membership in named pools (see

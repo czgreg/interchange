@@ -59,6 +59,9 @@ func TestComputePoolMembers(t *testing.T) {
 	}}
 	// nodeA passes both → member. nodeB fails chatgpt (cf challenge) →
 	// excluded. nodeC has no claude.ai result yet → excluded.
+	// nodePassesProbes reads probeOKHistory (sliding window), not the
+	// raw .OK on the latest result — populate both since storeProbeResult
+	// keeps them in lockstep at runtime.
 	s.probeResults = map[string]map[string]ProbeResult{
 		"nodeA": {
 			"chatgpt.com": {OK: true},
@@ -70,6 +73,19 @@ func TestComputePoolMembers(t *testing.T) {
 		},
 		"nodeC": {
 			"chatgpt.com": {OK: true},
+		},
+	}
+	s.probeOKHistory = map[string]map[string][]bool{
+		"nodeA": {
+			"chatgpt.com": {true},
+			"claude.ai":   {true},
+		},
+		"nodeB": {
+			"chatgpt.com": {false},
+			"claude.ai":   {true},
+		},
+		"nodeC": {
+			"chatgpt.com": {true},
 		},
 	}
 	usPool := map[string]bool{"nodeA": true, "nodeB": true, "nodeC": true}
@@ -156,42 +172,66 @@ func TestScoreNode_AllGood(t *testing.T) {
 	}
 }
 
-func TestScoreNode_FailRateDisqualify(t *testing.T) {
+func TestScoreNode_HighFailRateStillQualified(t *testing.T) {
 	t.Parallel()
 	s := newTestScorer(defaultCfg())
-	// 3 of 8 probes failed = 0.375 > 0.25 threshold
+	// 3 of 8 probes failed = 0.375. Under the post-Plan-A policy this no
+	// longer disqualifies (mihomo's 30s health-check is the fast gate;
+	// scorer only filters chronic / window-wide failure). FailRate is
+	// still computed and exposed for /api/nodes/health observability.
 	pData := buildProxyEntry(true, "http://test", []int{0, 150, 0, 155, 0, 148, 162, 151})
 	h := s.scoreNode("ash/US-01", pData, 0)
+	if !h.Qualified {
+		t.Errorf("expected qualified (fail_rate is observability-only now), reason=%q", h.Reason)
+	}
+	if h.FailRate <= 0 {
+		t.Errorf("fail_rate not computed: %f", h.FailRate)
+	}
+}
+
+func TestScoreNode_RTTP95SpikeStillQualified(t *testing.T) {
+	t.Parallel()
+	s := newTestScorer(defaultCfg())
+	// One massive spike makes p95 > 800ms. No longer disqualifying — a
+	// flapping airport node is mihomo's problem, not the scorer's.
+	pData := buildProxyEntry(true, "http://test", []int{200, 210, 190, 205, 195, 215, 200, 2000})
+	h := s.scoreNode("yuyun/US-01", pData, 0)
+	if !h.Qualified {
+		t.Errorf("expected qualified (rtt_p95 is observability-only now), reason=%q", h.Reason)
+	}
+	if h.RTTP95Ms <= 800 {
+		t.Errorf("p95 should have been computed > 800, got %d", h.RTTP95Ms)
+	}
+}
+
+func TestScoreNode_HighJitterStillQualified(t *testing.T) {
+	t.Parallel()
+	cfg := defaultCfg()
+	cfg.MaxJitterMs = 80
+	s := newTestScorer(cfg)
+	// p50≈160ms but occasional 700ms → jitter > 80ms. Observability-only.
+	pData := buildProxyEntry(true, "http://test", []int{155, 160, 158, 162, 155, 165, 700, 720})
+	h := s.scoreNode("nideming/US-01", pData, 0)
+	if !h.Qualified {
+		t.Errorf("expected qualified (jitter is observability-only now), reason=%q", h.Reason)
+	}
+	if h.JitterMs <= 0 {
+		t.Errorf("jitter not computed: %d", h.JitterMs)
+	}
+}
+
+func TestScoreNode_NoRecentSuccessDisqualified(t *testing.T) {
+	t.Parallel()
+	s := newTestScorer(defaultCfg())
+	// Last 5 of 8 are all zero → window-wide failure → disqualified.
+	// (First 3 succeeded — irrelevant since they fall outside the window.)
+	pData := buildProxyEntry(true, "http://test", []int{200, 210, 190, 0, 0, 0, 0, 0})
+	h := s.scoreNode("ash/US-01", pData, 0)
 	if h.Qualified {
-		t.Error("expected disqualified due to high fail_rate")
+		t.Error("expected disqualified — last 5 probes all failed")
 	}
 	if h.Reason == "" {
 		t.Error("expected non-empty reason")
-	}
-}
-
-func TestScoreNode_RTTP95Disqualify(t *testing.T) {
-	t.Parallel()
-	s := newTestScorer(defaultCfg())
-	// One massive spike makes p95 > 800ms
-	pData := buildProxyEntry(true, "http://test", []int{200, 210, 190, 205, 195, 215, 200, 2000})
-	h := s.scoreNode("yuyun/US-01", pData, 0)
-	if h.Qualified {
-		t.Errorf("expected disqualified due to RTT spike, reason=%q p50=%d p95=%d",
-			h.Reason, h.RTTP50Ms, h.RTTP95Ms)
-	}
-}
-
-func TestScoreNode_HighJitter(t *testing.T) {
-	t.Parallel()
-	cfg := defaultCfg()
-	cfg.MaxJitterMs = 80 // tight limit
-	s := newTestScorer(cfg)
-	// p50≈160ms but occasional 700ms → jitter > 80ms
-	pData := buildProxyEntry(true, "http://test", []int{155, 160, 158, 162, 155, 165, 700, 720})
-	h := s.scoreNode("nideming/US-01", pData, 0)
-	if h.Qualified {
-		t.Errorf("expected disqualified for high jitter=%dms, reason=%q", h.JitterMs, h.Reason)
 	}
 }
 

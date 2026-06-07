@@ -297,22 +297,22 @@ func (s *StringList) UnmarshalYAML(node *yaml.Node) error {
 // Distinct from NodeQualifyConfig (which is leap-gateway's own scorer);
 // these thresholds shape mihomo's per-flow health-check + url-test cycle.
 type URLTestConfig struct {
-	// Interval = mihomo url-test periodic full-pool re-test (default 3m).
-	// Legacy field — used as fallback when HealthCheckInterval is unset.
+	// Interval: legacy field, kept for backward compatibility. Used as
+	// fallback when HealthCheckInterval is unset. New configs should set
+	// HealthCheckInterval directly. Default 3m.
 	Interval time.Duration `yaml:"interval"`
-	// HealthCheckInterval is how often mihomo internally probes each
+	// HealthCheckInterval: how often mihomo internally probes each
 	// LoadBalance member to update its alive bit. This is the FAST/binary
 	// liveness signal — when a node TCP/HTTP-fails one probe, mihomo's
-	// LoadBalance routing skips it for new connections WITHOUT any yaml
-	// rerender. Default 30s. Tune lower for snappier failover at the
-	// cost of slightly more airport probe traffic; tune higher only if
-	// quotas become a concern.
+	// own LoadBalance routing skips it for new connections WITHOUT any
+	// yaml rerender. Default 30s. Tune lower for snappier failover at
+	// the cost of a small uptick in airport probe traffic; tune higher
+	// only if airport quotas become a concern.
 	//
 	// Architectural rule: this MUST be ≤ NodeQualify.ScoringInterval.
 	// Liveness is mihomo's job (this knob); graded eviction is the
-	// scorer's job (slower cycle). Inverting them — making the scorer
-	// faster than mihomo's own probe — re-introduces the noise the
-	// split was meant to eliminate.
+	// scorer's job (slower cycle). If you raise this above the scorer's
+	// interval, mihomo and the scorer trade roles and reloads churn.
 	HealthCheckInterval time.Duration `yaml:"health_check_interval"`
 	// Tolerance = ms hysteresis: only switch if a new candidate is faster
 	// by this much (default 50). Mostly cosmetic under load-balance.
@@ -332,7 +332,15 @@ type NodeQualifyConfig struct {
 	// Enabled turns the scorer on. Default true under mihomo.
 	Enabled bool `yaml:"enabled"`
 	// ScoringInterval is how often the scorer reads /proxies and
-	// /connections and re-evaluates every node. Default 60s.
+	// /connections and re-evaluates every node. Default 5m.
+	//
+	// Architectural rule: this is the SLOW/graded decision cycle —
+	// long-term RTT degradation, CF challenge gating, persistent
+	// suitability for named pools. Fast/binary liveness is mihomo's
+	// LoadBalance health-check (data_plane.url_test.health_check_interval,
+	// default 30s). Keep this ≥ ~10× the health-check interval so a
+	// transient flap mihomo's already filtering doesn't cascade into
+	// an unnecessary scorer-driven hot-reload.
 	ScoringInterval time.Duration `yaml:"scoring_interval"`
 	// MaxRTTP50Ms: p50 RTT ceiling in ms. Default 500.
 	MaxRTTP50Ms int `yaml:"max_rtt_p50_ms"`
@@ -347,11 +355,28 @@ type NodeQualifyConfig struct {
 	// Default 2.
 	MinProbes int `yaml:"min_probes"`
 	// EvictStrikes: consecutive scoring rounds a node must fail before
-	// being removed from the pool. Default 2.
+	// being removed from the pool. Default 2. With ScoringInterval=5m
+	// this means a node has to fail two consecutive 5-minute reviews
+	// (10 minutes of consistent degradation) to be evicted —
+	// appropriate for "real degradation" vs transient noise (which
+	// mihomo's 30s health-check is already filtering at the routing
+	// layer).
 	EvictStrikes int `yaml:"evict_strikes"`
 	// ReadmitStrikes: consecutive passing rounds before an evicted node
-	// is added back. Default 1.
+	// is added back. Default 1. At 5-minute ScoringInterval, a single
+	// passing round already represents 10 mihomo health-check cycles
+	// of stability — that's enough to trust readmission without
+	// flapping (which the 60-second scoring cycle could not provide).
 	ReadmitStrikes int `yaml:"readmit_strikes"`
+	// HotReloadMinInterval throttles how often pool changes can trigger
+	// a clash-api PUT /configs?force=true. When a pool change is
+	// detected within this window, the change is held off until the
+	// next scoring round; the runtime mihomo state continues using the
+	// last applied pool. 0 = no throttle (every change reloads
+	// immediately, original behavior). Default 90s — long enough that
+	// transient probe noise can't cascade reloads, short enough that a
+	// real degradation propagates within ~2 scoring rounds.
+	HotReloadMinInterval time.Duration `yaml:"hot_reload_min_interval"`
 
 	// Probes defines per-target reachability checks (e.g. "can this node
 	// load chatgpt.com without hitting Cloudflare's bot challenge?"). Each
@@ -522,9 +547,9 @@ func (c *DataPlaneConfig) ApplyDefaults() {
 		c.URLTest.Interval = 3 * time.Minute
 	}
 	if c.URLTest.HealthCheckInterval == 0 {
-		// 30s: fast enough that LoadBalance routing skips a dead node
-		// within one probe cycle; slow enough that 19 nodes × N subs
-		// stays well under any airport's monthly quota.
+		// 30s: fast enough that LoadBalance routing skips a dead node within
+		// one probe cycle; slow enough that 19 nodes × N subs × 30s probes
+		// stay well under any airport's monthly quota.
 		c.URLTest.HealthCheckInterval = 30 * time.Second
 	}
 	if c.URLTest.Tolerance == 0 {
@@ -542,7 +567,7 @@ func (c *NodeQualifyConfig) applyDefaults() {
 	// false" from "field missing", so explicit false is the way to
 	// disable; absent field = enabled.
 	if c.ScoringInterval == 0 {
-		c.ScoringInterval = 60 * time.Second
+		c.ScoringInterval = 5 * time.Minute
 		c.Enabled = true
 	}
 	if c.MaxRTTP50Ms == 0 {
@@ -565,6 +590,9 @@ func (c *NodeQualifyConfig) applyDefaults() {
 	}
 	if c.ReadmitStrikes == 0 {
 		c.ReadmitStrikes = 1
+	}
+	if c.HotReloadMinInterval == 0 {
+		c.HotReloadMinInterval = 90 * time.Second
 	}
 	for i := range c.Probes {
 		if c.Probes[i].Interval == 0 {
