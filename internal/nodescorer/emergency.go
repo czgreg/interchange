@@ -117,6 +117,9 @@ func (s *Scorer) applyEmergencyEvictions(ripe []string, candidates map[string]bo
 	}
 	mutated := false
 	for _, evict := range ripe {
+		// Snapshot before this eviction for transition record.
+		before := append([]string(nil), s.effectivePool...)
+		sort.Strings(before)
 		// Remove from effective pool.
 		next := make([]string, 0, len(s.effectivePool))
 		for _, m := range s.effectivePool {
@@ -160,6 +163,28 @@ func (s *Scorer) applyEmergencyEvictions(ripe []string, candidates map[string]bo
 			slog.Info("nodescorer: emergency-promoted from chain",
 				"node", promoted, "replacing", evict)
 		}
+		// Record one transition for the full evict + (optional) promote
+		// pair. before was captured above; current effectivePool is the
+		// "after" state. Surface promoted node in Added when present.
+		after := append([]string(nil), s.effectivePool...)
+		sort.Strings(after)
+		added, removed := diffPools(before, after)
+		ttype := "emergency_evict"
+		reason := "auto-evict: hard-fail >= 30m (" + evict + ")"
+		if promoted != "" {
+			ttype = "emergency_swap"
+			reason += "; promoted " + promoted + " from chain"
+		}
+		s.recordTransitionLocked(PoolTransition{
+			At:         now,
+			Type:       ttype,
+			Added:      added,
+			Removed:    removed,
+			PoolBefore: before,
+			PoolAfter:  after,
+			Reason:     reason,
+			Source:     "scorer",
+		})
 		mutated = true
 	}
 	return mutated

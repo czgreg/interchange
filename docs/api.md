@@ -41,6 +41,8 @@ token 为空时不鉴权。
 | GET | `/api/pool/state` | 手动池 yaml baseline + 当前 effective + emergency 事件 | ✓ |
 | POST | `/api/pool/clear-emergency` | 还原 effective 池到 yaml baseline | ✓ |
 | GET | `/api/pool/terminal?ip=X` | 查询某 terminal IP 的出口节点 + 健康 | ✓ |
+| GET | `/api/pool/transitions?limit=N` | 池组成变更审计日志 + 当前隔离名单 | ✓ |
+| POST | `/api/pool/rollback` | 回滚最近 N 次池变更 + 隔离被回滚节点 | ✓ |
 | GET | `/api/notifications/status` | 通知系统配置快照（不含 secret） | ✓ |
 | POST | `/api/notifications/lark` | 设置/更新 Lark webhook url + secret | ✓ |
 | DELETE | `/api/notifications/lark` | 移除 Lark webhook（停止外发，本地日志保留） | ✓ |
@@ -483,7 +485,95 @@ curl -H "Authorization: Bearer ..." \
 
 ---
 
-## GET /api/notifications/status
+## GET /api/pool/transitions
+
+返回池组成变更审计日志（K-gating 自动 swap、emergency evict/promote、operator rollback）+ 当前因 rollback 被隔离的节点列表。
+
+```bash
+curl -H "Authorization: Bearer ..." \
+  "http://leap-89:18080/api/pool/transitions?limit=20"
+```
+
+```json
+{
+  "transitions": [
+    {
+      "at": "2026-06-09T13:42:11Z",
+      "type": "auto_swap",
+      "added": ["fishcloud/🇺🇸 美国02"],
+      "removed": ["ctc-02/US-C30-04-SNAP"],
+      "pool_before": ["ash/...01", "ctc-02/04-SNAP", "..."],
+      "pool_after": ["ash/...01", "fishcloud/02", "..."],
+      "reason": "K-gating composite-score swap",
+      "source": "scorer"
+    },
+    {
+      "at": "2026-06-09T13:55:30Z",
+      "type": "rollback",
+      "added": ["ctc-02/US-C30-04-SNAP"],
+      "removed": ["fishcloud/🇺🇸 美国02"],
+      "reason": "operator rollback (1 step(s))",
+      "source": "operator_api"
+    }
+  ],
+  "quarantine": {
+    "fishcloud/🇺🇸 美国02": "2026-06-09T14:55:30Z"
+  }
+}
+```
+
+字段：
+- `transitions[].type`：`auto_swap`（K-gating 决策）/ `emergency_evict` / `emergency_swap`（emergency_promote_chain 顶替）/ `rollback`（操作员回滚）
+- `transitions[].source`：`scorer`（系统）/ `operator_api`（API 调用）/ `operator_yaml`（yaml 编辑后 reconcile）
+- `transitions[].added` / `removed`：相对前一状态的差集，按字典序
+- `pool_before` / `pool_after`：完整快照
+- `quarantine`：节点 → 隔离截止时间。被 rollback 移出的节点在隔离期内 K-gating 不会重新选中
+
+`limit` 默认 50，最大 500。日志保留最近 200 条（capped），超出会被滚动覆盖。
+
+503：scorer 未启用。
+
+---
+
+## POST /api/pool/rollback
+
+回滚最近 N 次池变更，并把"刚被加入"的节点放进 rollback 隔离区。下一次 K-gating round 不会重新选中这些节点（直到隔离期满）——给操作员留排查 + 改 yaml + 决定是否延长隔离的时间窗口。
+
+```bash
+curl -X POST -H "Authorization: Bearer ..." -H "Content-Type: application/json" \
+  -d '{"steps": 1, "quarantine_seconds": 3600}' \
+  http://leap-89:18080/api/pool/rollback
+```
+
+请求体（全部可选）：
+- `steps`：回滚步数。默认 1，最大 = 当前 transitions 长度
+- `quarantine_seconds`：被回滚节点的隔离时长。默认 3600 (1h)，最大 7×24×3600 (7d)
+
+成功响应：
+```json
+{
+  "steps_requested": 1,
+  "steps_applied": 1,
+  "reverted_transition_types": ["auto_swap"],
+  "new_pool": ["ash/...01", "ash/...02", "ash/...03", "ctc-02/04-SNAP", ...],
+  "quarantined": ["fishcloud/🇺🇸 美国02"],
+  "quarantine_until": "2026-06-09T14:55:30Z"
+}
+```
+
+失败：
+- 400：`pool_mode=manual`（manual 模式应使用 `/api/pool/clear-emergency`）
+- 400：JSON 格式错误
+
+注意：
+- 回滚自身也会被记入 transitions（type=`rollback`），但不可被进一步 rollback——避免回滚链条混乱
+- 回滚后立刻触发 mihomo hot-reload，无需等下一个 5min scoring round
+- 隔离期到期后，节点再次按正常 K-gating 评分；如果它仍是 top-K，会被重新选中。**隔离不是永久排除**——永久排除请改 yaml + redeploy
+- 多次连续 rollback：每次回滚都是基于"当前 transitions 中最末一个非 rollback 项"，所以连续调用确实能往前再走一步
+
+---
+
+## 错误码
 
 返回通知系统当前配置 + 健康状态。永远不返回 secret 本身（哪怕已配置），只返回 `secret_configured: true/false`。
 
@@ -687,7 +777,22 @@ curl -s $BASE/api/whitelist/resolved | jq -r '.domains[]' | head -20
 
 ## 接入变更日志（前端 / 控制平台）
 
-### 2026-06-09 晚（Lark 通知 + B+ 自动化预备）— 当前版本
+### 2026-06-09 夜（池审计 + 回滚）— 当前版本
+
+**新增端点**（B+ issue 6 闭环）：
+
+| 端点 | 用途 |
+|---|---|
+| `GET /api/pool/transitions` | 池变更审计日志 + 当前隔离名单 |
+| `POST /api/pool/rollback` | 回滚最近 N 次变更，隔离被回滚的节点 |
+
+**机制**：
+- 每次池组成变化（auto K-gating swap / emergency evict-promote / 操作员 rollback）都记入 transitions（capped 200 条），含 type / added / removed / pool_before / pool_after / reason / source
+- `rollback` 反向执行 transitions（重新加回被移除的节点，移除被加入的节点），并把刚被移除的节点放进 quarantine
+- quarantine 期间（默认 1h，可配 ≤7d），K-gating 选 top-K 时跳过这些节点——避免回滚被立即覆盖
+- 状态 file 升级 v2 → v3（自动兼容旧 v1/v2 文件）
+
+### 2026-06-09 晚（Lark 通知）
 
 **新增端点**（Lark 通知 + 池审计预备）：
 

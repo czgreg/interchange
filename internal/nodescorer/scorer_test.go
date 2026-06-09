@@ -40,10 +40,12 @@ func defaultCfg() config.NodeQualifyConfig {
 
 func newTestScorer(cfg config.NodeQualifyConfig) *Scorer {
 	return &Scorer{
-		probeURL:     "http://test",
-		cfg:          cfg,
-		probeResults: map[string]map[string]ProbeResult{},
-		probeLast:    map[string]map[string]time.Time{},
+		probeURL:           "http://test",
+		cfg:                cfg,
+		probeResults:       map[string]map[string]ProbeResult{},
+		probeLast:          map[string]map[string]time.Time{},
+		rollbackQuarantine: map[string]time.Time{},
+		poolSet:            map[string]bool{},
 	}
 }
 

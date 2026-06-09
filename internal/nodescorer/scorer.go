@@ -220,6 +220,18 @@ type Scorer struct {
 	yamlBaseline     []string
 	emergencyEvents  []EmergencyEvent
 
+	// transitions is the audit log of pool composition changes (auto K-
+	// gating swaps, manual emergency events, operator API actions). Capped
+	// at transitionLogMax; persisted in state file v3. Surfaced via
+	// /api/pool/transitions; consumed by /api/pool/rollback.
+	transitions []PoolTransition
+
+	// rollbackQuarantine is node → until-time. K-gating auto mode refuses
+	// to re-add a quarantined node before until passes — keeps a rollback
+	// from being immediately undone by the next scoring round. Cleaned up
+	// lazily on read (inQuarantine deletes expired entries).
+	rollbackQuarantine map[string]time.Time
+
 	// passive connection-lifecycle tracking (1.6). connSeen maps live
 	// connID → its node + last-seen byte total; closeEvents is a rolling
 	// per-node log of recently-closed connections used to compute fail
@@ -299,6 +311,7 @@ func New(
 		connSeen:       map[string]connInfo{},
 		closeEvents:    map[string][]closeEvent{},
 		activeConns:    map[string]int{},
+		rollbackQuarantine: map[string]time.Time{},
 		httpc:          &http.Client{Timeout: 5 * time.Second},
 		probeHTTPc: &http.Client{
 			Timeout:   12 * time.Second,
@@ -587,8 +600,18 @@ func (s *Scorer) score(ctx context.Context) {
 			sort.SliceStable(qualifiedNodes, func(i, j int) bool {
 				return compositeScore(*qualifiedNodes[i]) < compositeScore(*qualifiedNodes[j])
 			})
+			// Build preferredSet from top-K, skipping nodes currently in
+			// rollback quarantine. Quarantine is set when the operator
+			// rolled back a previous swap that re-added these nodes; until
+			// it expires, K-gating must not "helpfully" re-add them on the
+			// next scoring round (defeating the rollback). Walk top-of-list
+			// in score order and accept until we have kTarget.
+			now := time.Now()
 			preferredSet := make(map[string]bool, kTarget)
-			for i := 0; i < kTarget && i < len(qualifiedNodes); i++ {
+			for i := 0; i < len(qualifiedNodes) && len(preferredSet) < kTarget; i++ {
+				if s.inQuarantine(qualifiedNodes[i].Name, now) {
+					continue
+				}
 				preferredSet[qualifiedNodes[i].Name] = true
 			}
 
@@ -772,6 +795,27 @@ func (s *Scorer) score(ctx context.Context) {
 		},
 	}
 	if !poolChangePending {
+		// Capture pre-mutation state for transition log + diff against
+		// newPoolSet. Audit log entry only when pool actually changed
+		// (poolChanged includes named-pool member shifts that may not
+		// affect us-pool composition — record both kinds).
+		if poolChanged && s.cfg.PoolMode != "manual" {
+			before := setToSortedSlice(s.poolSet)
+			after := setToSortedSlice(newPoolSet)
+			added, removed := diffPools(before, after)
+			if len(added) > 0 || len(removed) > 0 {
+				s.recordTransitionLocked(PoolTransition{
+					At:         now,
+					Type:       "auto_swap",
+					Added:      added,
+					Removed:    removed,
+					PoolBefore: before,
+					PoolAfter:  after,
+					Reason:     "K-gating composite-score swap",
+					Source:     "scorer",
+				})
+			}
+		}
 		s.poolSet = newPoolSet
 		s.poolMembers = newPoolMembers
 	}

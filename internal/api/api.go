@@ -118,6 +118,8 @@ func NewServer(deps Deps) *Server {
 	mux.HandleFunc("GET /api/pool/state", s.auth(s.handlePoolState))
 	mux.HandleFunc("POST /api/pool/clear-emergency", s.auth(s.handlePoolClearEmergency))
 	mux.HandleFunc("GET /api/pool/terminal", s.auth(s.handlePoolTerminal))
+	mux.HandleFunc("GET /api/pool/transitions", s.auth(s.handlePoolTransitions))
+	mux.HandleFunc("POST /api/pool/rollback", s.auth(s.handlePoolRollback))
 
 	// Notification subsystem — Lark webhook configuration + local log
 	// inspection + ad-hoc test send.

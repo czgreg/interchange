@@ -17,6 +17,19 @@ type persistedState struct {
 	HardFailStart time.Time `json:"hard_fail_start,omitempty"`
 }
 
+// stateFileV3 is the on-disk format v3 — adds the pool-transitions audit
+// log + rollback quarantine map on top of v2's emergency state. v2 files
+// auto-upgrade in place on the next save.
+type stateFileV3 struct {
+	Version            int                       `json:"version"`
+	Nodes              map[string]persistedState `json:"nodes"`
+	EffectivePool      []string                  `json:"effective_pool,omitempty"`
+	YamlBaseline       []string                  `json:"yaml_baseline,omitempty"`
+	EmergencyEvents    []EmergencyEvent          `json:"emergency_events,omitempty"`
+	Transitions        []PoolTransition          `json:"transitions,omitempty"`
+	RollbackQuarantine map[string]time.Time      `json:"rollback_quarantine,omitempty"`
+}
+
 // stateFileV2 is the on-disk format v2 — wraps the per-node map in a
 // container that also persists emergency-mode state. v1 (a bare
 // map[string]persistedState) is loaded transparently.
@@ -39,34 +52,71 @@ func (s *Scorer) stateFile() string {
 // at startup, before Run. If the file is absent or malformed it is silently
 // ignored — scorer starts fresh.
 //
-// On-disk format auto-detects v1 (bare map[string]persistedState) vs v2
-// (stateFileV2 envelope with emergency state). v1 files are upgraded
-// in-place on the next save.
+// On-disk format auto-detects v1 / v2 / v3. v1 is a bare per-node map;
+// v2 added the stateFileV2 envelope with emergency state; v3 added the
+// transitions audit log + rollback quarantine. Older files upgrade in
+// place on the next save.
 func (s *Scorer) loadState() {
 	data, err := os.ReadFile(s.stateFile())
 	if err != nil {
 		return // normal: first run or renderer not set yet
 	}
-	// v2 envelope — has Version field at top level.
-	var v2 stateFileV2
-	if err := json.Unmarshal(data, &v2); err == nil && v2.Version >= 2 {
-		s.mu.Lock()
-		defer s.mu.Unlock()
-		for tag, ps := range v2.Nodes {
-			s.state[tag] = &nodeState{
-				strikes:       ps.Strikes,
-				okRuns:        ps.OkRounds,
-				hardFailStart: ps.HardFailStart,
+	// Detect version from the envelope's `version` field (zero / missing
+	// = v1 bare map).
+	var probe struct {
+		Version int `json:"version"`
+	}
+	_ = json.Unmarshal(data, &probe)
+
+	if probe.Version >= 3 {
+		var v3 stateFileV3
+		if err := json.Unmarshal(data, &v3); err == nil {
+			s.mu.Lock()
+			defer s.mu.Unlock()
+			for tag, ps := range v3.Nodes {
+				s.state[tag] = &nodeState{
+					strikes:       ps.Strikes,
+					okRuns:        ps.OkRounds,
+					hardFailStart: ps.HardFailStart,
+				}
 			}
+			s.effectivePool = append([]string(nil), v3.EffectivePool...)
+			s.yamlBaseline = append([]string(nil), v3.YamlBaseline...)
+			s.emergencyEvents = append([]EmergencyEvent(nil), v3.EmergencyEvents...)
+			s.transitions = append([]PoolTransition(nil), v3.Transitions...)
+			if v3.RollbackQuarantine != nil {
+				s.rollbackQuarantine = copyQuarantine(v3.RollbackQuarantine)
+			}
+			slog.Info("nodescorer: restored state v3",
+				"nodes", len(v3.Nodes),
+				"effective_pool", len(s.effectivePool),
+				"events", len(s.emergencyEvents),
+				"transitions", len(s.transitions),
+				"quarantined", len(s.rollbackQuarantine))
+			return
 		}
-		s.effectivePool = append([]string(nil), v2.EffectivePool...)
-		s.yamlBaseline = append([]string(nil), v2.YamlBaseline...)
-		s.emergencyEvents = append([]EmergencyEvent(nil), v2.EmergencyEvents...)
-		slog.Info("nodescorer: restored state v2",
-			"nodes", len(v2.Nodes),
-			"effective_pool", len(s.effectivePool),
-			"events", len(s.emergencyEvents))
-		return
+	}
+	if probe.Version >= 2 {
+		var v2 stateFileV2
+		if err := json.Unmarshal(data, &v2); err == nil {
+			s.mu.Lock()
+			defer s.mu.Unlock()
+			for tag, ps := range v2.Nodes {
+				s.state[tag] = &nodeState{
+					strikes:       ps.Strikes,
+					okRuns:        ps.OkRounds,
+					hardFailStart: ps.HardFailStart,
+				}
+			}
+			s.effectivePool = append([]string(nil), v2.EffectivePool...)
+			s.yamlBaseline = append([]string(nil), v2.YamlBaseline...)
+			s.emergencyEvents = append([]EmergencyEvent(nil), v2.EmergencyEvents...)
+			slog.Info("nodescorer: restored state v2 (will upgrade to v3 on next save)",
+				"nodes", len(v2.Nodes),
+				"effective_pool", len(s.effectivePool),
+				"events", len(s.emergencyEvents))
+			return
+		}
 	}
 	// v1 fallback: bare map[string]persistedState.
 	var raw map[string]persistedState
@@ -83,8 +133,19 @@ func (s *Scorer) loadState() {
 			hardFailStart: ps.HardFailStart,
 		}
 	}
-	slog.Info("nodescorer: restored state v1 (will upgrade to v2 on next save)",
+	slog.Info("nodescorer: restored state v1 (will upgrade to v3 on next save)",
 		"nodes", len(raw))
+}
+
+// copyQuarantine deep-copies a node→until map (used for both load and
+// save sides; mutating the persisted snapshot must never leak into
+// runtime state).
+func copyQuarantine(in map[string]time.Time) map[string]time.Time {
+	out := make(map[string]time.Time, len(in))
+	for k, v := range in {
+		out[k] = v
+	}
+	return out
 }
 
 // saveStateLocked persists scorer counters to disk. **CALLER MUST HOLD
@@ -114,15 +175,17 @@ func (s *Scorer) saveStateLocked() {
 			HardFailStart: st.hardFailStart,
 		}
 	}
-	v2 := stateFileV2{
-		Version:         2,
-		Nodes:           nodes,
-		EffectivePool:   append([]string(nil), s.effectivePool...),
-		YamlBaseline:    append([]string(nil), s.yamlBaseline...),
-		EmergencyEvents: append([]EmergencyEvent(nil), s.emergencyEvents...),
+	v3 := stateFileV3{
+		Version:            3,
+		Nodes:              nodes,
+		EffectivePool:      append([]string(nil), s.effectivePool...),
+		YamlBaseline:       append([]string(nil), s.yamlBaseline...),
+		EmergencyEvents:    append([]EmergencyEvent(nil), s.emergencyEvents...),
+		Transitions:        append([]PoolTransition(nil), s.transitions...),
+		RollbackQuarantine: copyQuarantine(s.rollbackQuarantine),
 	}
 
-	data, err := json.MarshalIndent(v2, "", "  ")
+	data, err := json.MarshalIndent(v3, "", "  ")
 	if err != nil {
 		slog.Warn("nodescorer: marshal state failed", "err", err)
 		return
