@@ -227,6 +227,58 @@ func TestClearEmergencyRevertsAndResetsTimers(t *testing.T) {
 	}
 }
 
+// TestClearEmergencyIdempotent: when effective == baseline AND no
+// hard-fail timer is active, ClearEmergency must be a true no-op —
+// no event recorded, no state mutation. This was a 2026-06-09 fix
+// after a test run accidentally wrote a "clear" event into a clean
+// state, which is operationally noise.
+func TestClearEmergencyIdempotent(t *testing.T) {
+	s := newTestScorer(emergencyCfg([]string{"a", "b"}, nil))
+	s.renderer = &emergencyTestRenderer{path: t.TempDir() + "/cfg.yaml"}
+	s.yamlBaseline = []string{"a", "b"}
+	s.effectivePool = []string{"a", "b"} // already in sync
+	addStateNode(s, "a")                   // no hardFailStart
+	addStateNode(s, "b")
+	priorEvents := len(s.emergencyEvents)
+
+	s.ClearEmergency()
+
+	if len(s.emergencyEvents) != priorEvents {
+		t.Errorf("expected no new event when state was already clean, got %d new",
+			len(s.emergencyEvents)-priorEvents)
+	}
+}
+
+// TestClearEmergencyNotIdempotentWhenTimerActive: when a hard-fail timer
+// is ticking, ClearEmergency must reset it (so the node gets a fresh
+// 30-min grace period) AND record a clear event so the operator sees
+// that timers were touched. This is the explicit "I'm canceling the
+// auto-evict path for this node" signal.
+func TestClearEmergencyNotIdempotentWhenTimerActive(t *testing.T) {
+	s := newTestScorer(emergencyCfg([]string{"a", "b"}, nil))
+	s.renderer = &emergencyTestRenderer{path: t.TempDir() + "/cfg.yaml"}
+	s.yamlBaseline = []string{"a", "b"}
+	s.effectivePool = []string{"a", "b"} // in sync...
+	st := addStateNode(s, "a")
+	st.hardFailStart = time.Now().Add(-10 * time.Minute) // ...but a timer is running
+	addStateNode(s, "b")
+
+	s.ClearEmergency()
+
+	if !s.state["a"].hardFailStart.IsZero() {
+		t.Error("hardFailStart should be cleared")
+	}
+	hasClear := false
+	for _, ev := range s.emergencyEvents {
+		if ev.Type == "clear" {
+			hasClear = true
+		}
+	}
+	if !hasClear {
+		t.Error("expected a clear event when timer was active")
+	}
+}
+
 // emergencyTestRenderer is a minimal Renderer for tests that need
 // Path() (e.g. ClearEmergency triggers saveStateLocked which needs
 // renderer.Path()).

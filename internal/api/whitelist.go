@@ -63,6 +63,27 @@ func (s *Server) handleWhitelistPut(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Reject empty/no-op bodies. An empty `{}` (or any body where mode !=
+	// "overseas" and every match list is empty) is almost certainly a
+	// caller bug — accepting it silently drops the whole whitelist and
+	// breaks cross-border routing the moment the next render fires.
+	// Caught in production 2026-06-09 when an automated test sent `{}`.
+	// "overseas" mode legitimately has no match lists (everything routes
+	// via the us-pool selector), so that's the only path through this
+	// guard for an otherwise-empty body.
+	if strings.ToLower(strings.TrimSpace(dto.Mode)) != "overseas" {
+		empty := len(dto.Geosites) == 0 &&
+			len(dto.Geoips) == 0 &&
+			len(dto.DomainSuffix) == 0 &&
+			len(dto.IPCIDR) == 0
+		if empty {
+			http.Error(w,
+				"whitelist body has no match entries — set mode=\"overseas\" to intentionally clear, or include at least one of geosites/geoips/domain_suffix/ip_cidr",
+				http.StatusBadRequest)
+			return
+		}
+	}
+
 	// Validation pass — catalog presence only, no network. Never mutate
 	// cfg if validation fails.
 	geosites, err := s.canonicalizeRuleSetTags(dto.Geosites, "geosite-")

@@ -241,6 +241,11 @@ func (s *Scorer) GetPoolState() PoolState {
 // the reverted pool to mihomo. ops calls this after diagnosing why a
 // node hard-failed and either fixing the upstream issue or accepting
 // that the node is gone (and editing yaml to reflect the new baseline).
+//
+// Idempotent: when there's nothing to clear (effective already equals
+// baseline AND no node is currently hard-failing), returns without
+// recording an event or resetting timers — calling clear-emergency in
+// a steady state should be a true no-op, not a noise generator.
 func (s *Scorer) ClearEmergency() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -249,6 +254,22 @@ func (s *Scorer) ClearEmergency() {
 	}
 	baseline := append([]string(nil), s.cfg.PoolMembers...)
 	sort.Strings(baseline)
+
+	// Detect actual divergence: effective != baseline OR any node has an
+	// active hard-fail timer ticking. If neither, this call is a no-op.
+	effectiveSorted := append([]string(nil), s.effectivePool...)
+	sort.Strings(effectiveSorted)
+	hasActiveTimer := false
+	for _, st := range s.state {
+		if !st.hardFailStart.IsZero() {
+			hasActiveTimer = true
+			break
+		}
+	}
+	if stringSliceEqual(effectiveSorted, baseline) && !hasActiveTimer {
+		return
+	}
+
 	s.effectivePool = append([]string(nil), s.cfg.PoolMembers...)
 	s.yamlBaseline = baseline
 	s.recordEmergencyEvent(EmergencyEvent{
