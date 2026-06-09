@@ -401,7 +401,51 @@ type NodeQualifyConfig struct {
 	// HotReloadMinInterval throttles reload frequency. The result: a small
 	// stable set of best-quality egresses for a given terminal load,
 	// preserving per-terminal HRW identity (perterminal.go).
+	//
+	// Only consulted when PoolMode=auto.
 	PoolSizing PoolSizingConfig `yaml:"pool_sizing"`
+
+	// PoolMode selects who owns pool composition.
+	//
+	//	"auto"   — scorer K-gating (legacy; subject to detection signal from
+	//	           5-min auto rotation, retained for backward compat)
+	//	"manual" — operator-owned via PoolMembers; scorer is observation-only
+	//	           and never auto-rotates the pool. Routing is fixed to the
+	//	           PoolMembers list. Emergency events still fire signals
+	//	           (Push notification) but a follow-up phase wires the
+	//	           EmergencyPromoteChain auto-promotion behavior. (Default
+	//	           in production going forward — eliminates the 5-min auto-IP
+	//	           rotation that CF/OpenAI behavioral models would flag.)
+	//
+	// Default "auto" for backward compat with deployments that haven't
+	// migrated. Operator should set "manual" + populate PoolMembers.
+	PoolMode string `yaml:"pool_mode"`
+
+	// PoolMembers is the operator-owned list of node tags that carry
+	// production traffic when PoolMode=manual. Members must reference
+	// node tags that exist in the active subscription set; missing tags
+	// are dropped at render time with a warning. Order is irrelevant —
+	// per-terminal HRW assigns terminals to members deterministically by
+	// hash, not order.
+	//
+	// This is the "ground truth" for the routing pool. Treat the same way
+	// as `subscriptions:` — operator-owned, do NOT auto-modify during
+	// node-sync / schema-migration / yaml-splice operations.
+	PoolMembers []string `yaml:"pool_members"`
+
+	// EmergencyPromoteChain is the operator's pre-approved replacement
+	// queue for when an active PoolMembers entry is auto-evicted by the
+	// emergency path (node fail_rate=100% sustained 30min). System walks
+	// this list in order, picking the first not-already-in-pool entry to
+	// replace the evicted node so pool size stays at K.
+	//
+	// Pre-approval matters: ops cannot always be online. With this list
+	// the system can keep the pool at full size during single-node
+	// failures without waiting for human approval.
+	//
+	// Schema is in place from Step 0; the auto-promote behavior wires up
+	// in Phase 2.
+	EmergencyPromoteChain []string `yaml:"emergency_promote_chain"`
 }
 
 // PoolSizingConfig controls dynamic K computation. See NodeQualifyConfig.PoolSizing.
@@ -639,6 +683,9 @@ func (c *NodeQualifyConfig) applyDefaults() {
 	}
 	if c.HotReloadMinInterval == 0 {
 		c.HotReloadMinInterval = 90 * time.Second
+	}
+	if c.PoolMode == "" {
+		c.PoolMode = "auto"
 	}
 	c.PoolSizing.applyDefaults()
 	for i := range c.Probes {

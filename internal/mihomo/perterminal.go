@@ -35,8 +35,15 @@ const maxPerTerminalHosts = 1024
 // member set (legacy / no K-gating). The fallback target ("us-pool") in
 // the MATCH rule keeps routing functional for sources outside the
 // enumerated client_subnet.
+//
+// We intersect the routing set with present outbound tags before emitting:
+// during --validate the outbounds list is empty (RenderOnly(nil)), and
+// during normal operation a stale routing list may reference nodes that
+// were dropped from a subscription. Either way mihomo refuses configs
+// that route to nonexistent proxy names — silent fallback to the present
+// us-pool intersection avoids a hard fail.
 func (r *Renderer) perTerminalSlices(outbounds []subscribe.Outbound) []string {
-	members := r.routingMembers
+	members := r.intersectWithPresent(r.routingMembers, outbounds)
 	if len(members) == 0 {
 		members = r.usPoolMembers(outbounds)
 	}
@@ -44,6 +51,28 @@ func (r *Renderer) perTerminalSlices(outbounds []subscribe.Outbound) []string {
 		return nil
 	}
 	return buildSliceRules(r.node.ClientSubnet, members, usPool)
+}
+
+// intersectWithPresent filters wanted by membership in outbounds' tag set.
+// Returns nil if outbounds is empty (validate path) so callers can fall
+// back to their default member source. nil-safe on wanted.
+func (r *Renderer) intersectWithPresent(wanted []string, outbounds []subscribe.Outbound) []string {
+	if len(wanted) == 0 || len(outbounds) == 0 {
+		return nil
+	}
+	present := make(map[string]bool, len(outbounds))
+	for _, o := range outbounds {
+		if t := o.Tag(); t != "" {
+			present[t] = true
+		}
+	}
+	out := make([]string, 0, len(wanted))
+	for _, w := range wanted {
+		if present[w] {
+			out = append(out, w)
+		}
+	}
+	return out
 }
 
 // perTerminalSlicesForPool returns the `perterm-<poolName>` sub-rule body
@@ -56,8 +85,10 @@ func (r *Renderer) perTerminalSlicesForPool(poolName string, outbounds []subscri
 		// No probe results yet: fall back through routingMembers
 		// (top-K when K-gating active) → us-pool members. Routing set
 		// preferred so cold-start named-pool traffic still respects the
-		// K-gate, not just NodePattern.
-		members = r.routingMembers
+		// K-gate, not just NodePattern. Intersect with present outbounds
+		// so --validate (RenderOnly with nil outbounds) doesn't reference
+		// proxies that aren't emitted.
+		members = r.intersectWithPresent(r.routingMembers, outbounds)
 		if len(members) == 0 {
 			members = r.usPoolMembers(outbounds)
 		}

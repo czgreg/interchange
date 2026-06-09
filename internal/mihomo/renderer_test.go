@@ -656,6 +656,57 @@ func TestRenderer_PerTerminal(t *testing.T) {
 	}
 }
 
+// TestRenderer_WithRoutingMembers covers manual-mode pool pinning: with
+// WithRoutingMembers set, perterm SRC-IP-CIDR rules use ONLY those members
+// (HRW pool = restricted set), regardless of how many candidates exist in
+// the subscription. This is the path PoolMode=manual takes — the operator's
+// PoolMembers list is the routing pool, even if the full us-pool group has
+// more nodes (kept wide for probing only).
+func TestRenderer_WithRoutingMembers(t *testing.T) {
+	r := newTestRenderer(t)
+	r.cfg.URLTest.NodePattern = `美国|🇺🇸|\bUS`
+	r.cfg.Route.Mode = "whitelist"
+	r.cfg.Route.Whitelist = config.WhitelistConfig{
+		Geosites: config.StringList{"geosite-openai"},
+	}
+	r = r.WithLoadBalance(true)
+	r.node.ClientSubnet = "10.8.13.0/29" // 6 usable hosts
+
+	manualPool := []string{"ash/🇺🇸US-IEPL-01", "ash/🇺🇸US-IEPL-02"}
+	r = r.WithRoutingMembers(manualPool)
+
+	body, err := r.Write(sampleOutbounds())
+	if err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	var doc map[string]any
+	if err := yaml.Unmarshal(body, &doc); err != nil {
+		t.Fatalf("invalid yaml: %v", err)
+	}
+
+	sub, _ := doc["sub-rules"].(map[string]any)
+	pt, _ := sub["perterm"].([]any)
+	if len(pt) < 2 {
+		t.Fatalf("perterm sub-rule too short: %v", pt)
+	}
+	// Every SRC-IP-CIDR target must be one of the manual pool members.
+	manualSet := map[string]bool{manualPool[0]: true, manualPool[1]: true}
+	for _, e := range pt {
+		s, _ := e.(string)
+		if !strings.HasPrefix(s, "SRC-IP-CIDR,") {
+			continue
+		}
+		// SRC-IP-CIDR,<ip>/32,<member>
+		parts := strings.Split(s, ",")
+		if len(parts) != 3 {
+			t.Fatalf("malformed perterm rule: %q", s)
+		}
+		if !manualSet[parts[2]] {
+			t.Errorf("perterm rule routes to %q, not in manual pool %v", parts[2], manualPool)
+		}
+	}
+}
+
 // TestHRWStability: removing a node only reassigns IPs that were on it.
 func TestHRWStability(t *testing.T) {
 	members := []string{"nodeA", "nodeB", "nodeC", "nodeD"}

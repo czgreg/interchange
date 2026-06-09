@@ -79,6 +79,13 @@ func main() {
 		WithSubscriptions(cfg.Subscriptions).
 		WithPools(cfg.Pools).
 		WithLoadBalance(cfg.LoadBalance.PerTerminal)
+	// Manual mode: pin the per-terminal routing set to the operator-owned
+	// PoolMembers list before any render runs. This protects against the
+	// 10s warmup window where a subscription refresh could otherwise
+	// render with the full qualified set as routing target.
+	if cfg.NodeQualify.PoolMode == "manual" && len(cfg.NodeQualify.PoolMembers) > 0 {
+		mihomoRenderer = mihomoRenderer.WithRoutingMembers(cfg.NodeQualify.PoolMembers)
+	}
 	var renderer api.Renderer = mihomoRenderer
 
 	dpCtl := dataplane.NewController(cfg.DataPlane.ClashAPI)

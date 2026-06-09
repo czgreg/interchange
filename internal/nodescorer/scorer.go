@@ -41,8 +41,8 @@ type NodeHealth struct {
 	LastRTTMs  int     `json:"rtt_last_ms"`
 	RTTP50Ms   int     `json:"rtt_p50_ms"`
 	RTTP95Ms   int     `json:"rtt_p95_ms"`
-	JitterMs   int     `json:"jitter_ms"`  // p95 - p50
-	FailRate   float64 `json:"fail_rate"`  // fraction of probes with delay=0
+	JitterMs   int     `json:"jitter_ms"`   // p95 - p50
+	FailRate   float64 `json:"fail_rate"`   // fraction of probes with delay=0
 	ProbeCount int     `json:"probe_count"` // history entries available
 
 	// Passive throughput from /connections (bytes/sec, 0 when no active traffic).
@@ -51,8 +51,8 @@ type NodeHealth struct {
 	// Pool membership state.
 	Qualified bool   `json:"qualified"`
 	InPool    bool   `json:"in_pool"`
-	Strikes   int    `json:"strikes"`         // consecutive failing rounds
-	OkRounds  int    `json:"ok_rounds"`       // consecutive passing rounds
+	Strikes   int    `json:"strikes"`          // consecutive failing rounds
+	OkRounds  int    `json:"ok_rounds"`        // consecutive passing rounds
 	Reason    string `json:"reason,omitempty"` // why not qualified (if !Qualified)
 
 	// Probes holds the latest site-specific probe result per probe name
@@ -72,19 +72,19 @@ type NodeHealth struct {
 // bytes is failing in a way RTT probes don't catch (upstream RST, captive
 // redirect, dead egress) — this surfaces that.
 type PassiveStats struct {
-	ActiveConns     int     `json:"active_conns"`      // current live conns through this node
-	ClosedWindow    int     `json:"closed_window"`     // conns that closed during the window
-	FailedWindow    int     `json:"failed_window"`     // of those, ones that moved < minHandshakeBytes
-	FailRate        float64 `json:"fail_rate"`         // failed/closed over the window (0 when no closes)
+	ActiveConns     int     `json:"active_conns"`  // current live conns through this node
+	ClosedWindow    int     `json:"closed_window"` // conns that closed during the window
+	FailedWindow    int     `json:"failed_window"` // of those, ones that moved < minHandshakeBytes
+	FailRate        float64 `json:"fail_rate"`     // failed/closed over the window (0 when no closes)
 	SampleWindowSec int     `json:"sample_window_sec"`
 }
 
 // ProbeResult is one site-specific reachability measurement for one node.
 type ProbeResult struct {
-	OK            bool      `json:"ok"`             // status in range AND not a CF challenge
-	StatusCode    int       `json:"status_code"`    // 0 = no response
-	CFMitigated   bool      `json:"cf_mitigated"`   // cf-mitigated: challenge header seen
-	LatencyMs     int       `json:"latency_ms"`     // real round-trip; on failure = time waited before giving up
+	OK            bool      `json:"ok"`           // status in range AND not a CF challenge
+	StatusCode    int       `json:"status_code"`  // 0 = no response
+	CFMitigated   bool      `json:"cf_mitigated"` // cf-mitigated: challenge header seen
+	LatencyMs     int       `json:"latency_ms"`   // real round-trip; on failure = time waited before giving up
 	LastCheckedAt time.Time `json:"last_checked_at"`
 	LastError     string    `json:"last_error,omitempty"`
 }
@@ -136,8 +136,8 @@ type Renderer interface {
 type Scorer struct {
 	cfg         config.NodeQualifyConfig
 	pools       []config.PoolConfig // named pools gated by probe results
-	nodePattern string // regexp filter matching sing-box renderer's NodePattern
-	apiAddr     string // mihomo clash-api host:port
+	nodePattern string              // regexp filter matching sing-box renderer's NodePattern
+	apiAddr     string              // mihomo clash-api host:port
 	apiSecret   string
 	probeURL    string // same URL mihomo uses for url-test
 	renderer    Renderer
@@ -224,25 +224,25 @@ func New(
 	// at. Short timeout — a probe that hangs is itself a failure signal.
 	probeProxy, _ := url.Parse("http://127.0.0.1:11081")
 	return &Scorer{
-		cfg:          cfg,
-		pools:        append([]config.PoolConfig(nil), pools...),
-		nodePattern:  nodePattern,
-		apiAddr:      apiAddr,
-		apiSecret:    apiSecret,
-		probeURL:     probeURL,
-		renderer:     r,
-		subscribe:    allOutbounds,
-		state:        map[string]*nodeState{},
-		poolSet:      map[string]bool{},
-		poolMembers:  map[string][]string{},
+		cfg:            cfg,
+		pools:          append([]config.PoolConfig(nil), pools...),
+		nodePattern:    nodePattern,
+		apiAddr:        apiAddr,
+		apiSecret:      apiSecret,
+		probeURL:       probeURL,
+		renderer:       r,
+		subscribe:      allOutbounds,
+		state:          map[string]*nodeState{},
+		poolSet:        map[string]bool{},
+		poolMembers:    map[string][]string{},
 		probeResults:   map[string]map[string]ProbeResult{},
 		probeLast:      map[string]map[string]time.Time{},
 		probeOKHistory: map[string]map[string][]bool{},
-		connPrev:     map[string]connBytes{},
-		connSeen:     map[string]connInfo{},
-		closeEvents:  map[string][]closeEvent{},
-		activeConns:  map[string]int{},
-		httpc:        &http.Client{Timeout: 5 * time.Second},
+		connPrev:       map[string]connBytes{},
+		connSeen:       map[string]connInfo{},
+		closeEvents:    map[string][]closeEvent{},
+		activeConns:    map[string]int{},
+		httpc:          &http.Client{Timeout: 5 * time.Second},
 		probeHTTPc: &http.Client{
 			Timeout:   12 * time.Second,
 			Transport: &http.Transport{Proxy: http.ProxyURL(probeProxy)},
@@ -436,12 +436,50 @@ func (s *Scorer) score(ctx context.Context) {
 	}
 	kTarget, supplyLimited := computeK(s.cfg.PoolSizing, len(qualifiedNodes))
 
-	if kTarget == 0 {
-		// Legacy mode: everyone in. Maintain strikes/okRuns for diagnostics.
+	switch s.cfg.PoolMode {
+	case "manual":
+		// Manual mode: pool composition is operator-owned via
+		// cfg.PoolMembers. Scorer is observation-only — no K-gating math,
+		// no auto rotation. Promote / demote / replace are all explicit ops
+		// actions (yaml edit + redeploy, or future /api/pool/apply).
+		//
+		// Effect on hot-reload: newPoolSet = PoolMembers (intersected with
+		// present candidates). The first scoring round after a yaml edit
+		// will see s.poolSet != newPoolSet → triggers exactly one
+		// hot-reload to push the new PoolMembers to mihomo. Subsequent
+		// rounds match → no reload. This is the "no surprises" behavior
+		// — pool changes only when ops changes the yaml.
+		manualSet := make(map[string]bool, len(s.cfg.PoolMembers))
+		for _, m := range s.cfg.PoolMembers {
+			if candidateSet[m] {
+				manualSet[m] = true
+			}
+		}
+		// Surface gaps loudly: ops set 8 in yaml but only 6 exist as
+		// candidates → a subscription rename or a stale yaml. Operator
+		// must reconcile; meanwhile the routing pool is short.
+		if len(manualSet) < len(s.cfg.PoolMembers) {
+			missing := make([]string, 0, len(s.cfg.PoolMembers)-len(manualSet))
+			for _, m := range s.cfg.PoolMembers {
+				if !manualSet[m] {
+					missing = append(missing, m)
+				}
+			}
+			slog.Warn("nodescorer: manual pool members missing from candidates",
+				"requested", len(s.cfg.PoolMembers),
+				"resolved", len(manualSet),
+				"missing", missing)
+		}
 		for i := range nodes {
 			st := s.state[nodes[i].Name]
-			newPoolSet[nodes[i].Name] = true
-			nodes[i].InPool = true
+			if manualSet[nodes[i].Name] {
+				newPoolSet[nodes[i].Name] = true
+				nodes[i].InPool = true
+			}
+			// Maintain strikes/okRuns for diagnostics — operator looking
+			// at /api/nodes/health still sees how each node has been
+			// trending recently, even though those counters don't drive
+			// any auto behavior in manual mode.
 			if nodes[i].Qualified {
 				st.strikes = 0
 				st.okRuns++
@@ -453,109 +491,132 @@ func (s *Scorer) score(ctx context.Context) {
 			nodes[i].OkRounds = st.okRuns
 			st.health = nodes[i]
 		}
-	} else {
-		// K-gated mode. Rank qualified by compositeScore (lower=better).
-		sort.SliceStable(qualifiedNodes, func(i, j int) bool {
-			return compositeScore(*qualifiedNodes[i]) < compositeScore(*qualifiedNodes[j])
-		})
-		preferredSet := make(map[string]bool, kTarget)
-		for i := 0; i < kTarget && i < len(qualifiedNodes); i++ {
-			preferredSet[qualifiedNodes[i].Name] = true
-		}
+		// Surface the manual pool as KTarget for /api/status visibility.
+		kTarget = len(s.cfg.PoolMembers)
+		supplyLimited = len(manualSet) < len(s.cfg.PoolMembers)
 
-		// First-round bootstrap: pool is empty (or hasn't been K-gated
-		// before). Fill greedily from preferred so the data plane has a
-		// healthy us-pool immediately rather than waiting ReadmitStrikes
-		// rounds with an empty pool.
-		bootstrap := len(s.poolSet) == 0
-
-		for i := range nodes {
-			st := s.state[nodes[i].Name]
-			currentlyInPool := s.poolSet[nodes[i].Name]
-			wantInPool := preferredSet[nodes[i].Name]
-
-			if wantInPool {
-				// Top-K candidate: increment okRuns, reset strikes.
-				st.strikes = 0
-				st.okRuns++
-				if bootstrap || currentlyInPool || st.okRuns >= s.cfg.ReadmitStrikes {
-					newPoolSet[nodes[i].Name] = true
-					nodes[i].InPool = true
+	case "auto", "":
+		if kTarget == 0 {
+			// Legacy mode: everyone in. Maintain strikes/okRuns for diagnostics.
+			for i := range nodes {
+				st := s.state[nodes[i].Name]
+				newPoolSet[nodes[i].Name] = true
+				nodes[i].InPool = true
+				if nodes[i].Qualified {
+					st.strikes = 0
+					st.okRuns++
+				} else {
+					st.okRuns = 0
+					st.strikes++
 				}
-			} else {
-				// Not in top-K (or not qualified): increment strikes.
-				st.okRuns = 0
-				st.strikes++
-				if currentlyInPool && st.strikes < s.cfg.EvictStrikes {
-					// Hysteresis: stay in pool until strikes reach evict bar.
-					newPoolSet[nodes[i].Name] = true
-					nodes[i].InPool = true
-				}
-				// else: out (or never was in)
+				nodes[i].Strikes = st.strikes
+				nodes[i].OkRounds = st.okRuns
+				st.health = nodes[i]
 			}
-			nodes[i].Strikes = st.strikes
-			nodes[i].OkRounds = st.okRuns
-			st.health = nodes[i]
-		}
-
-		// Post-pass — enforce |pool| == kTarget exactly. Two cases:
-		//
-		//   under: hysteresis blocked some preferred members from entering
-		//          on their first round; pool fell below K. Fill greedily
-		//          from preferred order so the data plane stays at capacity.
-		//   over:  hysteresis kept old members (strikes < EvictStrikes) AND
-		//          new preferred members entered (okRuns >= ReadmitStrikes);
-		//          their union exceeds K. Drop hysteresis-retained members
-		//          (those NOT in preferredSet this round) by score, worst
-		//          first. Preferred members are never dropped — they earned
-		//          their slots by ranking top-K.
-		if len(newPoolSet) < kTarget {
+		} else {
+			// K-gated mode. Rank qualified by compositeScore (lower=better).
+			sort.SliceStable(qualifiedNodes, func(i, j int) bool {
+				return compositeScore(*qualifiedNodes[i]) < compositeScore(*qualifiedNodes[j])
+			})
+			preferredSet := make(map[string]bool, kTarget)
 			for i := 0; i < kTarget && i < len(qualifiedNodes); i++ {
-				name := qualifiedNodes[i].Name
-				if newPoolSet[name] {
-					continue
+				preferredSet[qualifiedNodes[i].Name] = true
+			}
+
+			// First-round bootstrap: pool is empty (or hasn't been K-gated
+			// before). Fill greedily from preferred so the data plane has a
+			// healthy us-pool immediately rather than waiting ReadmitStrikes
+			// rounds with an empty pool.
+			bootstrap := len(s.poolSet) == 0
+
+			for i := range nodes {
+				st := s.state[nodes[i].Name]
+				currentlyInPool := s.poolSet[nodes[i].Name]
+				wantInPool := preferredSet[nodes[i].Name]
+
+				if wantInPool {
+					// Top-K candidate: increment okRuns, reset strikes.
+					st.strikes = 0
+					st.okRuns++
+					if bootstrap || currentlyInPool || st.okRuns >= s.cfg.ReadmitStrikes {
+						newPoolSet[nodes[i].Name] = true
+						nodes[i].InPool = true
+					}
+				} else {
+					// Not in top-K (or not qualified): increment strikes.
+					st.okRuns = 0
+					st.strikes++
+					if currentlyInPool && st.strikes < s.cfg.EvictStrikes {
+						// Hysteresis: stay in pool until strikes reach evict bar.
+						newPoolSet[nodes[i].Name] = true
+						nodes[i].InPool = true
+					}
+					// else: out (or never was in)
 				}
-				newPoolSet[name] = true
-				for j := range nodes {
-					if nodes[j].Name == name {
-						nodes[j].InPool = true
+				nodes[i].Strikes = st.strikes
+				nodes[i].OkRounds = st.okRuns
+				st.health = nodes[i]
+			}
+
+			// Post-pass — enforce |pool| == kTarget exactly. Two cases:
+			//
+			//   under: hysteresis blocked some preferred members from entering
+			//          on their first round; pool fell below K. Fill greedily
+			//          from preferred order so the data plane stays at capacity.
+			//   over:  hysteresis kept old members (strikes < EvictStrikes) AND
+			//          new preferred members entered (okRuns >= ReadmitStrikes);
+			//          their union exceeds K. Drop hysteresis-retained members
+			//          (those NOT in preferredSet this round) by score, worst
+			//          first. Preferred members are never dropped — they earned
+			//          their slots by ranking top-K.
+			if len(newPoolSet) < kTarget {
+				for i := 0; i < kTarget && i < len(qualifiedNodes); i++ {
+					name := qualifiedNodes[i].Name
+					if newPoolSet[name] {
+						continue
+					}
+					newPoolSet[name] = true
+					for j := range nodes {
+						if nodes[j].Name == name {
+							nodes[j].InPool = true
+							break
+						}
+					}
+					if len(newPoolSet) >= kTarget {
 						break
 					}
 				}
-				if len(newPoolSet) >= kTarget {
-					break
+			} else if len(newPoolSet) > kTarget {
+				// Build score map for nodes currently in newPoolSet that are NOT
+				// preferred this round (hysteresis stragglers, eligible for drop).
+				type drop struct {
+					name  string
+					score float64
 				}
-			}
-		} else if len(newPoolSet) > kTarget {
-			// Build score map for nodes currently in newPoolSet that are NOT
-			// preferred this round (hysteresis stragglers, eligible for drop).
-			type drop struct {
-				name  string
-				score float64
-			}
-			scoreOf := make(map[string]float64, len(nodes))
-			for i := range nodes {
-				scoreOf[nodes[i].Name] = compositeScore(nodes[i])
-			}
-			drops := make([]drop, 0, len(newPoolSet))
-			for name := range newPoolSet {
-				if !preferredSet[name] {
-					drops = append(drops, drop{name, scoreOf[name]})
+				scoreOf := make(map[string]float64, len(nodes))
+				for i := range nodes {
+					scoreOf[nodes[i].Name] = compositeScore(nodes[i])
 				}
-			}
-			// Worst score first (highest compositeScore = lowest quality).
-			sort.Slice(drops, func(i, j int) bool {
-				return drops[i].score > drops[j].score
-			})
-			for _, d := range drops {
-				if len(newPoolSet) <= kTarget {
-					break
+				drops := make([]drop, 0, len(newPoolSet))
+				for name := range newPoolSet {
+					if !preferredSet[name] {
+						drops = append(drops, drop{name, scoreOf[name]})
+					}
 				}
-				delete(newPoolSet, d.name)
-				for j := range nodes {
-					if nodes[j].Name == d.name {
-						nodes[j].InPool = false
+				// Worst score first (highest compositeScore = lowest quality).
+				sort.Slice(drops, func(i, j int) bool {
+					return drops[i].score > drops[j].score
+				})
+				for _, d := range drops {
+					if len(newPoolSet) <= kTarget {
 						break
+					}
+					delete(newPoolSet, d.name)
+					for j := range nodes {
+						if nodes[j].Name == d.name {
+							nodes[j].InPool = false
+							break
+						}
 					}
 				}
 			}

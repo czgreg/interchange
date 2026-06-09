@@ -94,6 +94,17 @@ func (r *Renderer) WithLoadBalance(perTerminal bool) *Renderer {
 	return r
 }
 
+// WithRoutingMembers seeds the per-terminal HRW routing set at construction
+// time. Used by main.go when PoolMode=manual so that the FIRST render after
+// startup (e.g. an early subscription refresh that races the scorer's 10s
+// warmup) already restricts traffic to the operator-pinned PoolMembers,
+// rather than falling back to the full us-pool set. The scorer's hotReload
+// path overwrites this on subsequent reloads.
+func (r *Renderer) WithRoutingMembers(members []string) *Renderer {
+	r.routingMembers = append([]string(nil), members...)
+	return r
+}
+
 // NewRenderer constructs a Renderer with the given engine-agnostic config.
 // Node + subscriptions are attached later via WithNode / WithSubscriptions.
 func NewRenderer(cfg config.DataPlaneConfig) *Renderer {
