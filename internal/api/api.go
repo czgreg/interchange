@@ -191,6 +191,9 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		// "every qualified candidate in pool" mode); the block is still
 		// surfaced so operators can confirm config wiring.
 		resp["pool_sizing"] = snap.PoolSizing
+		// 24h pool churn metric — answers "is the system thrashing?"
+		// without scrolling /api/pool/transitions.
+		resp["pool_stability_24h"] = s.deps.NodeScorer.GetStability()
 	}
 	// Static capacity ceiling from the last offline stress test (see
 	// scripts/stress.sh + cfg.capacity). Only surfaced when configured —

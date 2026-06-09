@@ -477,6 +477,19 @@ type NodeQualifyConfig struct {
 	// Only consulted when PoolMode=auto.
 	PoolSizing PoolSizingConfig `yaml:"pool_sizing"`
 
+	// SwapThresholdScore is the absolute long-EWMA score margin a
+	// non-pool candidate must beat the worst pool member by, in order
+	// to be promoted. 0 = no margin (behave like before — top-K wins
+	// regardless of how thin the gap is). Higher values = stickier pool
+	// (resists "tied for top-K" flapping that would otherwise cause
+	// frequent IP rotations).
+	//
+	// Tuning: compositeScore is roughly p95_ms scale (with jitter +
+	// fail_rate contributions). 100 ≈ "100ms p95 better" — modest
+	// but meaningful. 300 = "300ms p95 better OR fail_rate 0.30 lower"
+	// = strong signal required. Default 100 in auto mode.
+	SwapThresholdScore float64 `yaml:"swap_threshold_score"`
+
 	// PoolMode selects who owns pool composition.
 	//
 	//	"auto"   — scorer K-gating (legacy; subject to detection signal from
@@ -795,6 +808,13 @@ func (c *NodeQualifyConfig) applyDefaults() {
 	}
 	if c.HotReloadMinInterval == 0 {
 		c.HotReloadMinInterval = 90 * time.Second
+	}
+	if c.SwapThresholdScore == 0 {
+		// Modest stickiness gate: candidate must beat worst pool member
+		// by ≥ 100 score-points (≈ 100ms p95, or 0.10 fail_rate, or
+		// some combination). Operator can lower to 0 to revert to old
+		// "any improvement triggers swap" semantics.
+		c.SwapThresholdScore = 100
 	}
 	if c.PoolMode == "" {
 		c.PoolMode = "auto"

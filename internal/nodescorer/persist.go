@@ -19,7 +19,9 @@ type persistedState struct {
 
 // stateFileV3 is the on-disk format v3 — adds the pool-transitions audit
 // log + rollback quarantine map on top of v2's emergency state. v2 files
-// auto-upgrade in place on the next save.
+// auto-upgrade in place on the next save. The EWMA map is included as
+// an optional field — older v3 files without it just start with empty
+// EWMAs, which behaves like "no signal yet" until probes accumulate.
 type stateFileV3 struct {
 	Version            int                       `json:"version"`
 	Nodes              map[string]persistedState `json:"nodes"`
@@ -28,6 +30,7 @@ type stateFileV3 struct {
 	EmergencyEvents    []EmergencyEvent          `json:"emergency_events,omitempty"`
 	Transitions        []PoolTransition          `json:"transitions,omitempty"`
 	RollbackQuarantine map[string]time.Time      `json:"rollback_quarantine,omitempty"`
+	EWMA               map[string]*nodeEWMA      `json:"ewma,omitempty"`
 }
 
 // stateFileV2 is the on-disk format v2 — wraps the per-node map in a
@@ -86,6 +89,9 @@ func (s *Scorer) loadState() {
 			s.transitions = append([]PoolTransition(nil), v3.Transitions...)
 			if v3.RollbackQuarantine != nil {
 				s.rollbackQuarantine = copyQuarantine(v3.RollbackQuarantine)
+			}
+			if v3.EWMA != nil {
+				s.ewma = copyEWMA(v3.EWMA)
 			}
 			slog.Info("nodescorer: restored state v3",
 				"nodes", len(v3.Nodes),
@@ -148,6 +154,20 @@ func copyQuarantine(in map[string]time.Time) map[string]time.Time {
 	return out
 }
 
+// copyEWMA deep-copies the per-node EWMA map. Same rationale as
+// copyQuarantine: persisted snapshot is decoupled from runtime state.
+func copyEWMA(in map[string]*nodeEWMA) map[string]*nodeEWMA {
+	out := make(map[string]*nodeEWMA, len(in))
+	for k, v := range in {
+		if v == nil {
+			continue
+		}
+		copied := *v
+		out[k] = &copied
+	}
+	return out
+}
+
 // saveStateLocked persists scorer counters to disk. **CALLER MUST HOLD
 // s.mu** (write lock — read won't satisfy because the caller has typically
 // just mutated s.state). Failures are logged but not fatal.
@@ -183,6 +203,7 @@ func (s *Scorer) saveStateLocked() {
 		EmergencyEvents:    append([]EmergencyEvent(nil), s.emergencyEvents...),
 		Transitions:        append([]PoolTransition(nil), s.transitions...),
 		RollbackQuarantine: copyQuarantine(s.rollbackQuarantine),
+		EWMA:               copyEWMA(s.ewma),
 	}
 
 	data, err := json.MarshalIndent(v3, "", "  ")

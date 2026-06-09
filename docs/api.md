@@ -777,7 +777,40 @@ curl -s $BASE/api/whitelist/resolved | jq -r '.domains[]' | head -20
 
 ## 接入变更日志（前端 / 控制平台）
 
-### 2026-06-09 夜（池审计 + 回滚）— 当前版本
+### 2026-06-09 深夜（B+ v2 — EWMA + trial + 稳定度）— 当前版本
+
+**评分系统升级**（影响 auto 模式池决策，REST 表面新增字段）：
+
+- `pool_mode: auto` 的池决策不再基于"当前轮单次 compositeScore"，而是基于双窗 EWMA：
+  - **短窗（4h 半衰期）** — 驱动 evict 决策。新出现的降级在 ~2 小时内反映到分数。
+  - **长窗（24h 半衰期）** — 驱动 promote 决策。"刚恢复"的节点要等长窗忘掉旧坏期才会被晋升，避免抖动。
+- **24h trial 窗口**：新订阅引入的节点在 24h 内不被 EWMA-promote 路径选中（除非已在池中或 emergency 路径触发）。
+- **绝对交换阈值** `swap_threshold_score`（默认 100）：候选要晋升必须比池内最差成员的长窗 EWMA 好 ≥ 100 分。降到 0 = 任何改进都换。
+- **池稳定度 24h** — `/api/status` 新增 `pool_stability_24h` 字段：
+
+```json
+"pool_stability_24h": {
+  "window_hours":     24,
+  "swap_count":       2,
+  "rollback_count":   0,
+  "unique_nodes_in":  3,
+  "unique_nodes_out": 3,
+  "oldest_at":        "2026-06-09T01:13:00Z"
+}
+```
+
+ops 看一眼这个就知道"系统过去一天动了多少"。频繁高 swap_count 是 thrashing 信号；持续 0 是池稳定。
+
+**配置默认变化**（向后兼容，原有 yaml 不需要改）：
+
+```yaml
+node_qualify:
+  swap_threshold_score: 100   # 默认 100；写 0 回退到旧"top-K 直接换"
+```
+
+**状态文件 v3 schema 兼容扩展**（增加 `ewma` 字段）。v1/v2 文件自动升级，无操作。
+
+### 2026-06-09 夜（池审计 + 回滚）
 
 **新增端点**（B+ issue 6 闭环）：
 

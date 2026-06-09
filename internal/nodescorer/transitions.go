@@ -136,6 +136,51 @@ func (s *Scorer) GetQuarantine() map[string]time.Time {
 	return out
 }
 
+// PoolStability captures how much the pool has churned in a recent
+// window. Surfaced via /api/status so ops can answer "is the system
+// thrashing?" without scrolling through transition logs.
+type PoolStability struct {
+	WindowHours    int       `json:"window_hours"`     // 24
+	SwapCount      int       `json:"swap_count"`       // total non-rollback transitions in window
+	RollbackCount  int       `json:"rollback_count"`   // operator rollback events
+	UniqueNodesIn  int       `json:"unique_nodes_in"`  // distinct nodes that were Added across all transitions
+	UniqueNodesOut int       `json:"unique_nodes_out"` // distinct nodes that were Removed
+	OldestAt       time.Time `json:"oldest_at,omitempty"`
+}
+
+// GetStability returns the 24h pool stability summary. Cheap — walks
+// the in-memory transitions slice once.
+func (s *Scorer) GetStability() PoolStability {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	cutoff := time.Now().Add(-24 * time.Hour)
+	out := PoolStability{WindowHours: 24}
+	in, outNodes := map[string]bool{}, map[string]bool{}
+	for _, t := range s.transitions {
+		if t.At.Before(cutoff) {
+			continue
+		}
+		if out.OldestAt.IsZero() || t.At.Before(out.OldestAt) {
+			out.OldestAt = t.At
+		}
+		switch t.Type {
+		case "rollback":
+			out.RollbackCount++
+		default:
+			out.SwapCount++
+		}
+		for _, n := range t.Added {
+			in[n] = true
+		}
+		for _, n := range t.Removed {
+			outNodes[n] = true
+		}
+	}
+	out.UniqueNodesIn = len(in)
+	out.UniqueNodesOut = len(outNodes)
+	return out
+}
+
 // RollbackResult is returned by Rollback to summarize the operation.
 type RollbackResult struct {
 	StepsRequested int       `json:"steps_requested"`

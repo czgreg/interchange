@@ -232,6 +232,12 @@ type Scorer struct {
 	// lazily on read (inQuarantine deletes expired entries).
 	rollbackQuarantine map[string]time.Time
 
+	// ewma is the per-node smoothed health signal — short window (4h)
+	// drives evict, long window (24h) drives promote. Persisted in the
+	// state file v4 schema; nil-safe (lazy-initialized in updateNodeEWMA).
+	// See ewma.go for the math + half-life rationale.
+	ewma map[string]*nodeEWMA
+
 	// passive connection-lifecycle tracking (1.6). connSeen maps live
 	// connID → its node + last-seen byte total; closeEvents is a rolling
 	// per-node log of recently-closed connections used to compute fail
@@ -312,6 +318,7 @@ func New(
 		closeEvents:    map[string][]closeEvent{},
 		activeConns:    map[string]int{},
 		rollbackQuarantine: map[string]time.Time{},
+		ewma:               map[string]*nodeEWMA{},
 		httpc:          &http.Client{Timeout: 5 * time.Second},
 		probeHTTPc: &http.Client{
 			Timeout:   12 * time.Second,
@@ -471,6 +478,16 @@ func (s *Scorer) score(ctx context.Context) {
 		nodes = append(nodes, h)
 	}
 
+	// Update per-node EWMA from this round's composite scores. Drives
+	// the auto-mode evict/promote decisions in the K-gating branch
+	// below — short window (4h) for evict, long window (24h) for
+	// promote. See ewma.go for the math + half-life rationale.
+	ewmaNow := time.Now()
+	for i := range nodes {
+		score := compositeScore(nodes[i])
+		s.updateNodeEWMA(nodes[i].Name, score, ewmaNow)
+	}
+
 	// us-pool membership policy: K-gated when PoolSizing.TActive>0; legacy
 	// "every qualified candidate in pool" otherwise.
 	//
@@ -596,23 +613,65 @@ func (s *Scorer) score(ctx context.Context) {
 				st.health = nodes[i]
 			}
 		} else {
-			// K-gated mode. Rank qualified by compositeScore (lower=better).
+			// K-gated mode. Two-window EWMA decisions:
+			//   - Sort qualified by LONG EWMA (24h half-life) → drives the
+			//     promote ranking. Conservative: a recently-recovered node
+			//     stays out until the long window forgets the bad period.
+			//   - Trial filter: nodes with <24h history can't be promoted
+			//     unless they're already in pool (don't rotate them out
+			//     solely because they're new).
+			//   - Quarantine filter: nodes recently rolled-back stay out.
+			//   - Absolute swap threshold: promoting a non-pool candidate
+			//     over a current member requires the candidate's long
+			//     EWMA to be better by >= cfg.SwapThresholdScore. Anti-flap.
+			//
+			// Short-window EWMA drives the eviction-acceleration path
+			// (handled via the existing strikes counter — short EWMA
+			// crossing the absolute degraded threshold marks the node
+			// for strikes++ even when current-round score looks fine).
 			sort.SliceStable(qualifiedNodes, func(i, j int) bool {
-				return compositeScore(*qualifiedNodes[i]) < compositeScore(*qualifiedNodes[j])
+				return s.nodeLongEWMA(qualifiedNodes[i].Name) < s.nodeLongEWMA(qualifiedNodes[j].Name)
 			})
-			// Build preferredSet from top-K, skipping nodes currently in
-			// rollback quarantine. Quarantine is set when the operator
-			// rolled back a previous swap that re-added these nodes; until
-			// it expires, K-gating must not "helpfully" re-add them on the
-			// next scoring round (defeating the rollback). Walk top-of-list
-			// in score order and accept until we have kTarget.
 			now := time.Now()
 			preferredSet := make(map[string]bool, kTarget)
 			for i := 0; i < len(qualifiedNodes) && len(preferredSet) < kTarget; i++ {
-				if s.inQuarantine(qualifiedNodes[i].Name, now) {
+				name := qualifiedNodes[i].Name
+				if s.inQuarantine(name, now) {
 					continue
 				}
-				preferredSet[qualifiedNodes[i].Name] = true
+				// Trial nodes (no 24h history) can't be promoted from
+				// outside the pool — they need to prove stability first.
+				// Already-in-pool trial nodes stay (rotating them out for
+				// being new defeats the bootstrap path).
+				if s.inTrial(name, now) && !s.poolSet[name] {
+					continue
+				}
+				preferredSet[name] = true
+			}
+
+			// Absolute swap threshold: even when a non-pool candidate is
+			// in top-K by EWMA, we only promote if its long EWMA is
+			// SIGNIFICANTLY better than the worst current pool member's
+			// long EWMA. Default 0 = no extra gate (behave like before).
+			// Operator tunes via cfg.SwapThresholdScore.
+			swapThreshold := s.cfg.SwapThresholdScore
+			if swapThreshold > 0 {
+				worstInPoolEWMA := -math.Inf(1)
+				for tag := range s.poolSet {
+					if e := s.nodeLongEWMA(tag); e > worstInPoolEWMA {
+						worstInPoolEWMA = e
+					}
+				}
+				// Walk preferredSet, drop any "wants-in but not currently-in"
+				// member whose EWMA isn't worstInPool - threshold or better.
+				for name := range preferredSet {
+					if s.poolSet[name] {
+						continue // existing member, untouched by threshold
+					}
+					if s.nodeLongEWMA(name)+swapThreshold > worstInPoolEWMA {
+						delete(preferredSet, name)
+					}
+				}
 			}
 
 			// First-round bootstrap: pool is empty (or hasn't been K-gated
