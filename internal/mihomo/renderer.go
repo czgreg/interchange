@@ -61,6 +61,13 @@ type Renderer struct {
 	// set of node tags (used by nodescorer during hot-reload). nil = use all
 	// NodePattern-matched nodes (normal rendering path).
 	qualifiedOverride []string
+	// routingMembers, when non-nil, limits the per-terminal HRW assignment
+	// pool to this subset of qualifiedOverride. Decouples "what mihomo
+	// probes" (qualifiedOverride — full us-pool, so probe history keeps
+	// flowing for ranking) from "what carries production traffic" (this
+	// field — top-K best). nil = per-terminal slices use the full us-pool
+	// (legacy / Plan A behavior).
+	routingMembers []string
 	// pools are the named select/load-balance groups rendered alongside
 	// us-pool (e.g. openai-pool). Their rule_sets route to them instead of
 	// the default `out` selector.
@@ -152,12 +159,18 @@ func (r *Renderer) RenderWithQualifiedNodes(outbounds []subscribe.Outbound, qual
 }
 
 // RenderWithPools is the nodescorer hot-reload entry that also assigns
-// named-pool memberships. usPool is the qualified us-pool set; poolMembers
-// maps each named pool → its member tags (us-pool ∩ passing that pool's
-// probes). A pool absent from poolMembers falls back to the full us-pool.
-func (r *Renderer) RenderWithPools(outbounds []subscribe.Outbound, usPool []string, poolMembers map[string][]string) ([]byte, error) {
+// named-pool memberships. usPool is the full us-pool member set (probed
+// by mihomo's url-test for ranking); routingMembers ⊆ usPool is the
+// subset that actually carries traffic via per-terminal HRW (top-K). When
+// routingMembers is nil/empty the per-terminal slicing falls back to
+// usPool (legacy behavior — every member of us-pool is also a routing
+// target). poolMembers maps each named pool → its members (us-pool ∩
+// passing the pool's probes); a pool absent from poolMembers falls back
+// to the full us-pool.
+func (r *Renderer) RenderWithPools(outbounds []subscribe.Outbound, usPool, routingMembers []string, poolMembers map[string][]string) ([]byte, error) {
 	clone := *r
 	clone.qualifiedOverride = usPool
+	clone.routingMembers = routingMembers
 	clone.poolMembers = poolMembers
 	return clone.Write(outbounds)
 }

@@ -29,10 +29,17 @@ import (
 // to no per-terminal slicing (operator should narrow client_subnet).
 const maxPerTerminalHosts = 1024
 
-// perTerminalSlices returns the `perterm` sub-rule body using the full
-// us-pool qualified set (for generic whitelist traffic).
+// perTerminalSlices returns the `perterm` sub-rule body using the routing
+// member set: when r.routingMembers is set (K-gating active) only those
+// nodes carry production traffic; otherwise falls back to the full us-pool
+// member set (legacy / no K-gating). The fallback target ("us-pool") in
+// the MATCH rule keeps routing functional for sources outside the
+// enumerated client_subnet.
 func (r *Renderer) perTerminalSlices(outbounds []subscribe.Outbound) []string {
-	members := r.usPoolMembers(outbounds)
+	members := r.routingMembers
+	if len(members) == 0 {
+		members = r.usPoolMembers(outbounds)
+	}
 	if len(members) == 0 {
 		return nil
 	}
@@ -41,14 +48,19 @@ func (r *Renderer) perTerminalSlices(outbounds []subscribe.Outbound) []string {
 
 // perTerminalSlicesForPool returns the `perterm-<poolName>` sub-rule body
 // using only the pool-specific qualified members (those that passed the
-// pool's site probes). Falls back to full us-pool members when the pool
-// has no members yet (first render before probe loop completes).
+// pool's site probes). Falls back to the routing set (top-K us-pool when
+// K-gating is on) when the pool has no members yet.
 func (r *Renderer) perTerminalSlicesForPool(poolName string, outbounds []subscribe.Outbound) []string {
 	members, ok := r.poolMembers[poolName]
 	if !ok || len(members) == 0 {
-		// No probe results yet; fall back to full us-pool so routing is
-		// functional until the probe loop runs. Logged so operators notice.
-		members = r.usPoolMembers(outbounds)
+		// No probe results yet: fall back through routingMembers
+		// (top-K when K-gating active) → us-pool members. Routing set
+		// preferred so cold-start named-pool traffic still respects the
+		// K-gate, not just NodePattern.
+		members = r.routingMembers
+		if len(members) == 0 {
+			members = r.usPoolMembers(outbounds)
+		}
 	}
 	if len(members) == 0 {
 		return nil

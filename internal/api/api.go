@@ -157,6 +157,10 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		resp["pool_qualified"] = snap.Qualified
 		resp["pool_total"] = snap.Total
 		resp["pool_last_update"] = snap.LastPoolUpdate
+		// K-gating diagnostics. KTarget=0 means K-gating disabled (legacy
+		// "every qualified candidate in pool" mode); the block is still
+		// surfaced so operators can confirm config wiring.
+		resp["pool_sizing"] = snap.PoolSizing
 	}
 	// Static capacity ceiling from the last offline stress test (see
 	// scripts/stress.sh + cfg.capacity). Only surfaced when configured —

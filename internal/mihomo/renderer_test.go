@@ -560,7 +560,7 @@ func TestRenderer_PoolMembersOverride(t *testing.T) {
 
 	// Pick a real tag from sampleOutbounds.
 	members := map[string][]string{"openai-pool": {"ash/🇺🇸US-IEPL-01"}}
-	body, err := r.RenderWithPools(sampleOutbounds(), nil, members)
+	body, err := r.RenderWithPools(sampleOutbounds(), nil, nil, members)
 	if err != nil {
 		t.Fatalf("RenderWithPools: %v", err)
 	}

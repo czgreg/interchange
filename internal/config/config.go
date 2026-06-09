@@ -383,6 +383,52 @@ type NodeQualifyConfig struct {
 	// probe runs from each candidate node periodically; results land in
 	// NodeHealth.Probes and gate membership in named Pools.
 	Probes []ProbeConfig `yaml:"probes"`
+
+	// PoolSizing controls dynamic K (us-pool target size). When TActive=0
+	// (default) the legacy "every qualified candidate is in pool" behavior
+	// is preserved. When TActive>0 the scorer ranks qualified candidates
+	// by composite score and gates the pool to top-K, sized from the
+	// formula:
+	//
+	//   K = clamp(
+	//     ⌈T_active × surge / cap_per_node⌉,
+	//     K_min(T_active),
+	//     min(K_max, |Tier1|),
+	//   )
+	//   where K_min(T) = max(2, ⌈T / (cap × 1.5)⌉ + 1)  // failure resilience
+	//
+	// Hysteresis (EvictStrikes / ReadmitStrikes) governs membership moves;
+	// HotReloadMinInterval throttles reload frequency. The result: a small
+	// stable set of best-quality egresses for a given terminal load,
+	// preserving per-terminal HRW identity (perterminal.go).
+	PoolSizing PoolSizingConfig `yaml:"pool_sizing"`
+}
+
+// PoolSizingConfig controls dynamic K computation. See NodeQualifyConfig.PoolSizing.
+type PoolSizingConfig struct {
+	// TActive is the operator-supplied 7-day distinct active terminal
+	// count. 0 disables K-gating entirely (legacy: every qualified
+	// candidate enters us-pool). Set this from FeiLian's accounting / DHCP
+	// data; recompute weekly, ignore daily fluctuations.
+	TActive int `yaml:"t_active"`
+	// CapPerNode is the per-egress sustained terminal capacity. Operator-
+	// tuned per subscription tier; default 10 (conservative — fishcloud
+	// direct, ash IEPL etc. typically tolerate ~10-15 concurrent terminals
+	// before P95 climbs). Should be re-validated by stress.sh per node tier.
+	CapPerNode int `yaml:"cap_per_node"`
+	// Surge is the peak/avg ratio. Default 1.5 (evening peak ~1.5× the
+	// daytime mean). Drives the K_demand calculation.
+	Surge float64 `yaml:"surge"`
+	// KMin is the absolute floor on K (independent of T). Default 2 — even
+	// for tiny terminal counts, we want some redundancy so a single node
+	// failure doesn't strand all flows.
+	KMin int `yaml:"k_min"`
+	// KMax is the detection-surface ceiling on K. Default 12 — empirically
+	// CF/OpenAI cluster ≤ 12 stable IPs as "small enterprise NAT" (legitimate
+	// identity); ≥ 20 trends toward "VPN infrastructure". Stable rotation
+	// matters more than absolute count, but a low ceiling further reduces
+	// the surface for IP cataloging.
+	KMax int `yaml:"k_max"`
 }
 
 // ProbeConfig is one site-specific reachability check. Probes are NOT
@@ -594,6 +640,7 @@ func (c *NodeQualifyConfig) applyDefaults() {
 	if c.HotReloadMinInterval == 0 {
 		c.HotReloadMinInterval = 90 * time.Second
 	}
+	c.PoolSizing.applyDefaults()
 	for i := range c.Probes {
 		if c.Probes[i].Interval == 0 {
 			c.Probes[i].Interval = 5 * time.Minute
@@ -604,5 +651,22 @@ func (c *NodeQualifyConfig) applyDefaults() {
 		if c.Probes[i].Check.MaxStatus == 0 {
 			c.Probes[i].Check.MaxStatus = 399
 		}
+	}
+}
+
+// applyDefaults fills PoolSizingConfig defaults. TActive=0 keeps the legacy
+// "every qualified candidate in pool" behavior — opt-in by setting TActive>0.
+func (p *PoolSizingConfig) applyDefaults() {
+	if p.CapPerNode == 0 {
+		p.CapPerNode = 10
+	}
+	if p.Surge == 0 {
+		p.Surge = 1.5
+	}
+	if p.KMin == 0 {
+		p.KMin = 2
+	}
+	if p.KMax == 0 {
+		p.KMax = 12
 	}
 }
