@@ -116,19 +116,25 @@ func (n *Notifier) SetLarkSecret(secret string) {
 	}
 }
 
-// Configure replaces the Lark webhook URL + secret atomically. Pass empty
-// strings to disable the channel without disabling notifications globally
-// (the Notifier still writes to the local JSONL log). Returns the
-// post-configuration status for caller convenience.
+// Configure replaces the Lark webhook URL + secret atomically. Setting a
+// non-empty URL also implicitly enables the notifier (calling this
+// endpoint is itself the operator opt-in signal — they wouldn't be
+// configuring a webhook if they didn't want notifications). Empty URL
+// disables the Lark channel but leaves the local JSONL log enabled.
+// Returns the post-configuration status.
 func (n *Notifier) Configure(webhookURL, secret string, signatureRequired bool) Status {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	n.cfg.Lark.WebhookURL = webhookURL
 	n.cfg.Lark.SignatureRequired = signatureRequired
 	n.secret = secret
-	if n.cfg.Enabled && webhookURL != "" {
+	if webhookURL != "" {
+		// Configuring a webhook = explicit operator opt-in.
+		n.cfg.Enabled = true
 		n.lark = newLarkClient(n.cfg.Lark, secret, n.cfg.RetryAttempts)
 	} else {
+		// Empty URL = remove the Lark channel. Don't toggle global
+		// Enabled — operator might still want local-log-only mode.
 		n.lark = nil
 	}
 	return n.statusLocked()
