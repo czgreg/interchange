@@ -1,16 +1,22 @@
-// perterminal.go — "one terminal, one egress" slice generation.
+// perterminal.go — "one terminal, one egress, with automatic failover".
 //
-// When load_balance.per_terminal is on, each client terminal's whitelisted
-// traffic must exit through a single, stable node so a logical session
-// (e.g. ChatGPT spread across chatgpt.com / chat.openai.com / ws.chatgpt.com)
-// presents ONE egress IP and doesn't trip OpenAI/Cloudflare anomaly checks.
+// Each terminal IP gets a dedicated `fallback` proxy-group named "fb-<ip>"
+// containing two members in HRW order: [primary, secondary]. SRC-IP-CIDR
+// rules in the perterm sub-rule route the terminal to its fb-<ip> group.
+// mihomo's fallback type tries members in order and uses the first one
+// whose alive bit is true — so when primary dies, traffic auto-routes to
+// secondary within mihomo's url-test interval, no leap-gateway intervention.
 //
-// We render the node.client_subnet into per-/32 SRC-IP-CIDR rules under the
-// `perterm` sub-rule, each pinned to a us-pool member chosen by rendezvous
-// (highest-random-weight) hashing. HRW means a node leaving the qualified
-// set only reshuffles the terminals that were on THAT node — every other
-// terminal keeps its egress. The list ends with MATCH,us-pool so any source
-// outside the subnet (or if enumeration is skipped) still works.
+// Why not bare-node SRC-IP-CIDR (the previous design): SRC-IP-CIDR is a
+// hard route — when its target proxy is alive=false, mihomo just fails
+// the connection (no fallback). Per-terminal fallback groups give us
+// mihomo's native alive-bit failover while preserving the per-terminal
+// stable identity (same fb-<ip> group → same primary by default; only
+// when primary is down does the egress IP change).
+//
+// HRW (rendezvous hashing) properties carry over: when the routing pool
+// gains/loses a member, only the terminals whose top-2 changed get
+// reassigned — most terminals keep their (primary, secondary) pair stable.
 
 package mihomo
 
@@ -19,29 +25,38 @@ import (
 	"fmt"
 	"hash/fnv"
 	"net"
+	"sort"
 
 	"github.com/leap-gateway/leap-gateway/internal/subscribe"
 )
 
-// maxPerTerminalHosts caps host enumeration so a misconfigured huge subnet
-// (e.g. /16 = 65k rules) can't blow up the config. /24 = 254 is the normal
-// FeiLian client-pool size; anything bigger than this many hosts falls back
-// to no per-terminal slicing (operator should narrow client_subnet).
-const maxPerTerminalHosts = 1024
+const (
+	// maxPerTerminalHosts caps host enumeration so a misconfigured huge
+	// subnet (e.g. /16 = 65k rules) can't blow up the config. /24 = 254 is
+	// the normal FeiLian client-pool size; anything bigger than this many
+	// hosts falls back to no per-terminal slicing.
+	maxPerTerminalHosts = 1024
 
-// perTerminalSlices returns the `perterm` sub-rule body using the routing
-// member set: when r.routingMembers is set (K-gating active) only those
-// nodes carry production traffic; otherwise falls back to the full us-pool
-// member set (legacy / no K-gating). The fallback target ("us-pool") in
-// the MATCH rule keeps routing functional for sources outside the
-// enumerated client_subnet.
+	// perTerminalFallbackDepth is the number of HRW-ordered members
+	// included in each fb-<ip> fallback group. 2 = [primary, secondary]
+	// is the minimum useful redundancy; larger values trade per-flap
+	// rotation count for breadth (more candidates means more potential
+	// IP changes during a multi-node failure).
+	perTerminalFallbackDepth = 2
+
+	// perTerminalGroupPrefix is the proxy-group naming convention. Operators
+	// + the /api/pool/terminal endpoint rely on this prefix to enumerate
+	// + look up terminal-specific groups.
+	perTerminalGroupPrefix = "fb-"
+)
+
+// perTerminalSlices returns the `perterm` sub-rule body. Every host in the
+// client subnet maps to its dedicated fb-<ip> fallback group, and the
+// MATCH fallback at the end catches sources outside the subnet.
 //
-// We intersect the routing set with present outbound tags before emitting:
-// during --validate the outbounds list is empty (RenderOnly(nil)), and
-// during normal operation a stale routing list may reference nodes that
-// were dropped from a subscription. Either way mihomo refuses configs
-// that route to nonexistent proxy names — silent fallback to the present
-// us-pool intersection avoids a hard fail.
+// Returns nil when there are no candidate routing members (validate path
+// with empty outbounds, or unconfigured perTerminal); the caller then
+// falls back to a single us-pool MATCH rule.
 func (r *Renderer) perTerminalSlices(outbounds []subscribe.Outbound) []string {
 	members := r.intersectWithPresent(r.routingMembers, outbounds)
 	if len(members) == 0 {
@@ -50,7 +65,80 @@ func (r *Renderer) perTerminalSlices(outbounds []subscribe.Outbound) []string {
 	if len(members) == 0 {
 		return nil
 	}
-	return buildSliceRules(r.node.ClientSubnet, members, usPool)
+	hosts := enumerateHosts(r.node.ClientSubnet, maxPerTerminalHosts)
+	if len(hosts) == 0 {
+		return nil
+	}
+	rules := make([]string, 0, len(hosts)+1)
+	for _, ip := range hosts {
+		rules = append(rules, fmt.Sprintf("SRC-IP-CIDR,%s/32,%s%s", ip, perTerminalGroupPrefix, ip))
+	}
+	rules = append(rules, "MATCH,"+usPool)
+	return rules
+}
+
+// perTerminalFallbackGroups returns the fallback proxy-group definitions
+// for every host in the client subnet. Each group has [primary, secondary]
+// (HRW top-2) drawn from the routing-member pool. Returns nil when the
+// pool is empty or the subnet can't be enumerated.
+//
+// The probe URL + interval mirror url_test config so all groups share
+// the same liveness signal. lazy=true means the group only probes when
+// it has active flows — keeps probe traffic proportional to actual
+// terminal activity rather than the static subnet size.
+func (r *Renderer) perTerminalFallbackGroups(outbounds []subscribe.Outbound, probeURL string, intervalSec int) []map[string]any {
+	members := r.intersectWithPresent(r.routingMembers, outbounds)
+	if len(members) == 0 {
+		members = r.usPoolMembers(outbounds)
+	}
+	if len(members) < 2 {
+		// Need at least 2 members to form a useful fallback chain.
+		// With <2, fallback adds no value vs. the single-target rule.
+		return nil
+	}
+	hosts := enumerateHosts(r.node.ClientSubnet, maxPerTerminalHosts)
+	if len(hosts) == 0 {
+		return nil
+	}
+	out := make([]map[string]any, 0, len(hosts))
+	for _, ip := range hosts {
+		ranked := hrwTopN(ip, members, perTerminalFallbackDepth)
+		out = append(out, map[string]any{
+			"name":     perTerminalGroupPrefix + ip,
+			"type":     "fallback",
+			"proxies":  ranked,
+			"url":      probeURL,
+			"interval": intervalSec,
+			"lazy":     true,
+		})
+	}
+	return out
+}
+
+// AssignmentForIP returns the HRW-ordered routing members for one
+// terminal IP. Returns ([primary, secondary, ...], true) when the IP is
+// inside the configured client_subnet AND the routing pool is non-empty,
+// or (nil, false) when not applicable.
+//
+// Used by the /api/pool/terminal endpoint to surface "which node carries
+// this terminal's traffic" without requiring the caller to re-implement
+// HRW or read mihomo's runtime state.
+func (r *Renderer) AssignmentForIP(ip string, outbounds []subscribe.Outbound) ([]string, bool) {
+	members := r.intersectWithPresent(r.routingMembers, outbounds)
+	if len(members) == 0 {
+		members = r.usPoolMembers(outbounds)
+	}
+	if len(members) == 0 {
+		return nil, false
+	}
+	if !ipInSubnet(ip, r.node.ClientSubnet) {
+		return nil, false
+	}
+	depth := perTerminalFallbackDepth
+	if depth > len(members) {
+		depth = len(members)
+	}
+	return hrwTopN(ip, members, depth), true
 }
 
 // intersectWithPresent filters wanted by membership in outbounds' tag set.
@@ -75,50 +163,8 @@ func (r *Renderer) intersectWithPresent(wanted []string, outbounds []subscribe.O
 	return out
 }
 
-// perTerminalSlicesForPool returns the `perterm-<poolName>` sub-rule body
-// using only the pool-specific qualified members (those that passed the
-// pool's site probes). Falls back to the routing set (top-K us-pool when
-// K-gating is on) when the pool has no members yet.
-func (r *Renderer) perTerminalSlicesForPool(poolName string, outbounds []subscribe.Outbound) []string {
-	members, ok := r.poolMembers[poolName]
-	if !ok || len(members) == 0 {
-		// No probe results yet: fall back through routingMembers
-		// (top-K when K-gating active) → us-pool members. Routing set
-		// preferred so cold-start named-pool traffic still respects the
-		// K-gate, not just NodePattern. Intersect with present outbounds
-		// so --validate (RenderOnly with nil outbounds) doesn't reference
-		// proxies that aren't emitted.
-		members = r.intersectWithPresent(r.routingMembers, outbounds)
-		if len(members) == 0 {
-			members = r.usPoolMembers(outbounds)
-		}
-	}
-	if len(members) == 0 {
-		return nil
-	}
-	// Fallback target is the pool name (not us-pool) so unmatched sources
-	// still route through the pool's group rather than the default pool.
-	return buildSliceRules(r.node.ClientSubnet, members, poolName)
-}
-
-// buildSliceRules generates the per-/32 SRC-IP-CIDR rules and a MATCH
-// fallback for one perterm sub-rule.
-func buildSliceRules(subnet string, members []string, fallbackProxy string) []string {
-	hosts := enumerateHosts(subnet, maxPerTerminalHosts)
-	if len(hosts) == 0 {
-		return nil
-	}
-	rules := make([]string, 0, len(hosts)+1)
-	for _, ip := range hosts {
-		node := hrwPick(ip, members)
-		rules = append(rules, fmt.Sprintf("SRC-IP-CIDR,%s/32,%s", ip, node))
-	}
-	rules = append(rules, "MATCH,"+fallbackProxy)
-	return rules
-}
-
 // enumerateHosts returns the usable host IPs of a CIDR (excludes network +
-// broadcast for IPv4 prefixes shorter than /31). Returns nil for a non-CIDR
+// broadcast for IPv4 prefixes shorter than /31). Returns nil for non-CIDR
 // or when the host count exceeds limit.
 func enumerateHosts(cidr string, limit int) []string {
 	_, ipnet, err := net.ParseCIDR(cidr)
@@ -138,12 +184,11 @@ func enumerateHosts(cidr string, limit int) []string {
 	base := binary.BigEndian.Uint32(ip4)
 	var out []string
 	for i := 0; i < count; i++ {
-		// Skip network (.0) and broadcast (last) for /30 and shorter.
 		if hostBits >= 2 && (i == 0 || i == count-1) {
 			continue
 		}
 		if len(out) >= limit {
-			return nil // too many hosts — caller falls back to no slicing
+			return nil
 		}
 		var b [4]byte
 		binary.BigEndian.PutUint32(b[:], base+uint32(i))
@@ -152,21 +197,58 @@ func enumerateHosts(cidr string, limit int) []string {
 	return out
 }
 
-// hrwPick returns the member with the highest rendezvous hash for ip.
-// Deterministic; removing a member only moves the IPs that hashed highest
-// to it, leaving every other IP's assignment unchanged.
-func hrwPick(ip string, members []string) string {
-	var best string
-	var bestScore uint64
-	for _, m := range members {
+// ipInSubnet returns true when ip is inside cidr.
+func ipInSubnet(ip, cidr string) bool {
+	parsed := net.ParseIP(ip)
+	if parsed == nil {
+		return false
+	}
+	_, ipnet, err := net.ParseCIDR(cidr)
+	if err != nil {
+		return false
+	}
+	return ipnet.Contains(parsed)
+}
+
+// hrwTopN returns the top-N members for an IP in HRW score order
+// (highest score first = primary). Deterministic; the same (ip, members)
+// always produces the same ordering. Adding/removing one member only
+// reshuffles entries containing that member; others stay stable.
+func hrwTopN(ip string, members []string, n int) []string {
+	if n <= 0 || len(members) == 0 {
+		return nil
+	}
+	type scored struct {
+		name  string
+		score uint64
+	}
+	scoredMembers := make([]scored, len(members))
+	for i, m := range members {
 		h := fnv.New64a()
 		_, _ = h.Write([]byte(ip))
 		_, _ = h.Write([]byte{0})
 		_, _ = h.Write([]byte(m))
-		s := h.Sum64()
-		if best == "" || s > bestScore {
-			best, bestScore = m, s
-		}
+		scoredMembers[i] = scored{m, h.Sum64()}
 	}
-	return best
+	sort.Slice(scoredMembers, func(i, j int) bool {
+		return scoredMembers[i].score > scoredMembers[j].score
+	})
+	if n > len(scoredMembers) {
+		n = len(scoredMembers)
+	}
+	out := make([]string, n)
+	for i := 0; i < n; i++ {
+		out[i] = scoredMembers[i].name
+	}
+	return out
+}
+
+// hrwPick is preserved as a thin wrapper over hrwTopN(..., 1) for any
+// existing call site (e.g. tests). Same behavior as before — first HRW.
+func hrwPick(ip string, members []string) string {
+	r := hrwTopN(ip, members, 1)
+	if len(r) == 0 {
+		return ""
+	}
+	return r[0]
 }

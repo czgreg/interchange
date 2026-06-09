@@ -38,6 +38,9 @@ token 为空时不鉴权。
 | GET | `/api/whitelist/resolved` | 展开为域名 + CIDR 列表 | ✓ |
 | GET | `/api/rule-sets` | 可用 geosite/geoip catalog | ✓ |
 | GET | `/api/geosites` | 同 /api/rule-sets（兼容别名） | ✓ |
+| GET | `/api/pool/state` | 手动池 yaml baseline + 当前 effective + emergency 事件 | ✓ |
+| POST | `/api/pool/clear-emergency` | 还原 effective 池到 yaml baseline | ✓ |
+| GET | `/api/pool/terminal?ip=X` | 查询某 terminal IP 的出口节点 + 健康 | ✓ |
 
 ---
 
@@ -334,6 +337,147 @@ curl -s http://127.0.0.1:18080/api/whitelist \
 
 ---
 
+## GET /api/pool/state
+
+返回手动池（`pool_mode: manual`）的当前状态：yaml 中声明的 baseline、运行时实际生效的 effective、二者是否分离（emergency 事件导致漂移），以及 emergency 历史事件日志。
+
+```json
+{
+  "mode": "manual",
+  "yaml_baseline": [
+    "ash/🇺🇸US-IEPL-01",
+    "fishcloud/🇺🇸 美国01"
+  ],
+  "effective_pool": [
+    "ash/🇺🇸US-IEPL-01",
+    "fishcloud/🇺🇸 美国02"
+  ],
+  "diverged": true,
+  "promote_chain": [
+    "fishcloud/🇺🇸 美国02",
+    "ctc-02/US-C30-02-BWH"
+  ],
+  "emergency_events": [
+    {
+      "at": "2026-06-09T08:30:12Z",
+      "type": "evict",
+      "node": "fishcloud/🇺🇸 美国01",
+      "reason": "fail_rate >= 0.90 sustained 30m0s"
+    },
+    {
+      "at": "2026-06-09T08:30:12Z",
+      "type": "promote",
+      "node": "fishcloud/🇺🇸 美国02",
+      "reason": "auto-promote from emergency_promote_chain (replacing fishcloud/🇺🇸 美国01)"
+    }
+  ]
+}
+```
+
+字段：
+- `mode` — `manual` / `auto` / `""`（未配置）。后续端点的语义只在 `manual` 下完全适用。
+- `yaml_baseline` — `gateway.yaml` 中 `node_qualify.pool_members` 的副本，按字典序。
+- `effective_pool` — 当前真正给 perterm 用的池成员列表，按字典序。
+- `diverged` — `effective_pool != yaml_baseline` 时为 true，表示 emergency 事件已经改变池组成，等 ops 介入。
+- `promote_chain` — `node_qualify.emergency_promote_chain`，emergency 顶替时按顺序选下一个不在池里的候选。
+- `emergency_events` — 最近 50 条事件。`type` 取值 `evict` / `promote` / `exhausted` / `clear`。
+
+503：scorer 未启用。
+
+---
+
+## POST /api/pool/clear-emergency
+
+将 `effective_pool` 还原到 `yaml_baseline`，清空 emergency 事件历史，重置每个节点的 hard-fail 计时器。等价于"运维已经处理完故障，让系统回到 yaml 声明的状态"的显式信号。
+
+```bash
+curl -X POST -H "Authorization: Bearer ..." \
+  http://leap-89:18080/api/pool/clear-emergency
+```
+
+返回新的 `/api/pool/state` body 供确认。下一个 scoring round 检测到 effective 变化会触发一次 mihomo hot-reload。
+
+要点：
+- 这个端点**不会**修改 yaml 文件。yaml 是 ground truth，只有 ops 改 yaml + redeploy 才能修改 baseline。
+- 如果故障节点仍在 hard-fail（fail_rate ≥ 0.9），重置后 30 分钟内仍会再次触发 emergency，**会绕回相同的 effective 状态**。先修复或换池成员再 clear。
+
+---
+
+## GET /api/pool/terminal
+
+按 terminal IP 查询当前出口节点分配 + 各节点的健康数据。第三方对接、用户故障排查的主要入口。
+
+```bash
+curl -H "Authorization: Bearer ..." \
+  "http://leap-89:18080/api/pool/terminal?ip=10.8.13.42"
+```
+
+```json
+{
+  "ip": "10.8.13.42",
+  "subnet": "10.8.13.0/24",
+  "in_subnet": true,
+  "group_name": "fb-10.8.13.42",
+  "pool_mode": "manual",
+  "active_node": "primary",
+  "primary": {
+    "name": "fishcloud/🇺🇸 美国01",
+    "alive": true,
+    "health": {
+      "name": "fishcloud/🇺🇸 美国01",
+      "rtt_p50_ms": 246,
+      "rtt_p95_ms": 252,
+      "jitter_ms": 6,
+      "fail_rate": 0.0,
+      "probe_count": 10,
+      "qualified": true,
+      "in_pool": true,
+      "probes": {
+        "openai-api":     {"ok": true,  "status_code": 401, "latency_ms": 224},
+        "anthropic-api":  {"ok": true,  "status_code": 401, "latency_ms": 292},
+        "api.github.com": {"ok": false, "status_code": 403, "last_error": "status Forbidden"}
+      },
+      "passive": {
+        "active_conns": 3,
+        "closed_window": 24,
+        "failed_window": 1,
+        "fail_rate": 0.04,
+        "sample_window_sec": 600
+      }
+    }
+  },
+  "secondary": {
+    "name": "ash/🇺🇸US-IEPL-02",
+    "alive": true,
+    "health": { "...": "..." }
+  }
+}
+```
+
+字段：
+- `ip` — 入参 IP。回显方便日志。
+- `subnet` — 节点配置的 `client_subnet`（如 `10.8.13.0/24`）。
+- `in_subnet` — `false` 表示该 IP 不在 client_subnet，会走 `MATCH,us-pool` 兜底，**没有**专属的 fb-<ip> 组。下面的 primary/secondary 字段缺省。
+- `group_name` — mihomo 中对应的 fallback 组名（`fb-<ip>` 形式）。可以直接用于 mihomo clash-api 调试。
+- `pool_mode` — 当前 `node_qualify.pool_mode`。
+- `active_node` — `primary` / `secondary` / `""`（都不可用）。系统按 mihomo fallback 语义判断：primary alive=true 时返回 primary，否则 secondary 替补。
+- `primary.name` — HRW top-1 节点名。
+- `primary.alive` — mihomo url-test 的最新探针结果。
+- `primary.health` — 完整 NodeHealth 嵌入：rtt_p50/p95、jitter、fail_rate、probe_count、命名探针每个目标的最近一次状态、被动连接生命周期统计（`passive`）。
+- `secondary.*` — 同 primary，HRW top-2。当前实现固定每个 fb 组 2 个成员。
+
+错误：
+- 400：`?ip=` 缺失。
+- 503：scorer 未启用。
+- 200 + `in_subnet: false`：传入了 client_subnet 之外的 IP，正常返回但没有 per-terminal 分配信息。
+
+第三方对接建议：
+- 用户报告"访问慢"时，先调一次此端点，立刻拿到 (primary, secondary) + 它们的 probe / passive 数据，足够判定问题来自机场端还是终端端。
+- `active_node == ""` 表示这个 terminal 当前两个备份都不可用。配合 `/api/pool/state` 看 emergency 事件，决定是 hot-reload 还是手动改 yaml。
+- HRW 是确定性的——同一 IP + 同一池成员永远同一答案。换池成员后，只有原本被分到被换节点的 terminal 会有新分配。
+
+---
+
 ## 错误码
 
 | 状态 | 含义 |
@@ -394,7 +538,23 @@ curl -s $BASE/api/whitelist/resolved | jq -r '.domains[]' | head -20
 
 ## 接入变更日志（前端 / 控制平台）
 
-### 2026-06-06（commit `21a88d5`）— 当前版本
+### 2026-06-09（commit `49ece0e`+）— 当前版本
+
+**新增端点**（手动池管理 + 终端查询）：
+
+| 端点 | 用途 |
+|---|---|
+| `GET /api/pool/state` | 手动池 yaml baseline / effective / emergency 事件日志 |
+| `POST /api/pool/clear-emergency` | 还原 effective 池到 yaml baseline |
+| `GET /api/pool/terminal?ip=X` | 按 terminal IP 查出口节点 + 各节点健康 |
+
+**架构变化**（影响 mihomo 配置形态，REST 表面不变以下端点）：
+
+- 默认池模式从"K-gating auto"切到"manual"——`pool_mode: manual` + 操作员维护 `pool_members:` 列表。详见 `node_qualify.pool_mode` 配置。
+- `mihomo` 的 perterm sub-rule 现在指向 `fb-<ip>` fallback group，每组含 HRW 选出的 [primary, secondary]。节点死了 mihomo 自动切到 secondary（30s 内），不再依赖 leap-gateway 30min 等待。
+- 已删除 `perterm-<poolname>` 子规则——同一 terminal 的所有目的地走同一 egress（CF 反检测要求）。pool_members 选节点时需自行确认 OpenAI 兼容性。
+
+### 2026-06-06（commit `21a88d5`）
 
 **Breaking**：
 

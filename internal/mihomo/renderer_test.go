@@ -672,7 +672,7 @@ func TestRenderer_WithRoutingMembers(t *testing.T) {
 	r = r.WithLoadBalance(true)
 	r.node.ClientSubnet = "10.8.13.0/29" // 6 usable hosts
 
-	manualPool := []string{"ash/🇺🇸US-IEPL-01", "ash/🇺🇸US-IEPL-02"}
+	manualPool := []string{"ash/🇺🇸US-IEPL-01", "cyberguard/🇺🇸 US-01"}
 	r = r.WithRoutingMembers(manualPool)
 
 	body, err := r.Write(sampleOutbounds())
@@ -689,21 +689,48 @@ func TestRenderer_WithRoutingMembers(t *testing.T) {
 	if len(pt) < 2 {
 		t.Fatalf("perterm sub-rule too short: %v", pt)
 	}
-	// Every SRC-IP-CIDR target must be one of the manual pool members.
-	manualSet := map[string]bool{manualPool[0]: true, manualPool[1]: true}
+	// Every SRC-IP-CIDR target must be a fb-<ip> fallback group.
 	for _, e := range pt {
 		s, _ := e.(string)
 		if !strings.HasPrefix(s, "SRC-IP-CIDR,") {
 			continue
 		}
-		// SRC-IP-CIDR,<ip>/32,<member>
+		// SRC-IP-CIDR,<ip>/32,fb-<ip>
 		parts := strings.Split(s, ",")
 		if len(parts) != 3 {
 			t.Fatalf("malformed perterm rule: %q", s)
 		}
-		if !manualSet[parts[2]] {
-			t.Errorf("perterm rule routes to %q, not in manual pool %v", parts[2], manualPool)
+		if !strings.HasPrefix(parts[2], "fb-") {
+			t.Errorf("perterm rule target %q should be a fb-<ip> group", parts[2])
 		}
+	}
+
+	// Verify the fb-<ip> proxy-groups exist and only contain manual-pool
+	// members (HRW-ordered). With 2 manual members + fallback depth 2,
+	// every fb group should have exactly 2 members from manualPool.
+	groups, _ := doc["proxy-groups"].([]any)
+	manualSet := map[string]bool{manualPool[0]: true, manualPool[1]: true}
+	fbGroupsFound := 0
+	for _, g := range groups {
+		m, _ := g.(map[string]any)
+		name, _ := m["name"].(string)
+		if !strings.HasPrefix(name, "fb-") {
+			continue
+		}
+		fbGroupsFound++
+		if m["type"] != "fallback" {
+			t.Errorf("group %s type = %v, want fallback", name, m["type"])
+		}
+		proxies, _ := m["proxies"].([]any)
+		for _, p := range proxies {
+			ps, _ := p.(string)
+			if !manualSet[ps] {
+				t.Errorf("fb group %s contains %q, not in manual pool %v", name, ps, manualPool)
+			}
+		}
+	}
+	if fbGroupsFound == 0 {
+		t.Error("expected at least one fb-<ip> fallback group, found none")
 	}
 }
 
@@ -732,7 +759,13 @@ func TestHRWStability(t *testing.T) {
 // TestRenderer_PerTerminalWithPool verifies that probe-gated pool rule_sets
 // route through pool-specific perterm sub-rules (perterm-openai-pool with
 // openai-pool members only), not the generic perterm (all us-pool members).
-func TestRenderer_PerTerminalWithPool(t *testing.T) {
+// TestRenderer_PerTerminalNamedPoolUnified verifies that with per-terminal
+// fallback groups, named-pool rule_sets (openai-pool etc.) route through
+// the SAME generic perterm sub-rule as everything else — not a per-pool
+// variant. Per-class fan-out is the anti-pattern the previous (now-
+// removed) perterm-<poolname> branch caused; this test pins the new
+// behavior so it can't regress.
+func TestRenderer_PerTerminalNamedPoolUnified(t *testing.T) {
 	r := newTestRenderer(t)
 	r.cfg.URLTest.NodePattern = ""
 	r.cfg.Route.Mode = "whitelist"
@@ -745,9 +778,8 @@ func TestRenderer_PerTerminalWithPool(t *testing.T) {
 		RuleSets:        []string{"geosite-openai"},
 	}}).WithLoadBalance(true)
 	r.node.ClientSubnet = "10.8.13.0/29"
-
-	// Simulate nodescorer: only ash passes the openai-api probe.
-	r = r.WithPools(r.pools) // re-attach
+	// Even with a probe-gated openai-pool, per-terminal mode should NOT
+	// emit a perterm-openai-pool sub-rule.
 	r.poolMembers = map[string][]string{
 		"openai-pool": {"ash/🇺🇸US-IEPL-01"},
 	}
@@ -762,44 +794,31 @@ func TestRenderer_PerTerminalWithPool(t *testing.T) {
 	rules, _ := doc["rules"].([]any)
 	sub, _ := doc["sub-rules"].(map[string]any)
 
-	// geosite-openai must route to perterm-openai-pool (probe-gated),
-	// NOT the generic perterm.
-	var sawPoolPerterm, sawGenericForOpenai bool
-	for _, ru := range rules {
-		s, _ := ru.(string)
-		if s == "SUB-RULE,(RULE-SET,geosite-openai),perterm-openai-pool" {
-			sawPoolPerterm = true
-		}
-		if s == "SUB-RULE,(RULE-SET,geosite-openai),perterm" {
-			sawGenericForOpenai = true
-		}
-	}
-	if !sawPoolPerterm {
-		t.Error("geosite-openai should route to perterm-openai-pool, not generic perterm")
-	}
-	if sawGenericForOpenai {
-		t.Error("geosite-openai must NOT route to generic perterm when pool-specific perterm exists")
+	// Must NOT exist: perterm-openai-pool variant.
+	if _, ok := sub["perterm-openai-pool"]; ok {
+		t.Error("perterm-openai-pool sub-rule should not exist (per-class fan-out is the anti-pattern)")
 	}
 
-	// perterm-openai-pool sub-rule must exist and use only openai-pool member.
-	pt, _ := sub["perterm-openai-pool"].([]any)
-	if len(pt) < 2 {
-		t.Fatalf("perterm-openai-pool sub-rule missing or empty")
-	}
-	for _, e := range pt[:len(pt)-1] {
-		s, _ := e.(string)
-		if !strings.Contains(s, "ash/🇺🇸US-IEPL-01") {
-			t.Errorf("perterm-openai-pool contains non-pool node: %s", s)
-		}
-	}
-	// geosite-github (not in any pool) should use generic perterm.
-	var sawGithubPerterm bool
+	// geosite-openai and geosite-github should both route through
+	// the same generic perterm sub-rule.
+	var sawOpenaiPerterm, sawGithubPerterm bool
 	for _, ru := range rules {
-		if s, _ := ru.(string); s == "SUB-RULE,(RULE-SET,geosite-github),perterm" {
+		s, _ := ru.(string)
+		if s == "SUB-RULE,(RULE-SET,geosite-openai),perterm" {
+			sawOpenaiPerterm = true
+		}
+		if s == "SUB-RULE,(RULE-SET,geosite-github),perterm" {
 			sawGithubPerterm = true
 		}
+		// Negative: must not route through perterm-openai-pool.
+		if strings.Contains(s, "perterm-openai-pool") {
+			t.Errorf("rule references removed perterm-openai-pool: %q", s)
+		}
+	}
+	if !sawOpenaiPerterm {
+		t.Error("geosite-openai should route through the unified perterm sub-rule")
 	}
 	if !sawGithubPerterm {
-		t.Error("geosite-github should route to generic perterm (not pool-specific)")
+		t.Error("geosite-github should route through the unified perterm sub-rule")
 	}
 }

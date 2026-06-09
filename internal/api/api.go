@@ -61,6 +61,11 @@ type Renderer interface {
 	// Synced on every PUT /api/whitelist so the renderer emits the updated
 	// fake-ip-filter without a separate config reload.
 	SetFakeIPSkip(suffixes []string)
+	// AssignmentForIP returns the HRW-ordered routing members assigned to
+	// one terminal IP. ([primary, secondary, ...], true) when the IP is
+	// inside the configured client_subnet AND the routing pool is non-empty,
+	// (nil, false) otherwise. Used by /api/pool/terminal.
+	AssignmentForIP(ip string, outbounds []subscribe.Outbound) ([]string, bool)
 }
 
 type Server struct {
@@ -103,9 +108,11 @@ func NewServer(deps Deps) *Server {
 	// between yaml baseline and the live effective pool (after any
 	// emergency_promote_chain mutations). /pool/clear-emergency reverts
 	// effective to the yaml baseline — the operator's "I've handled it"
-	// signal.
+	// signal. /pool/terminal looks up which egress nodes are currently
+	// assigned to a terminal IP, with their probe history + passive stats.
 	mux.HandleFunc("GET /api/pool/state", s.auth(s.handlePoolState))
 	mux.HandleFunc("POST /api/pool/clear-emergency", s.auth(s.handlePoolClearEmergency))
+	mux.HandleFunc("GET /api/pool/terminal", s.auth(s.handlePoolTerminal))
 
 	s.srv = &http.Server{
 		Addr:              deps.Cfg.API.Listen,

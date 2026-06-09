@@ -151,31 +151,21 @@ func (r *Renderer) buildRules(outbounds []subscribe.Outbound) ([]string, map[str
 		"RULE-SET,"+rsGeoipCN+",DIRECT,no-resolve",
 	)
 
-	// Per-terminal: build the perterm sub-rule (SRC-IP-CIDR slices) once.
-	// domainTarget below dispatches domain whitelist hits into it.
+	// Per-terminal: build the perterm sub-rule once. domainTarget below
+	// dispatches domain whitelist hits into it. Each rule routes the
+	// terminal to its dedicated fb-<ip> fallback group, which mihomo's
+	// fallback type backs with [primary, secondary] from the routing pool.
+	// One terminal → one egress at any given time, with automatic primary
+	// → secondary failover when the primary fails mihomo's url-test.
 	perterm := r.perTerminal && r.node.ClientSubnet != ""
 	if perterm {
 		slices := r.perTerminalSlices(outbounds)
 		if len(slices) == 0 {
-			// No us-pool members to slice across — disable perterm this
-			// render rather than emit a sub-rule that dead-ends.
+			// No routing members — disable perterm this render rather
+			// than emit a sub-rule that dead-ends.
 			perterm = false
 		} else {
 			subRules["perterm"] = slices
-		}
-		// Also build per-pool perterm sub-rules for probe-gated pools.
-		// A probe-gated pool (e.g. openai-pool) should only slice across
-		// its own qualified members — routing openai traffic through the
-		// full us-pool would expose clients to nodes that failed the probe.
-		for _, p := range r.pools {
-			if len(p.RequiresPassing) == 0 {
-				continue // not probe-gated; generic perterm is fine
-			}
-			subName := "perterm-" + p.Name
-			poolSlices := r.perTerminalSlicesForPool(p.Name, outbounds)
-			if len(poolSlices) > 0 {
-				subRules[subName] = poolSlices
-			}
 		}
 	}
 
@@ -188,10 +178,18 @@ func (r *Renderer) buildRules(outbounds []subscribe.Outbound) ([]string, map[str
 		return cond + "," + outSelector
 	}
 
-	// Pool rule_sets (openai-pool etc.). When per-terminal is ON, domain pool
-	// tags route through a pool-specific perterm sub-rule (perterm-<poolname>)
-	// so only probe-passing nodes serve that pool's traffic. Pools without
-	// requires_passing fall back to the generic perterm (us-pool members).
+	// Pool rule_sets (openai-pool etc.). When per-terminal is ON, ALL
+	// rule-set domain hits — including pool-claimed tags — go through the
+	// regular perterm sub-rule, so a terminal's traffic exits via its
+	// fb-<ip> regardless of destination class. This deliberately drops
+	// the per-class perterm-<poolname> variant: routing OpenAI through
+	// different egresses than other traffic produced a per-class fan-out
+	// pattern that anti-bot models flag (one user identity hitting two
+	// destinations from two IPs). The operator's pool_members list must
+	// already filter for OpenAI compatibility — see docs.
+	//
+	// In non-perterm mode, named pool groups still serve their original
+	// purpose (probe-gated load-balance for that destination class).
 	poolRouted := map[string]bool{}
 	for _, tag := range r.poolRuleSets() {
 		poolName := r.poolForRuleSet(tag)
@@ -199,14 +197,7 @@ func (r *Renderer) buildRules(outbounds []subscribe.Outbound) ([]string, map[str
 			continue
 		}
 		if perterm && !strings.HasPrefix(tag, "geoip-") {
-			// Route through pool-specific perterm if it was generated,
-			// else fall back to generic perterm.
-			subName := "perterm-" + poolName
-			if _, ok := subRules[subName]; ok {
-				rules = append(rules, "SUB-RULE,(RULE-SET,"+tag+"),"+subName)
-			} else {
-				rules = append(rules, domainRule("RULE-SET,"+tag))
-			}
+			rules = append(rules, domainRule("RULE-SET,"+tag))
 			poolRouted[tag] = true
 			continue
 		}

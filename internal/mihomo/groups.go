@@ -174,6 +174,19 @@ func (r *Renderer) buildProxyGroups(outbounds []subscribe.Outbound) []map[string
 		}
 		return out
 	}
+
+	// Per-terminal fallback groups (fb-<ip>): one fallback group per
+	// terminal IP, each containing [primary, secondary] from HRW. The
+	// SRC-IP-CIDR rules in sub-rules.perterm route each terminal to its
+	// fb-<ip> group, and mihomo's fallback type handles the alive-bit
+	// failover from primary to secondary when primary dies. Empty list
+	// (e.g. fewer than 2 routing members) skips the per-terminal groups
+	// entirely; rules.go's perterm logic already handles the fallback to
+	// MATCH,us-pool in that case.
+	if r.perTerminal && r.node.ClientSubnet != "" {
+		fbGroups := r.perTerminalFallbackGroups(outbounds, probeURL, intervalSec)
+		groups = append(groups, fbGroups...)
+	}
 	return groups
 }
 
