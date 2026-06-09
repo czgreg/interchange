@@ -14,6 +14,8 @@
 package mihomo
 
 import (
+	"fmt"
+
 	"github.com/leap-gateway/leap-gateway/internal/subscribe"
 )
 
@@ -175,7 +177,7 @@ func applyTransportToClash(p map[string]any, o subscribe.Outbound) {
 			opts["path"] = v
 		}
 		if h, ok := tr["headers"].(map[string]any); ok && len(h) > 0 {
-			opts["headers"] = h
+			opts["headers"] = normalizeWSHeaders(h)
 		}
 		if len(opts) > 0 {
 			p["ws-opts"] = opts
@@ -192,4 +194,46 @@ func applyTransportToClash(p map[string]any, o subscribe.Outbound) {
 	case "http":
 		p["network"] = "h2"
 	}
+}
+
+// normalizeWSHeaders coerces ws-opts.headers values to strings. mihomo's
+// schema requires `map[string]string`; some upstream clash subscriptions
+// (cyberguard, observed 2026-06-09 on 89) emit Host as a YAML list —
+// passing that through verbatim makes mihomo refuse the config at startup
+// with `'ws-opts.headers[Host]' expected type 'string', got
+// unconvertible type '[]interface {}'`. Take the first element of a list,
+// fmt.Sprint anything else, drop nil/empty.
+func normalizeWSHeaders(h map[string]any) map[string]string {
+	out := make(map[string]string, len(h))
+	for k, v := range h {
+		switch x := v.(type) {
+		case nil:
+			continue
+		case string:
+			if x != "" {
+				out[k] = x
+			}
+		case []any:
+			if len(x) == 0 {
+				continue
+			}
+			s := fmt.Sprint(x[0])
+			if s != "" {
+				out[k] = s
+			}
+		case []string:
+			if len(x) == 0 {
+				continue
+			}
+			if x[0] != "" {
+				out[k] = x[0]
+			}
+		default:
+			s := fmt.Sprint(x)
+			if s != "" {
+				out[k] = s
+			}
+		}
+	}
+	return out
 }
