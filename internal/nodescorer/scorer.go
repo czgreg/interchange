@@ -114,6 +114,37 @@ type PoolSizingSnapshot struct {
 	SupplyLimited bool `json:"supply_limited"`
 }
 
+// EmergencyEvent records one auto-eviction or auto-promotion triggered by
+// the emergency_promote_chain machinery in manual mode. Surfaced via
+// /api/pool/state so the operator sees exactly what the system did and
+// why, in lieu of a Push notification (out of scope for this iteration).
+type EmergencyEvent struct {
+	At     time.Time `json:"at"`
+	Type   string    `json:"type"` // "evict" | "promote" | "exhausted"
+	Node   string    `json:"node,omitempty"`
+	Reason string    `json:"reason"`
+}
+
+const (
+	// hardFailThreshold is the per-round fail_rate at which a node is
+	// considered "hard-failing this round" — high enough to be near-100%
+	// without requiring a perfectly clean window (probe noise can leave a
+	// truly-dead node at 0.95 instead of 1.0). Below this it's "degraded
+	// not dead" — graceful, doesn't trigger emergency.
+	hardFailThreshold = 0.9
+
+	// emergencyEvictAfter is the sustained hard-fail duration that arms
+	// the auto-evict path. 30 minutes balances "user has clearly noticed
+	// a dead node" against "transient outage that will self-heal" —
+	// per the design discussion, IP rotation is a detection cost, so
+	// only pay it once degradation is clearly persistent.
+	emergencyEvictAfter = 30 * time.Minute
+
+	// emergencyEventLogMax caps the in-memory event log size; older
+	// events drop off so /api/pool/state stays small.
+	emergencyEventLogMax = 50
+)
+
 // Renderer is the subset of the mihomo renderer used by NodeScorer to
 // rebuild config.yaml when the pool membership changes.
 type Renderer interface {
@@ -177,6 +208,18 @@ type Scorer struct {
 	// rather than firing a fresh reload each time.
 	lastHotReload time.Time
 
+	// Emergency state (manual mode only). The "effective pool" is what
+	// mihomo currently routes through; it equals cfg.PoolMembers minus
+	// auto-evicted entries plus auto-promoted entries from
+	// cfg.EmergencyPromoteChain. yamlBaseline is the snapshot of
+	// cfg.PoolMembers at the time effective was last in sync — used at
+	// startup to detect "ops edited yaml" vs "we drifted via emergency"
+	// (yaml edit resets effective to the new baseline). emergencyEvents
+	// is a recent log surfaced via /api/pool/state.
+	effectivePool    []string
+	yamlBaseline     []string
+	emergencyEvents  []EmergencyEvent
+
 	// passive connection-lifecycle tracking (1.6). connSeen maps live
 	// connID → its node + last-seen byte total; closeEvents is a rolling
 	// per-node log of recently-closed connections used to compute fail
@@ -202,6 +245,13 @@ type nodeState struct {
 	health  NodeHealth
 	strikes int
 	okRuns  int
+	// hardFailStart is the wall-clock time the scorer first observed
+	// fail_rate >= hardFailThreshold for this node in an unbroken streak.
+	// Zero when the node is healthy. Cleared (zero again) the moment a
+	// scoring round shows fail_rate < hardFailThreshold. emergency-eviction
+	// fires when a pool member has been hard-failing for >=
+	// EmergencyEvictAfter wall-clock time.
+	hardFailStart time.Time
 }
 
 type connBytes struct {
@@ -439,34 +489,48 @@ func (s *Scorer) score(ctx context.Context) {
 	switch s.cfg.PoolMode {
 	case "manual":
 		// Manual mode: pool composition is operator-owned via
-		// cfg.PoolMembers. Scorer is observation-only — no K-gating math,
-		// no auto rotation. Promote / demote / replace are all explicit ops
-		// actions (yaml edit + redeploy, or future /api/pool/apply).
+		// cfg.PoolMembers (the "yaml baseline"). Scorer is observation-
+		// driven for ranking, but does run ONE auto path —
+		// emergency_promote_chain — to keep the data plane alive when
+		// a member dies and the operator is offline.
 		//
-		// Effect on hot-reload: newPoolSet = PoolMembers (intersected with
-		// present candidates). The first scoring round after a yaml edit
-		// will see s.poolSet != newPoolSet → triggers exactly one
-		// hot-reload to push the new PoolMembers to mihomo. Subsequent
-		// rounds match → no reload. This is the "no surprises" behavior
-		// — pool changes only when ops changes the yaml.
-		manualSet := make(map[string]bool, len(s.cfg.PoolMembers))
-		for _, m := range s.cfg.PoolMembers {
+		// Two-state model:
+		//   yamlBaseline    = sorted snapshot of cfg.PoolMembers
+		//   effectivePool   = baseline ± emergency mutations (persisted)
+		//
+		// On yaml edit: reconcileBaseline detects the change and resets
+		// effective to the new baseline (yaml change wins, drops emergency
+		// state).
+		//
+		// On hard-failure (fail_rate >= 0.9 sustained 30min): evict that
+		// member, promote next chain entry, hot-reload.
+		s.reconcileBaseline(s.cfg.PoolMembers)
+
+		// Update per-node hard-fail timers + identify ripe evictions.
+		ripe := s.updateHardFailTimers(nodes, time.Now())
+
+		// Apply emergency mutations to s.effectivePool (mutates state).
+		emergencyMutated := s.applyEmergencyEvictions(ripe, candidateSet, time.Now())
+
+		// Build newPoolSet from current effective pool. Intersect with
+		// present candidates to match perterm's render-time guard.
+		manualSet := make(map[string]bool, len(s.effectivePool))
+		for _, m := range s.effectivePool {
 			if candidateSet[m] {
 				manualSet[m] = true
 			}
 		}
-		// Surface gaps loudly: ops set 8 in yaml but only 6 exist as
-		// candidates → a subscription rename or a stale yaml. Operator
-		// must reconcile; meanwhile the routing pool is short.
-		if len(manualSet) < len(s.cfg.PoolMembers) {
-			missing := make([]string, 0, len(s.cfg.PoolMembers)-len(manualSet))
-			for _, m := range s.cfg.PoolMembers {
+		// Surface gaps loudly: effective pool references nodes not in
+		// candidates → subscription rename or stale state.
+		if len(manualSet) < len(s.effectivePool) {
+			missing := make([]string, 0, len(s.effectivePool)-len(manualSet))
+			for _, m := range s.effectivePool {
 				if !manualSet[m] {
 					missing = append(missing, m)
 				}
 			}
-			slog.Warn("nodescorer: manual pool members missing from candidates",
-				"requested", len(s.cfg.PoolMembers),
+			slog.Warn("nodescorer: effective pool members missing from candidates",
+				"requested", len(s.effectivePool),
 				"resolved", len(manualSet),
 				"missing", missing)
 		}
@@ -476,10 +540,7 @@ func (s *Scorer) score(ctx context.Context) {
 				newPoolSet[nodes[i].Name] = true
 				nodes[i].InPool = true
 			}
-			// Maintain strikes/okRuns for diagnostics — operator looking
-			// at /api/nodes/health still sees how each node has been
-			// trending recently, even though those counters don't drive
-			// any auto behavior in manual mode.
+			// Maintain strikes/okRuns for diagnostics.
 			if nodes[i].Qualified {
 				st.strikes = 0
 				st.okRuns++
@@ -491,9 +552,10 @@ func (s *Scorer) score(ctx context.Context) {
 			nodes[i].OkRounds = st.okRuns
 			st.health = nodes[i]
 		}
-		// Surface the manual pool as KTarget for /api/status visibility.
+		// Surface yaml baseline as KTarget for /api/status visibility.
 		kTarget = len(s.cfg.PoolMembers)
-		supplyLimited = len(manualSet) < len(s.cfg.PoolMembers)
+		supplyLimited = len(manualSet) < len(s.effectivePool)
+		_ = emergencyMutated // surface via /api/pool/state; reload comes from poolChanged below
 
 	case "auto", "":
 		if kTarget == 0 {

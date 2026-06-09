@@ -99,6 +99,14 @@ func NewServer(deps Deps) *Server {
 	// passive throughput + qualified/in-pool state.
 	mux.HandleFunc("GET /api/nodes/health", s.auth(s.handleNodesHealth))
 
+	// Manual-pool emergency state. /pool/state surfaces the divergence
+	// between yaml baseline and the live effective pool (after any
+	// emergency_promote_chain mutations). /pool/clear-emergency reverts
+	// effective to the yaml baseline — the operator's "I've handled it"
+	// signal.
+	mux.HandleFunc("GET /api/pool/state", s.auth(s.handlePoolState))
+	mux.HandleFunc("POST /api/pool/clear-emergency", s.auth(s.handlePoolClearEmergency))
+
 	s.srv = &http.Server{
 		Addr:              deps.Cfg.API.Listen,
 		Handler:           mux,
