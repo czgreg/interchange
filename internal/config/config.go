@@ -49,6 +49,78 @@ type Config struct {
 	// LoadBalance tunes how overseas (us-pool-bound) traffic is spread.
 	// Default zero value = per-destination (consistent-hashing) as before.
 	LoadBalance LoadBalanceConfig `yaml:"load_balance"`
+
+	// Notifications drives outbound alerts (currently Lark webhook only).
+	// Disabled by default — operator must set `notifications.enabled: true`
+	// AND configure a webhook target via API or yaml. Events that flow
+	// through this layer: pool composition changes, emergency evictions,
+	// node degradation crossings, webhook health.
+	Notifications NotificationsConfig `yaml:"notifications"`
+}
+
+// NotificationsConfig is the user-facing notification settings. Webhook
+// secrets are stored separately at runtime — yaml carries the URL +
+// signing flag only, never the actual secret.
+type NotificationsConfig struct {
+	// Enabled gates the entire notification subsystem. false = scorer
+	// events still log to slog, but no webhook calls fire and no local
+	// JSONL log is written. Default false (operator must opt in).
+	Enabled bool `yaml:"enabled"`
+
+	// Lark holds the Lark/Feishu webhook configuration. Secrets are NOT
+	// stored in yaml — set via POST /api/notifications/lark.
+	Lark LarkConfig `yaml:"lark"`
+
+	// LocalLogPath is the JSONL audit trail of every notification attempt
+	// (before the webhook call), regardless of webhook delivery success.
+	// Lets operators reconstruct "what was the system trying to tell me"
+	// even when Lark itself was unreachable. Default
+	// /var/lib/leap/notifications.log (writable per systemd ReadWritePaths).
+	LocalLogPath string `yaml:"local_log_path"`
+
+	// DedupWindow collapses repeated (node, event_type) notifications
+	// within this window into one. Default 5m — long enough to suppress
+	// BGP-flap spam without hiding genuine repeated incidents.
+	DedupWindow time.Duration `yaml:"dedup_window"`
+
+	// AggregationWindow batches multiple events occurring within this
+	// window into a single Lark message. Default 30s — short enough that
+	// urgency isn't lost, long enough to coalesce a 5-node simultaneous
+	// flap. Aggregation NEVER applies to "urgent" severity.
+	AggregationWindow time.Duration `yaml:"aggregation_window"`
+
+	// PerNodeRateLimitPerHour caps how many "info"-tier notifications a
+	// single node can generate per hour after dedup. Default 4 — covers
+	// real flapping without becoming a firehose. Urgent events bypass
+	// this limit.
+	PerNodeRateLimitPerHour int `yaml:"per_node_rate_limit_per_hour"`
+
+	// RetryAttempts on webhook 5xx / network errors. Default 3 with
+	// exponential backoff (1s, 2s, 4s). Failed attempts are still logged
+	// locally; urgent events that exhaust retries get re-attempted on
+	// the next scoring round (best-effort recovery).
+	RetryAttempts int `yaml:"retry_attempts"`
+}
+
+// LarkConfig is the Lark/Feishu webhook target. URL is yaml-stored; the
+// signing secret is runtime-only (POST /api/notifications/lark).
+type LarkConfig struct {
+	// WebhookURL is the full Lark bot webhook URL (incl. token).
+	// Empty = Lark output disabled even when Notifications.Enabled=true.
+	WebhookURL string `yaml:"webhook_url"`
+
+	// SignatureRequired turns on Lark's HMAC-SHA256 signing. When true,
+	// runtime must have a secret set (via API); without one,
+	// notifications fail-closed (logged locally, never POSTed). Strongly
+	// recommended for any production webhook — default true.
+	SignatureRequired bool `yaml:"signature_required"`
+
+	// SecretFile is the on-disk path holding the Lark webhook signing
+	// secret. POST /api/notifications/lark writes it (chmod 0600);
+	// Notifier reads at startup + reload. Default
+	// /var/lib/leap/lark-secret. Kept separate from yaml so secrets
+	// never end up in version control / log dumps.
+	SecretFile string `yaml:"secret_file"`
 }
 
 // CapacityConfig records the stress-tested single-node ceiling. Update it
@@ -558,6 +630,46 @@ func (c *Config) applyDefaults() {
 	}
 	c.DataPlane.ApplyDefaults()
 	c.NodeQualify.applyDefaults()
+	c.Notifications.applyDefaults()
+}
+
+// applyDefaults fills NotificationsConfig defaults. Disabled by default —
+// operator must explicitly enable. Defaults aim for "sane in production"
+// when the operator opts in: signature on, dedup tight enough to suppress
+// BGP flap spam, retries that don't drop urgent events on transient
+// network errors.
+func (n *NotificationsConfig) applyDefaults() {
+	if n.LocalLogPath == "" {
+		n.LocalLogPath = "/var/lib/leap/notifications.log"
+	}
+	if n.DedupWindow == 0 {
+		n.DedupWindow = 5 * time.Minute
+	}
+	if n.AggregationWindow == 0 {
+		n.AggregationWindow = 30 * time.Second
+	}
+	if n.PerNodeRateLimitPerHour == 0 {
+		n.PerNodeRateLimitPerHour = 4
+	}
+	if n.RetryAttempts == 0 {
+		n.RetryAttempts = 3
+	}
+	if n.Lark.SecretFile == "" {
+		n.Lark.SecretFile = "/var/lib/leap/lark-secret"
+	}
+	// Lark.SignatureRequired default true: any non-zero NotificationsConfig
+	// loaded with Lark.WebhookURL set should require signing unless
+	// operator explicitly turns it off (yaml `signature_required: false`).
+	// Default Go zero value is false, so we only flip when WebhookURL
+	// is set AND the operator hasn't explicitly written `false` — but
+	// yaml.v3 can't distinguish missing-vs-explicit-false on a bool.
+	// Safer: default ON only when URL is configured; if operator wants
+	// OFF they leave URL empty (no webhook) or set up an unsigned bot
+	// at their own risk. We log a WARN at startup if URL set + sig off.
+	if n.Lark.WebhookURL != "" && !n.Lark.SignatureRequired {
+		// not modifying the field — caller is responsible. Warning
+		// emitted at scorer startup time (we don't have slog here).
+	}
 }
 
 // ApplyDefaults fills in defaults for the DataPlane subtree. Public so

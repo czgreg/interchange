@@ -14,6 +14,7 @@ import (
 	"github.com/leap-gateway/leap-gateway/internal/dataplane"
 	"github.com/leap-gateway/leap-gateway/internal/nodescorer"
 	"github.com/leap-gateway/leap-gateway/internal/nodeinfo"
+	"github.com/leap-gateway/leap-gateway/internal/notify"
 	"github.com/leap-gateway/leap-gateway/internal/rulesets"
 	"github.com/leap-gateway/leap-gateway/internal/subscribe"
 	"github.com/leap-gateway/leap-gateway/internal/whitelistexpand"
@@ -33,6 +34,10 @@ type Deps struct {
 	// default under mihomo). Powers /api/nodes/health and the pool-
 	// summary fields in /api/status.
 	NodeScorer *nodescorer.Scorer
+	// Notifier carries operator-facing alerts (Lark webhook + local
+	// JSONL log). Always non-nil — even when notifications.enabled=false,
+	// API handlers can read status / recent log entries.
+	Notifier *notify.Notifier
 }
 
 // Renderer is the interface internal/mihomo.Renderer satisfies. Kept as
@@ -113,6 +118,14 @@ func NewServer(deps Deps) *Server {
 	mux.HandleFunc("GET /api/pool/state", s.auth(s.handlePoolState))
 	mux.HandleFunc("POST /api/pool/clear-emergency", s.auth(s.handlePoolClearEmergency))
 	mux.HandleFunc("GET /api/pool/terminal", s.auth(s.handlePoolTerminal))
+
+	// Notification subsystem — Lark webhook configuration + local log
+	// inspection + ad-hoc test send.
+	mux.HandleFunc("GET /api/notifications/status", s.auth(s.handleNotificationsStatus))
+	mux.HandleFunc("POST /api/notifications/lark", s.auth(s.handleNotificationsLark))
+	mux.HandleFunc("DELETE /api/notifications/lark", s.auth(s.handleNotificationsLarkDelete))
+	mux.HandleFunc("POST /api/notifications/test", s.auth(s.handleNotificationsTest))
+	mux.HandleFunc("GET /api/notifications/recent", s.auth(s.handleNotificationsRecent))
 
 	s.srv = &http.Server{
 		Addr:              deps.Cfg.API.Listen,

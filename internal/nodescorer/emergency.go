@@ -195,12 +195,31 @@ func (s *Scorer) promoteFromChain(candidates, skip map[string]bool) string {
 }
 
 // recordEmergencyEvent appends to the in-memory event log, capped at
-// emergencyEventLogMax. CALLER MUST HOLD s.mu.
+// emergencyEventLogMax. CALLER MUST HOLD s.mu. Fires the eventHook
+// callback (if set) so the notification subsystem can forward the
+// event to Lark + the JSONL log without the scorer importing the
+// notify package directly.
 func (s *Scorer) recordEmergencyEvent(ev EmergencyEvent) {
 	s.emergencyEvents = append(s.emergencyEvents, ev)
 	if len(s.emergencyEvents) > emergencyEventLogMax {
 		s.emergencyEvents = s.emergencyEvents[len(s.emergencyEvents)-emergencyEventLogMax:]
 	}
+	if s.eventHook != nil {
+		// Run hook on a goroutine so it can't deadlock against s.mu —
+		// recordEmergencyEvent is always called under the scorer lock,
+		// and the hook may want to call back into APIs that take the
+		// lock (e.g. GetSnapshot for richer notification payloads).
+		go s.eventHook(ev)
+	}
+}
+
+// SetEventHook registers a callback to fire on every recorded
+// EmergencyEvent. main.go calls this once at startup with the
+// notify.Notifier's emit shim. Safe to call before or after Run().
+func (s *Scorer) SetEventHook(h func(EmergencyEvent)) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.eventHook = h
 }
 
 // PoolState is the externalized view of the manual-mode pool state,

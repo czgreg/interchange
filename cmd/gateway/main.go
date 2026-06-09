@@ -20,6 +20,7 @@ import (
 	"github.com/leap-gateway/leap-gateway/internal/mihomo"
 	"github.com/leap-gateway/leap-gateway/internal/nodescorer"
 	"github.com/leap-gateway/leap-gateway/internal/nodeinfo"
+	"github.com/leap-gateway/leap-gateway/internal/notify"
 	"github.com/leap-gateway/leap-gateway/internal/rulesets"
 	"github.com/leap-gateway/leap-gateway/internal/subscribe"
 	"github.com/leap-gateway/leap-gateway/internal/whitelistexpand"
@@ -163,6 +164,18 @@ func main() {
 		)
 	}
 
+	// Notification subsystem (Lark webhook + local JSONL audit log).
+	// Always constructed so API handlers can interact with it; only
+	// actually fires webhooks when cfg.Notifications.Enabled and a URL
+	// is set. Secret loaded from disk if present (set via API earlier).
+	larkSecret := loadLarkSecret(cfg.Notifications.Lark.SecretFile)
+	notifier := notify.New(cfg.Notifications, larkSecret)
+	if nodeScorer != nil {
+		nodeScorer.SetEventHook(func(ev nodescorer.EmergencyEvent) {
+			notifier.Emit(emergencyToNotifyEvent(ev))
+		})
+	}
+
 	sched := subscribe.NewScheduler(cfg.Subscribe.RefreshInterval, func(ctx context.Context) error {
 		return api.RunRefresh(ctx, mgr, renderer, dpCtl)
 	})
@@ -216,10 +229,8 @@ func main() {
 		NodeInfo:   ni,
 		Expander:   expander,
 		RuleSets:   ruleMgr,
-		// In-memory ring of client-reported UX events. 5000 ≈ a few hours
-		// of busy ops; beyond that the ring overwrites oldest. Operators
-		// store if they want history; we don't try to be that store.
 		NodeScorer: nodeScorer,
+		Notifier:   notifier,
 	})
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -399,4 +410,65 @@ func runValidate(cfg *config.Config, r api.Renderer) error {
 	}
 
 	return nil
+}
+
+// loadLarkSecret reads the Lark webhook signing secret from disk. Returns
+// "" when the file is missing — Notifier handles "no secret" gracefully
+// (signature_required + empty secret = fail-closed). Whitespace trimmed.
+func loadLarkSecret(path string) string {
+	if path == "" {
+		return ""
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	return string(bytesTrim(data))
+}
+
+// bytesTrim trims trailing whitespace from a secret read off disk.
+// `echo "secret" > file` adds a newline that breaks Lark signing.
+func bytesTrim(b []byte) []byte {
+	end := len(b)
+	for end > 0 {
+		c := b[end-1]
+		if c == '\n' || c == '\r' || c == ' ' || c == '\t' {
+			end--
+			continue
+		}
+		break
+	}
+	return b[:end]
+}
+
+// emergencyToNotifyEvent maps a scorer EmergencyEvent into the user-facing
+// notify.Event. Severity heuristics:
+//   - evict / exhausted   → urgent (user impact: pool shrunk / cascade)
+//   - promote             → done   (auto-recovery succeeded)
+//   - clear               → info   (operator-driven)
+func emergencyToNotifyEvent(ev nodescorer.EmergencyEvent) notify.Event {
+	sev := notify.SeverityInfo
+	subject := ev.Type
+	switch ev.Type {
+	case "evict", "exhausted":
+		sev = notify.SeverityUrgent
+		subject = "pool member auto-evicted: " + ev.Node
+		if ev.Type == "exhausted" {
+			subject = "emergency_promote_chain exhausted — pool shrunk"
+		}
+	case "promote":
+		sev = notify.SeverityDone
+		subject = "promoted from chain: " + ev.Node
+	case "clear":
+		sev = notify.SeverityInfo
+		subject = "operator cleared emergency state"
+	}
+	return notify.Event{
+		Time:     ev.At,
+		Severity: sev,
+		Type:     "scorer_" + ev.Type,
+		Node:     ev.Node,
+		Subject:  subject,
+		Body:     ev.Reason,
+	}
 }

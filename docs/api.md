@@ -41,6 +41,11 @@ token 为空时不鉴权。
 | GET | `/api/pool/state` | 手动池 yaml baseline + 当前 effective + emergency 事件 | ✓ |
 | POST | `/api/pool/clear-emergency` | 还原 effective 池到 yaml baseline | ✓ |
 | GET | `/api/pool/terminal?ip=X` | 查询某 terminal IP 的出口节点 + 健康 | ✓ |
+| GET | `/api/notifications/status` | 通知系统配置快照（不含 secret） | ✓ |
+| POST | `/api/notifications/lark` | 设置/更新 Lark webhook url + secret | ✓ |
+| DELETE | `/api/notifications/lark` | 移除 Lark webhook（停止外发，本地日志保留） | ✓ |
+| POST | `/api/notifications/test` | 同步发一条测试消息验证 webhook | ✓ |
+| GET | `/api/notifications/recent?limit=N` | 本地 JSONL 日志最近 N 条 | ✓ |
 
 ---
 
@@ -478,6 +483,150 @@ curl -H "Authorization: Bearer ..." \
 
 ---
 
+## GET /api/notifications/status
+
+返回通知系统当前配置 + 健康状态。永远不返回 secret 本身（哪怕已配置），只返回 `secret_configured: true/false`。
+
+```json
+{
+  "enabled": true,
+  "webhook_configured": true,
+  "signature_required": true,
+  "secret_configured": true,
+  "local_log_path": "/var/lib/leap/notifications.log",
+  "dedup_window_sec": 300,
+  "aggregation_window_sec": 30,
+  "per_node_rate_limit_per_hour": 4,
+  "retry_attempts": 3
+}
+```
+
+字段：
+- `enabled` — `notifications.enabled` 开关
+- `webhook_configured` / `signature_required` / `secret_configured` — Lark 子系统的可用性
+- `dedup_window_sec` — 同 (node, event_type) 在窗口内合并为一条
+- `aggregation_window_sec` — 多个 info 事件在窗口内打包成一条 Lark 消息
+- `per_node_rate_limit_per_hour` — 单节点每小时最多 N 条 info 通知（urgent 不限）
+- `retry_attempts` — webhook 失败时指数退避重试次数
+
+---
+
+## POST /api/notifications/lark
+
+设置/更新 Lark webhook 配置。`webhook_url` 写入 `gateway.yaml` 的 `notifications.lark.webhook_url`；`secret` 写入独立文件（默认 `/var/lib/leap/lark-secret`，0600 权限），yaml 不存 secret。
+
+```bash
+curl -X POST -H "Authorization: Bearer ..." -H "Content-Type: application/json" \
+  -d '{
+    "webhook_url": "https://open.feishu.cn/open-apis/bot/v2/hook/xxx",
+    "secret": "your-signing-secret",
+    "signature_required": true
+  }' \
+  http://leap-89:18080/api/notifications/lark
+```
+
+字段：
+- `webhook_url`（必填）— Lark 自定义机器人 webhook URL
+- `secret` — Lark 机器人的签名密钥；当 `signature_required=true` 时必填
+- `signature_required`（可选，默认 `true`）— 启用 Lark HMAC-SHA256 签名校验。**生产强烈建议保持 true**——webhook URL 一旦泄露，没签名就能被任何人伪造消息
+
+返回：post-config 的 `Status` body，同 `/api/notifications/status`。
+
+副作用：
+- yaml 持久化（webhook_url + signature_required，不含 secret）
+- secret 文件原子写入（tmp + rename）
+- Notifier 在线重建 Lark client，下一条事件就用新配置发
+
+错误：
+- 400 `webhook_url required` — 空 URL
+- 400 `secret required when signature_required=true` — 缺 secret
+- 500 — 持久化失败
+
+---
+
+## DELETE /api/notifications/lark
+
+移除 Lark webhook 配置。secret 文件删除，yaml 中 `webhook_url` 清空。事件继续写到本地 JSONL 日志，**不再外发**——`notifications.enabled` 状态保持原样。
+
+```bash
+curl -X DELETE -H "Authorization: Bearer ..." \
+  http://leap-89:18080/api/notifications/lark
+```
+
+返回：post-deletion 的 `Status` body，可见 `webhook_configured: false`。
+
+---
+
+## POST /api/notifications/test
+
+同步发一条测试消息。绕过 dedup / rate-limit / aggregation——一定尝试发送，便于操作员验证 webhook + secret 配置正确性。
+
+```bash
+curl -X POST -H "Authorization: Bearer ..." \
+  http://leap-89:18080/api/notifications/test
+```
+
+成功：
+```json
+{"ok": true}
+```
+
+失败（502 Bad Gateway）：
+```json
+{"ok": false, "error": "lark response not OK: {\"code\":19021,\"msg\":\"sign match fail or timestamp is not within one hour from current time\"}"}
+```
+
+错误信息会原样从 Lark API 透传过来，便于诊断签名错、URL 错、token 失效等问题。
+
+---
+
+## GET /api/notifications/recent
+
+返回本地 JSONL 日志最近 N 条记录。即使 webhook 挂掉、Lark 不可达，记录也在；ops 通过这个端点可以重建"系统过去发生了什么"。
+
+```bash
+curl -H "Authorization: Bearer ..." \
+  "http://leap-89:18080/api/notifications/recent?limit=20"
+```
+
+```json
+{
+  "limit": 20,
+  "entries": [
+    {
+      "at": "2026-06-09T13:42:11Z",
+      "outcome": "delivered",
+      "severity": "urgent",
+      "type": "scorer_evict",
+      "node": "fishcloud/🇺🇸 美国01",
+      "subject": "pool member auto-evicted: fishcloud/🇺🇸 美国01",
+      "body": "fail_rate >= 0.90 sustained 30m0s"
+    },
+    {
+      "at": "2026-06-09T13:42:11Z",
+      "outcome": "webhook_failed",
+      "severity": "info",
+      "type": "scorer_promote",
+      "node": "fishcloud/🇺🇸 美国02",
+      "subject": "promoted from chain: fishcloud/🇺🇸 美国02",
+      "extra": {"err": "Post \"https://...\": dial tcp: lookup open.feishu.cn: no such host"}
+    }
+  ]
+}
+```
+
+`outcome` 取值：
+- `queued` — 进入 dispatcher 队列等待处理
+- `delivered` — webhook 成功
+- `webhook_failed` — 重试耗尽仍失败（保留 extra.err）
+- `dropped_dedup_or_rate_limit` — 被 dedup 或 rate-limit 抑制
+- `dropped_queue_full` — dispatcher 队列满（少见）
+- `test_attempt` / `test_delivered` / `test_failed` — `/api/notifications/test` 触发
+
+`limit` 默认 50，最大 1000。
+
+---
+
 ## 错误码
 
 | 状态 | 含义 |
@@ -538,7 +687,41 @@ curl -s $BASE/api/whitelist/resolved | jq -r '.domains[]' | head -20
 
 ## 接入变更日志（前端 / 控制平台）
 
-### 2026-06-09（commit `49ece0e`+）— 当前版本
+### 2026-06-09 晚（Lark 通知 + B+ 自动化预备）— 当前版本
+
+**新增端点**（Lark 通知 + 池审计预备）：
+
+| 端点 | 用途 |
+|---|---|
+| `GET /api/notifications/status` | 通知系统配置 |
+| `POST /api/notifications/lark` | 设置 webhook url + secret（HMAC 签名） |
+| `DELETE /api/notifications/lark` | 移除 webhook |
+| `POST /api/notifications/test` | 同步测试发送 |
+| `GET /api/notifications/recent` | 本地 JSONL 日志最近 N 条 |
+
+**通知机制**：
+- 严重档：紧急 (urgent，绕过 dedup/限速)、信息 (info)、完成 (done)
+- dedup：5min 内同 (node, type) 合并；info 单节点每小时最多 4 条；urgent 不限
+- aggregation：30s 内多事件合并为一条 Lark 消息（urgent 不参与）
+- 重试：失败时指数退避 1s/2s/4s，3 次后落本地日志
+- 安全：默认 HMAC-SHA256 签名，secret 持久化在 0600 权限文件，yaml 不存 secret
+
+**配置关键字段**（`notifications:` 块）：
+```yaml
+notifications:
+  enabled: true
+  lark:
+    webhook_url: ""             # 通过 API 设置
+    signature_required: true    # 默认 true，强烈推荐
+    secret_file: /var/lib/leap/lark-secret
+  local_log_path: /var/lib/leap/notifications.log
+  dedup_window: 5m
+  aggregation_window: 30s
+  per_node_rate_limit_per_hour: 4
+  retry_attempts: 3
+```
+
+### 2026-06-09 上午（commit `49ece0e`+）
 
 **新增端点**（手动池管理 + 终端查询）：
 

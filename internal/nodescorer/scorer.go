@@ -227,6 +227,13 @@ type Scorer struct {
 	connSeen    map[string]connInfo
 	closeEvents map[string][]closeEvent
 	activeConns map[string]int // node → current live conn count
+
+	// eventHook fires when the scorer records an EmergencyEvent — the
+	// notify subsystem registers here to forward the event to Lark / the
+	// local JSONL log. nil-safe (called only when set). Wired via
+	// SetEventHook from main.go after construction so the scorer package
+	// stays free of notify imports.
+	eventHook func(EmergencyEvent)
 }
 
 // connInfo is the last-observed state of one live connection.
