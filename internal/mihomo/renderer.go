@@ -93,12 +93,19 @@ type Renderer struct {
 	// sub-rule. Requires data_plane.tproxy_port (TPROXY preserves real srcIP).
 	perTerminal bool
 
-	// stateMu guards routingMembers + qualifiedOverride against the race
-	// between AssignmentForIP (called by /api/pool/terminal handler) and
-	// RenderWithPools (called by scorer hot-reload). Render paths still
-	// clone-and-mutate, but they also publish the new pool back to the
-	// receiver under this lock so subsequent reads see fresh state.
-	stateMu sync.RWMutex
+	// stateMu guards routingMembers + qualifiedOverride + cfg.Route + subs
+	// against the race between AssignmentForIP / Set* (called by API
+	// handlers) and RenderWithPools (called by scorer hot-reload). Render
+	// paths still clone-and-mutate, but they also publish the new pool
+	// back to the receiver under this lock so subsequent reads see fresh
+	// state.
+	//
+	// Pointer (not value) so `clone := *r` doesn't copy the mutex —
+	// vet correctly flags struct-copying-with-Mutex. The clone shares
+	// the same mutex, which is fine because the clone is stack-local
+	// inside the render call and never sees concurrent access; it just
+	// uses the mutex via the publish step at the end.
+	stateMu *sync.RWMutex
 }
 
 // WithLoadBalance sets the load-balance behavior. perTerminal=true emits
@@ -122,7 +129,10 @@ func (r *Renderer) WithRoutingMembers(members []string) *Renderer {
 // NewRenderer constructs a Renderer with the given engine-agnostic config.
 // Node + subscriptions are attached later via WithNode / WithSubscriptions.
 func NewRenderer(cfg config.DataPlaneConfig) *Renderer {
-	return &Renderer{cfg: cfg}
+	return &Renderer{
+		cfg:     cfg,
+		stateMu: &sync.RWMutex{},
+	}
 }
 
 // WithNode attaches the FeiLian forwarding-node info (CIDR, tun0 gw, egress

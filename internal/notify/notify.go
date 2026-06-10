@@ -103,19 +103,6 @@ func New(cfg config.NotificationsConfig, secret string) *Notifier {
 	return n
 }
 
-// SetLarkSecret swaps the runtime Lark signing secret in place. Used by
-// the API endpoint that lets ops update the secret without restarting
-// leap-gateway. Re-creates the lark client so subsequent calls use the
-// new secret.
-func (n *Notifier) SetLarkSecret(secret string) {
-	n.mu.Lock()
-	defer n.mu.Unlock()
-	n.secret = secret
-	if n.cfg.Enabled && n.cfg.Lark.WebhookURL != "" {
-		n.lark = newLarkClient(n.cfg.Lark, secret, n.cfg.RetryAttempts)
-	}
-}
-
 // Configure replaces the Lark webhook URL + secret atomically. Setting a
 // non-empty URL also implicitly enables the notifier (calling this
 // endpoint is itself the operator opt-in signal — they wouldn't be
