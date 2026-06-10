@@ -32,6 +32,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 
 	"github.com/leap-gateway/leap-gateway/internal/config"
 	"github.com/leap-gateway/leap-gateway/internal/subscribe"
@@ -67,6 +68,12 @@ type Renderer struct {
 	// flowing for ranking) from "what carries production traffic" (this
 	// field — top-K best). nil = per-terminal slices use the full us-pool
 	// (legacy / Plan A behavior).
+	//
+	// Guarded by stateMu when read by AssignmentForIP (the API endpoint
+	// can race with scorer hot-reloads). Render paths use a clone so
+	// they're naturally isolated from concurrent reads — but they MUST
+	// also update the receiver via storeRoutingMembers so subsequent
+	// AssignmentForIP calls see the post-render pool.
 	routingMembers []string
 	// pools are the named select/load-balance groups rendered alongside
 	// us-pool (e.g. openai-pool). Their rule_sets route to them instead of
@@ -85,6 +92,13 @@ type Renderer struct {
 	// traffic to one egress node via SRC-IP-CIDR slices under a `perterm`
 	// sub-rule. Requires data_plane.tproxy_port (TPROXY preserves real srcIP).
 	perTerminal bool
+
+	// stateMu guards routingMembers + qualifiedOverride against the race
+	// between AssignmentForIP (called by /api/pool/terminal handler) and
+	// RenderWithPools (called by scorer hot-reload). Render paths still
+	// clone-and-mutate, but they also publish the new pool back to the
+	// receiver under this lock so subsequent reads see fresh state.
+	stateMu sync.RWMutex
 }
 
 // WithLoadBalance sets the load-balance behavior. perTerminal=true emits
@@ -178,12 +192,27 @@ func (r *Renderer) RenderWithQualifiedNodes(outbounds []subscribe.Outbound, qual
 // target). poolMembers maps each named pool → its members (us-pool ∩
 // passing the pool's probes); a pool absent from poolMembers falls back
 // to the full us-pool.
+//
+// After a successful render, publishes the new (qualifiedOverride,
+// routingMembers, poolMembers) back to the receiver via stateMu so
+// AssignmentForIP returns the fresh pool. Without this, /api/pool/
+// terminal lags hot-reloads — observed 2026-06-09 with stale cyberguard
+// primary returned for terminals after pool moved to ctc-02.
 func (r *Renderer) RenderWithPools(outbounds []subscribe.Outbound, usPool, routingMembers []string, poolMembers map[string][]string) ([]byte, error) {
 	clone := *r
 	clone.qualifiedOverride = usPool
 	clone.routingMembers = routingMembers
 	clone.poolMembers = poolMembers
-	return clone.Write(outbounds)
+	out, err := clone.Write(outbounds)
+	if err != nil {
+		return nil, err
+	}
+	r.stateMu.Lock()
+	r.qualifiedOverride = append([]string(nil), usPool...)
+	r.routingMembers = append([]string(nil), routingMembers...)
+	r.poolMembers = poolMembers
+	r.stateMu.Unlock()
+	return out, nil
 }
 
 // Path returns the on-disk path the rendered config should be written to.

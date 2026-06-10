@@ -123,8 +123,16 @@ func (r *Renderer) perTerminalFallbackGroups(outbounds []subscribe.Outbound, pro
 // Used by the /api/pool/terminal endpoint to surface "which node carries
 // this terminal's traffic" without requiring the caller to re-implement
 // HRW or read mihomo's runtime state.
+//
+// Reads routingMembers under stateMu so the API can see post-hot-reload
+// pool composition. Without the lock the API lags by however long it
+// takes a sub refresh to propagate (which can be never if no sub
+// refresh fires after a scorer hot-reload).
 func (r *Renderer) AssignmentForIP(ip string, outbounds []subscribe.Outbound) ([]string, bool) {
-	members := r.intersectWithPresent(r.routingMembers, outbounds)
+	r.stateMu.RLock()
+	routingSnapshot := append([]string(nil), r.routingMembers...)
+	r.stateMu.RUnlock()
+	members := r.intersectWithPresent(routingSnapshot, outbounds)
 	if len(members) == 0 {
 		members = r.usPoolMembers(outbounds)
 	}
