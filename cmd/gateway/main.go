@@ -483,11 +483,15 @@ func emergencyToNotifyEvent(ev nodescorer.EmergencyEvent) notify.Event {
 // urgent: nothing's broken, system is doing its job), but ops should
 // know so they can correlate with user reports.
 //
-// Bootstrap transitions (pool_before empty) are skipped — they fire
-// once per cold start and aren't actionable. Rollback transitions are
-// info because the operator just performed them via API; they already
-// know.
+// Bootstrap transitions (type="bootstrap", emitted on the first
+// scoring round after a restart) are skipped here — they're recorded
+// for audit transparency but firing Lark on every redeploy would be
+// noise. Returns an empty Event with Type "" which dispatcher
+// effectively no-ops on (Subject empty + dropped from rendering).
 func transitionToNotifyEvent(t nodescorer.PoolTransition) notify.Event {
+	if t.Type == "bootstrap" {
+		return notify.Event{} // skip — Notifier.Emit treats zero-Type as noise; dispatcher's no-op
+	}
 	added := strings.Join(t.Added, ", ")
 	removed := strings.Join(t.Removed, ", ")
 	subject := "pool change: +" + truncate(added, 60) + " -" + truncate(removed, 60)

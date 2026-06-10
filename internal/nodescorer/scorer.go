@@ -866,14 +866,25 @@ func (s *Scorer) score(ctx context.Context) {
 			after := setToSortedSlice(newPoolSet)
 			added, removed := diffPools(before, after)
 			if len(added) > 0 || len(removed) > 0 {
+				// Distinguish bootstrap (poolSet empty after a restart
+				// — first scoring round always "adds" everyone) from a
+				// real K-gating drift. Bootstrap is recorded for audit
+				// transparency but main.go's notify formatter skips it
+				// to avoid Lark spam on every redeploy.
+				txType := "auto_swap"
+				reason := "K-gating composite-score swap"
+				if len(before) == 0 {
+					txType = "bootstrap"
+					reason = "first scoring round after restart — initial pool fill"
+				}
 				s.recordTransitionLocked(PoolTransition{
 					At:         now,
-					Type:       "auto_swap",
+					Type:       txType,
 					Added:      added,
 					Removed:    removed,
 					PoolBefore: before,
 					PoolAfter:  after,
-					Reason:     "K-gating composite-score swap",
+					Reason:     reason,
 					Source:     "scorer",
 				})
 			}

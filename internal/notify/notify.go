@@ -168,7 +168,15 @@ func (n *Notifier) statusLocked() Status {
 // full the event is dropped (and logged via the file-only path if
 // available). Callers should NOT block on Emit — they're typically the
 // scorer's hot path.
+//
+// An empty Event (Type=="" — used by main.go's transition formatter
+// to opt out of certain transition kinds, e.g. bootstrap) is silently
+// dropped: not queued, not logged. Lets formatters return a no-op
+// without coupling them to dispatcher internals.
 func (n *Notifier) Emit(ev Event) {
+	if ev.Type == "" {
+		return
+	}
 	if ev.Time.IsZero() {
 		ev.Time = time.Now()
 	}
