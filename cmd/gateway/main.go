@@ -484,29 +484,93 @@ func emergencyToNotifyEvent(ev nodescorer.EmergencyEvent) notify.Event {
 // know so they can correlate with user reports.
 //
 // Bootstrap transitions (type="bootstrap", emitted on the first
-// scoring round after a restart) are skipped here — they're recorded
-// for audit transparency but firing Lark on every redeploy would be
-// noise. Returns an empty Event with Type "" which dispatcher
-// effectively no-ops on (Subject empty + dropped from rendering).
+// scoring round after a restart) are skipped — recorded for audit
+// transparency but firing Lark on every redeploy is noise.
+//
+// Format for the Lark body uses Chinese plus arrows so the operator
+// can see at a glance what changed without parsing prose:
+//
+//   ▼ 剔除: <node>
+//   ▲ 新增: <node>
+//
+//   当前池 (K=8):
+//     ash/🇺🇸US-IEPL-01
+//     ...
+//     fishcloud/🇺🇸 美国03  ← 刚加入
+//
+//   原因: K-gating composite-score swap
 func transitionToNotifyEvent(t nodescorer.PoolTransition) notify.Event {
 	if t.Type == "bootstrap" {
-		return notify.Event{} // skip — Notifier.Emit treats zero-Type as noise; dispatcher's no-op
+		return notify.Event{} // suppressed — see Notifier.Emit
 	}
-	added := strings.Join(t.Added, ", ")
-	removed := strings.Join(t.Removed, ", ")
-	subject := "pool change: +" + truncate(added, 60) + " -" + truncate(removed, 60)
-	body := "type: " + t.Type +
-		"\nadded: " + added +
-		"\nremoved: " + removed +
-		"\nsource: " + t.Source +
-		"\nreason: " + t.Reason
+	subject := buildTransitionSubject(t)
 	return notify.Event{
 		Time:     t.At,
 		Severity: notify.SeverityInfo,
 		Type:     "pool_" + t.Type,
 		Subject:  subject,
-		Body:     body,
+		Body:     buildTransitionBody(t),
 	}
+}
+
+// buildTransitionSubject is the one-line headline. For 1+1 swaps it
+// reads "X 换 Y"; for asymmetric / multi-node it falls back to "+N -M".
+func buildTransitionSubject(t nodescorer.PoolTransition) string {
+	switch {
+	case len(t.Added) == 1 && len(t.Removed) == 1:
+		return "池变更: " + truncate(t.Removed[0], 32) + " → " + truncate(t.Added[0], 32)
+	case len(t.Added) > 0 && len(t.Removed) == 0:
+		return fmt.Sprintf("池新增 %d 个节点", len(t.Added))
+	case len(t.Added) == 0 && len(t.Removed) > 0:
+		return fmt.Sprintf("池剔除 %d 个节点", len(t.Removed))
+	}
+	return fmt.Sprintf("池变更: 新增 %d 剔除 %d", len(t.Added), len(t.Removed))
+}
+
+// buildTransitionBody is the detailed multi-line body shown under the
+// subject. Includes added/removed list (with arrows), full new-pool
+// listing (so ops doesn't need a second curl to see "what is the pool
+// now"), and metadata (source, reason).
+func buildTransitionBody(t nodescorer.PoolTransition) string {
+	var b strings.Builder
+	if len(t.Removed) > 0 {
+		b.WriteString("▼ 剔除:\n")
+		for _, n := range t.Removed {
+			b.WriteString("  ")
+			b.WriteString(n)
+			b.WriteString("\n")
+		}
+	}
+	if len(t.Added) > 0 {
+		b.WriteString("▲ 新增:\n")
+		for _, n := range t.Added {
+			b.WriteString("  ")
+			b.WriteString(n)
+			b.WriteString("\n")
+		}
+	}
+	addedSet := map[string]bool{}
+	for _, n := range t.Added {
+		addedSet[n] = true
+	}
+	if len(t.PoolAfter) > 0 {
+		fmt.Fprintf(&b, "\n当前池 (%d 个):\n", len(t.PoolAfter))
+		for _, n := range t.PoolAfter {
+			b.WriteString("  ")
+			b.WriteString(n)
+			if addedSet[n] {
+				b.WriteString("  ← 新")
+			}
+			b.WriteString("\n")
+		}
+	}
+	if t.Reason != "" {
+		fmt.Fprintf(&b, "\n触发: %s", t.Reason)
+	}
+	if t.Source != "" {
+		fmt.Fprintf(&b, "\n来源: %s", t.Source)
+	}
+	return b.String()
 }
 
 func truncate(s string, n int) string {
