@@ -35,6 +35,16 @@ func (n *Notifier) run() {
 			flushBatch()
 			return
 		case ev := <-n.queue:
+			// Aggregation-timer wakeup sentinel: flush whatever's
+			// currently buffered. shouldDropLocked treats this as drop=true,
+			// so without this early branch the sentinel is silently
+			// discarded — the batch then never flushes until an urgent
+			// event happens to arrive. Caught when info-tier auto_swap
+			// notifications were never reaching Lark on 89.
+			if ev.Type == "__flush__" {
+				flushBatch()
+				continue
+			}
 			n.mu.Lock()
 			drop, isUrgent := n.shouldDropLocked(ev)
 			n.mu.Unlock()

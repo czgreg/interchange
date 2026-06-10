@@ -156,12 +156,19 @@ func (r *Renderer) WithPools(pools []config.PoolConfig) *Renderer {
 
 // SetSubscriptions replaces the subscription order in place. Used by API
 // handlers that mutate the config and need a re-render with the new state.
+// Guarded by stateMu so a concurrent render reading r.subs sees a coherent
+// snapshot.
 func (r *Renderer) SetSubscriptions(subs []config.SubscriptionEntry) {
+	r.stateMu.Lock()
+	defer r.stateMu.Unlock()
 	r.subs = append([]config.SubscriptionEntry(nil), subs...)
 }
 
 // SetWhitelist re-seats the renderer's route mode + whitelist snapshot.
+// Guarded by stateMu — same race concern as SetSubscriptions.
 func (r *Renderer) SetWhitelist(mode string, wl config.WhitelistConfig) {
+	r.stateMu.Lock()
+	defer r.stateMu.Unlock()
 	r.cfg.Route.Mode = mode
 	r.cfg.Route.Whitelist = wl
 }
@@ -170,17 +177,9 @@ func (r *Renderer) SetWhitelist(mode string, wl config.WhitelistConfig) {
 // API layer after PUT /api/whitelist so the updated fake-ip-filter is
 // emitted in the next Write without needing a full config reload.
 func (r *Renderer) SetFakeIPSkip(suffixes []string) {
+	r.stateMu.Lock()
+	defer r.stateMu.Unlock()
 	r.cfg.DNS.FakeIPSkipSuffixes = append([]string(nil), suffixes...)
-}
-
-// RenderWithQualifiedNodes produces a Clash YAML where us-pool contains
-// only the given qualified node tags. Used by nodescorer to hot-reload
-// mihomo with an updated pool after a scoring round. nil = use all
-// NodePattern-matched nodes (normal rendering path).
-func (r *Renderer) RenderWithQualifiedNodes(outbounds []subscribe.Outbound, qualified []string) ([]byte, error) {
-	clone := *r
-	clone.qualifiedOverride = qualified
-	return clone.Write(outbounds)
 }
 
 // RenderWithPools is the nodescorer hot-reload entry that also assigns

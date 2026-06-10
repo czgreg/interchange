@@ -148,10 +148,6 @@ const (
 // Renderer is the subset of the mihomo renderer used by NodeScorer to
 // rebuild config.yaml when the pool membership changes.
 type Renderer interface {
-	// RenderWithQualifiedNodes produces a new config YAML using only the
-	// given node tags as us-pool members. It does NOT write to disk — the
-	// scorer writes the bytes itself so it can diff + hot-reload.
-	RenderWithQualifiedNodes(outbounds []subscribe.Outbound, qualified []string) ([]byte, error)
 	// RenderWithPools is the production render entry. usPool = the full
 	// probing set (all currently-qualified nodes; mihomo url-test probes
 	// these to keep ranking signal fresh). routingMembers ⊆ usPool is the
