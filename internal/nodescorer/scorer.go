@@ -252,6 +252,13 @@ type Scorer struct {
 	// SetEventHook from main.go after construction so the scorer package
 	// stays free of notify imports.
 	eventHook func(EmergencyEvent)
+
+	// transitionHook fires on every pool composition change recorded
+	// via recordTransitionLocked (auto K-gating swaps, manual emergency
+	// transitions, operator rollbacks). main.go wires this to the same
+	// notify subsystem with a different formatter, so pool drifts
+	// surface in Lark — without this, K-gating swaps were silent.
+	transitionHook func(PoolTransition)
 }
 
 // connInfo is the last-observed state of one live connection.

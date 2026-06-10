@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -173,6 +174,9 @@ func main() {
 	if nodeScorer != nil {
 		nodeScorer.SetEventHook(func(ev nodescorer.EmergencyEvent) {
 			notifier.Emit(emergencyToNotifyEvent(ev))
+		})
+		nodeScorer.SetTransitionHook(func(t nodescorer.PoolTransition) {
+			notifier.Emit(transitionToNotifyEvent(t))
 		})
 	}
 
@@ -471,4 +475,39 @@ func emergencyToNotifyEvent(ev nodescorer.EmergencyEvent) notify.Event {
 		Subject:  subject,
 		Body:     ev.Reason,
 	}
+}
+
+// transitionToNotifyEvent maps a PoolTransition into a notify.Event.
+// This is what catches "机场飘" — auto K-gating decided to swap a pool
+// member because EWMA scoring favored a candidate. info severity (not
+// urgent: nothing's broken, system is doing its job), but ops should
+// know so they can correlate with user reports.
+//
+// Bootstrap transitions (pool_before empty) are skipped — they fire
+// once per cold start and aren't actionable. Rollback transitions are
+// info because the operator just performed them via API; they already
+// know.
+func transitionToNotifyEvent(t nodescorer.PoolTransition) notify.Event {
+	added := strings.Join(t.Added, ", ")
+	removed := strings.Join(t.Removed, ", ")
+	subject := "pool change: +" + truncate(added, 60) + " -" + truncate(removed, 60)
+	body := "type: " + t.Type +
+		"\nadded: " + added +
+		"\nremoved: " + removed +
+		"\nsource: " + t.Source +
+		"\nreason: " + t.Reason
+	return notify.Event{
+		Time:     t.At,
+		Severity: notify.SeverityInfo,
+		Type:     "pool_" + t.Type,
+		Subject:  subject,
+		Body:     body,
+	}
+}
+
+func truncate(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + "…"
 }

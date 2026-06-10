@@ -54,7 +54,8 @@ const (
 )
 
 // recordTransitionLocked appends a transition to the audit log, capping
-// at transitionLogMax. CALLER MUST HOLD s.mu.
+// at transitionLogMax. Fires transitionHook (if set) so the notify
+// subsystem can surface pool drifts to Lark. CALLER MUST HOLD s.mu.
 func (s *Scorer) recordTransitionLocked(t PoolTransition) {
 	if t.At.IsZero() {
 		t.At = time.Now()
@@ -66,6 +67,21 @@ func (s *Scorer) recordTransitionLocked(t PoolTransition) {
 	if len(s.transitions) > transitionLogMax {
 		s.transitions = s.transitions[len(s.transitions)-transitionLogMax:]
 	}
+	if s.transitionHook != nil {
+		// Run on a goroutine — recordTransitionLocked is always called
+		// under s.mu and the hook may take the lock back to enrich the
+		// notification with snapshot data.
+		go s.transitionHook(t)
+	}
+}
+
+// SetTransitionHook registers a callback fired on every recorded
+// PoolTransition. main.go wires this to notify.Notifier.Emit with a
+// formatter that turns added/removed diffs into a Lark message body.
+func (s *Scorer) SetTransitionHook(h func(PoolTransition)) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.transitionHook = h
 }
 
 // diffPools computes the symmetric difference: added = b\a, removed = a\b.
