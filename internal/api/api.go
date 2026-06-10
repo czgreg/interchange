@@ -96,7 +96,6 @@ func NewServer(deps Deps) *Server {
 	mux.HandleFunc("PUT /api/whitelist", s.auth(s.handleWhitelistPut))
 	mux.HandleFunc("GET /api/whitelist/resolved", s.auth(s.handleWhitelistResolved))
 
-	mux.HandleFunc("GET /api/geosites", s.auth(s.handleGeositesGet))
 	mux.HandleFunc("GET /api/rule-sets", s.auth(s.handleRuleSetsGet))
 
 	mux.HandleFunc("GET /api/subscriptions", s.auth(s.handleSubscriptionsGet))
@@ -109,14 +108,11 @@ func NewServer(deps Deps) *Server {
 	// passive throughput + qualified/in-pool state.
 	mux.HandleFunc("GET /api/nodes/health", s.auth(s.handleNodesHealth))
 
-	// Manual-pool emergency state. /pool/state surfaces the divergence
-	// between yaml baseline and the live effective pool (after any
-	// emergency_promote_chain mutations). /pool/clear-emergency reverts
-	// effective to the yaml baseline — the operator's "I've handled it"
-	// signal. /pool/terminal looks up which egress nodes are currently
-	// assigned to a terminal IP, with their probe history + passive stats.
-	mux.HandleFunc("GET /api/pool/state", s.auth(s.handlePoolState))
-	mux.HandleFunc("POST /api/pool/clear-emergency", s.auth(s.handlePoolClearEmergency))
+	// Manual-mode pool surfaces removed: /api/pool/state and
+	// /api/pool/clear-emergency assumed pool_mode=manual semantics. With
+	// auto mode the canonical entry points are /api/status.pool_sizing
+	// (current K), /api/nodes/health (current pool by in_pool:true), and
+	// /api/pool/transitions (audit log).
 	mux.HandleFunc("GET /api/pool/terminal", s.auth(s.handlePoolTerminal))
 	mux.HandleFunc("GET /api/pool/transitions", s.auth(s.handlePoolTransitions))
 	mux.HandleFunc("POST /api/pool/rollback", s.auth(s.handlePoolRollback))

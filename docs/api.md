@@ -37,9 +37,6 @@ token 为空时不鉴权。
 | PUT | `/api/whitelist` | 整体替换白名单 | ✓ |
 | GET | `/api/whitelist/resolved` | 展开为域名 + CIDR 列表 | ✓ |
 | GET | `/api/rule-sets` | 可用 geosite/geoip catalog | ✓ |
-| GET | `/api/geosites` | 同 /api/rule-sets（兼容别名） | ✓ |
-| GET | `/api/pool/state` | 手动池 yaml baseline + 当前 effective + emergency 事件 | ✓ |
-| POST | `/api/pool/clear-emergency` | 还原 effective 池到 yaml baseline | ✓ |
 | GET | `/api/pool/terminal?ip=X` | 查询某 terminal IP 的出口节点 + 健康 | ✓ |
 | GET | `/api/pool/transitions?limit=N` | 池组成变更审计日志 + 当前隔离名单 | ✓ |
 | POST | `/api/pool/rollback` | 回滚最近 N 次池变更 + 隔离被回滚节点 | ✓ |
@@ -340,74 +337,6 @@ curl -s http://127.0.0.1:18080/api/whitelist \
 
 `geosite-cn` / `geoip-cn` 是路由基建，不在 catalog 中。
 
-`GET /api/geosites` 是此端点的兼容别名，只返回 geosites 部分。
-
----
-
-## GET /api/pool/state
-
-返回手动池（`pool_mode: manual`）的当前状态：yaml 中声明的 baseline、运行时实际生效的 effective、二者是否分离（emergency 事件导致漂移），以及 emergency 历史事件日志。
-
-```json
-{
-  "mode": "manual",
-  "yaml_baseline": [
-    "ash/🇺🇸US-IEPL-01",
-    "fishcloud/🇺🇸 美国01"
-  ],
-  "effective_pool": [
-    "ash/🇺🇸US-IEPL-01",
-    "fishcloud/🇺🇸 美国02"
-  ],
-  "diverged": true,
-  "promote_chain": [
-    "fishcloud/🇺🇸 美国02",
-    "ctc-02/US-C30-02-BWH"
-  ],
-  "emergency_events": [
-    {
-      "at": "2026-06-09T08:30:12Z",
-      "type": "evict",
-      "node": "fishcloud/🇺🇸 美国01",
-      "reason": "fail_rate >= 0.90 sustained 30m0s"
-    },
-    {
-      "at": "2026-06-09T08:30:12Z",
-      "type": "promote",
-      "node": "fishcloud/🇺🇸 美国02",
-      "reason": "auto-promote from emergency_promote_chain (replacing fishcloud/🇺🇸 美国01)"
-    }
-  ]
-}
-```
-
-字段：
-- `mode` — `manual` / `auto` / `""`（未配置）。后续端点的语义只在 `manual` 下完全适用。
-- `yaml_baseline` — `gateway.yaml` 中 `node_qualify.pool_members` 的副本，按字典序。
-- `effective_pool` — 当前真正给 perterm 用的池成员列表，按字典序。
-- `diverged` — `effective_pool != yaml_baseline` 时为 true，表示 emergency 事件已经改变池组成，等 ops 介入。
-- `promote_chain` — `node_qualify.emergency_promote_chain`，emergency 顶替时按顺序选下一个不在池里的候选。
-- `emergency_events` — 最近 50 条事件。`type` 取值 `evict` / `promote` / `exhausted` / `clear`。
-
-503：scorer 未启用。
-
----
-
-## POST /api/pool/clear-emergency
-
-将 `effective_pool` 还原到 `yaml_baseline`，清空 emergency 事件历史，重置每个节点的 hard-fail 计时器。等价于"运维已经处理完故障，让系统回到 yaml 声明的状态"的显式信号。
-
-```bash
-curl -X POST -H "Authorization: Bearer ..." \
-  http://leap-89:18080/api/pool/clear-emergency
-```
-
-返回新的 `/api/pool/state` body 供确认。下一个 scoring round 检测到 effective 变化会触发一次 mihomo hot-reload。
-
-要点：
-- 这个端点**不会**修改 yaml 文件。yaml 是 ground truth，只有 ops 改 yaml + redeploy 才能修改 baseline。
-- 如果故障节点仍在 hard-fail（fail_rate ≥ 0.9），重置后 30 分钟内仍会再次触发 emergency，**会绕回相同的 effective 状态**。先修复或换池成员再 clear。
-
 ---
 
 ## GET /api/pool/terminal
@@ -425,7 +354,7 @@ curl -H "Authorization: Bearer ..." \
   "subnet": "10.8.13.0/24",
   "in_subnet": true,
   "group_name": "fb-10.8.13.42",
-  "pool_mode": "manual",
+  "pool_mode": "auto",
   "active_node": "primary",
   "primary": {
     "name": "fishcloud/🇺🇸 美国01",
@@ -777,7 +706,22 @@ curl -s $BASE/api/whitelist/resolved | jq -r '.domains[]' | head -20
 
 ## 接入变更日志（前端 / 控制平台）
 
-### 2026-06-09 深夜（B+ v2 — EWMA + trial + 稳定度）— 当前版本
+### 2026-06-10（清理 manual 模式遗留）— 当前版本
+
+**Breaking — 删除 3 个端点**：
+
+| 端点 | 删除理由 |
+|---|---|
+| `GET /api/geosites` | 与 `/api/rule-sets` 同数据，纯遗留兼容别名 |
+| `GET /api/pool/state` | 只在 `pool_mode: manual` 下有意义；auto 模式下输出是 stale 数据 |
+| `POST /api/pool/clear-emergency` | 同上，manual 专用；auto 下应该用 `/api/pool/rollback` |
+
+替代查询（auto 模式）：
+- 当前池成员 → `/api/nodes/health` 过滤 `in_pool: true`
+- 池规模 K → `/api/status.pool_sizing`
+- 池历史变更 → `/api/pool/transitions`
+
+### 2026-06-09 深夜（B+ v2 — EWMA + trial + 稳定度）
 
 **评分系统升级**（影响 auto 模式池决策，REST 表面新增字段）：
 
