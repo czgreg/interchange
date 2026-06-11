@@ -167,7 +167,35 @@ func TestCompositeScore(t *testing.T) {
 	}
 }
 
-// TestRankedSelectionPreservesQualityOrder confirms the ordering used by
+// TestCompositeScoreQuadraticFail pins the relative ordering that
+// matters in production: a "completely failed" node (fail=1.0) MUST
+// rank worse than a "healthy but slow" node (p95=2858ms, fail=0). With
+// a linear fail term, fail=1.0 contributed only 1000 to score and
+// healthy-slow scored ~2870, ranking the dead node BETTER. The 92
+// production incident traced to that inversion.
+//
+// The fix uses fail_rate² × 5000:
+//   fail=1.0 → 5000  (catastrophic, well above any plausible latency)
+//   fail=0.5 → 1250  (degraded but real)
+//   fail=0.25 → 312  (small failures barely move score, latency dominates)
+func TestCompositeScoreQuadraticFail(t *testing.T) {
+	dead := NodeHealth{ProbeCount: 10, RTTP95Ms: 0, JitterMs: 0, FailRate: 1.0}
+	healthySlow := NodeHealth{ProbeCount: 10, RTTP95Ms: 2858, JitterMs: 100, FailRate: 0.0}
+	if compositeScore(dead) < compositeScore(healthySlow) {
+		t.Errorf("dead (%.0f) must rank WORSE than healthy-slow (%.0f)",
+			compositeScore(dead), compositeScore(healthySlow))
+	}
+
+	// Smaller failures should be roughly comparable to latency in score
+	// terms (the quadratic still keeps them on the same order).
+	smallFail := NodeHealth{ProbeCount: 10, RTTP95Ms: 200, JitterMs: 10, FailRate: 0.10}
+	healthyFast := NodeHealth{ProbeCount: 10, RTTP95Ms: 200, JitterMs: 10, FailRate: 0.0}
+	// fail=0.1 contributes 50 → tiny bump above zero-fail baseline.
+	if compositeScore(smallFail)-compositeScore(healthyFast) > 100 {
+		t.Errorf("small fail (10%%) shouldn't dominate score: %.0f vs %.0f",
+			compositeScore(smallFail), compositeScore(healthyFast))
+	}
+}
 // score()'s top-K cut: best-quality nodes win the pool slots.
 func TestRankedSelectionPreservesQualityOrder(t *testing.T) {
 	nodes := []NodeHealth{

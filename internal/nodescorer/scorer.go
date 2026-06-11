@@ -628,10 +628,10 @@ func (s *Scorer) score(ctx context.Context) {
 			//     over a current member requires the candidate's long
 			//     EWMA to be better by >= cfg.SwapThresholdScore. Anti-flap.
 			//
-			// Short-window EWMA drives the eviction-acceleration path
-			// (handled via the existing strikes counter — short EWMA
-			// crossing the absolute degraded threshold marks the node
-			// for strikes++ even when current-round score looks fine).
+			// Catastrophic-fail filtering happens upstream in scoreNode
+			// (fail_rate >= 0.9 sets Qualified=false → node never enters
+			// qualifiedNodes). Smaller failures stay in the ranking and
+			// flow naturally through compositeScore's quadratic fail term.
 			sort.SliceStable(qualifiedNodes, func(i, j int) bool {
 				return s.nodeLongEWMA(qualifiedNodes[i].Name) < s.nodeLongEWMA(qualifiedNodes[j].Name)
 			})
@@ -1097,6 +1097,21 @@ func (s *Scorer) scoreNode(tag string, pData map[string]interface{}, throughputB
 	}
 	if recentOk == 0 {
 		h.Reason = fmt.Sprintf("no successful probes in last %d", recentSpan)
+		return h
+	}
+	// Catastrophic gate: a node with sustained ≥90% failure across the
+	// full probe window (≥9 of 10) is unfit for the pool no matter how
+	// low its p95 happens to be on the surviving probes. This is the ONE
+	// hard threshold we re-introduce post-Plan-A — narrow enough to avoid
+	// the noise that drove Plan A to remove all gates (single-probe blips
+	// don't cross 0.9), wide enough to catch real "node is dead" cases
+	// that compositeScore alone won't push out for hours via long EWMA.
+	// Caught on 92 where cyberguard fail=1.0 sat in pool because its
+	// score (1000) ranked below a slow-but-alive node (score 2870).
+	// Smaller failures (fail<0.9) stay in the score-based ranking — the
+	// quadratic fail term in compositeScore handles them smoothly.
+	if h.FailRate >= hardFailThreshold {
+		h.Reason = fmt.Sprintf("fail_rate %.2f >= %.2f (catastrophic)", h.FailRate, hardFailThreshold)
 		return h
 	}
 	h.Qualified = true

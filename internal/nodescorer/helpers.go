@@ -121,23 +121,32 @@ func jsonBodyReader(b []byte) io.Reader {
 // good nodes. The sentinel is finite (not Inf) so two zero-history nodes
 // remain comparable via stable sort (insertion order).
 //
+// fail_rate uses a quadratic term so "completely broken" outranks "just
+// slow" by an order of magnitude, preventing the ranking inversion
+// observed on 92: cyberguard fail=1.0 was ranking BELOW fishcloud
+// p95=2858ms because 1000 (linear fail term) < 2870 (latency term).
+// With the quadratic, fail=1.0 contributes 5000 → above any plausible
+// healthy-but-slow node. Linear sub-thresholds still discriminate small
+// fail differences smoothly (fail=0.1 → 50; fail=0.3 → 450).
+//
 // Calibration intent (when ProbeCount > 0):
 //   - p95 weight 1.0 (the user-perceived tail)
 //   - jitter weight 2.0 (a flapping node hurts experience more than a
 //     consistently slower one with the same p95)
-//   - probe fail_rate × 1000 (a node failing 25% of probes is worse than
-//     a node 250 ms slower)
+//   - probe fail_rate² × 5000 (so fail=1.0 = 5000, fail=0.5 = 1250,
+//     fail=0.25 = 312 — small failures barely move score, complete
+//     death dominates)
 //   - passive fail_rate × 500 (real-traffic broken connections — half
 //     the weight of probe fail_rate because passive sample is smaller)
 func compositeScore(h NodeHealth) float64 {
 	if h.ProbeCount == 0 {
 		// No measurement yet — rank below any real-data node. 1e9 is
 		// large enough to lose to any reasonable composite (a node with
-		// p95=10000ms and fail=1.0 still scores ~11000) and small enough
+		// p95=10000ms and fail=1.0 still scores ~15000) and small enough
 		// that insertion-order stable sort breaks ties deterministically.
 		return 1e9
 	}
-	score := float64(h.RTTP95Ms) + 2*float64(h.JitterMs) + 1000*h.FailRate
+	score := float64(h.RTTP95Ms) + 2*float64(h.JitterMs) + 5000*h.FailRate*h.FailRate
 	if h.Passive != nil && h.Passive.ClosedWindow > 0 {
 		score += 500 * h.Passive.FailRate
 	}
