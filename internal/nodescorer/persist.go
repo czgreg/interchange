@@ -180,11 +180,18 @@ func copyEWMA(in map[string]*nodeEWMA) map[string]*nodeEWMA {
 }
 
 // poisonFloor is the threshold above which a smoothed EWMA value is
-// treated as sentinel-poisoned. Real composites top out in the low
-// thousands; the bug seeded the window at 1e9. Anything still above this
-// after any plausible amount of decay (1e9 stays above 1e6 for ~9.97
-// half-lives ≈ 10 days) is the decaying sentinel, never a real score.
-const poisonFloor = 1e6
+// treated as sentinel-poisoned. A real composite tops out around ~25k
+// (p95≈10s + 2·jitter + 5000·fail² + passive), and an EWMA is a weighted
+// average of observations, so a legitimate smoothed value can never exceed
+// the worst composite ever seen — i.e. it stays well under 50k. The bug
+// seeded the window at 1e9; that sentinel only decays below 50k after
+// ~14.3 half-lives (≈2.4 days on the 4h short window, ≈14 days on the 24h
+// long window). So anything at/above 50k is decaying sentinel residue,
+// never a real score. (The original 1e6 floor was too high: a short
+// window's sentinel decays to ~3e5 in under 2 days and slipped through,
+// leaving a freshly-reloaded node's short EWMA poisoned — caught on 92's
+// first post-fix scoring round, 2026-06-12.)
+const poisonFloor = 5e4
 
 // sanitizeEWMAPoint zeroes a point whose value is sentinel-poisoned,
 // turning it back into "no signal yet" (nodeLongEWMA → +Inf).

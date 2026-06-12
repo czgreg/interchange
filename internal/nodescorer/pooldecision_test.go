@@ -540,6 +540,15 @@ func TestSanitizeEWMA_ScrubsPoisonedPointsOnLoad(t *testing.T) {
 			Long:        ewmaPoint{Value: 251, UpdatedAt: now},
 			FirstSeenAt: now.Add(-38 * time.Hour),
 		},
+		// Residual: a short-window sentinel that has decayed to ~3.2e5 —
+		// below the original 1e6 floor (so it slipped through and left a
+		// reloaded node's short EWMA poisoned on 92), but still ~13x above
+		// any real composite. The lowered poisonFloor (5e4) must catch it.
+		"sub/residual": {
+			Short:       ewmaPoint{Value: 321267, UpdatedAt: now},
+			Long:        ewmaPoint{Value: 5000, UpdatedAt: now}, // real — keep
+			FirstSeenAt: now.Add(-38 * time.Hour),
+		},
 	}
 	out := copyEWMA(in)
 
@@ -552,6 +561,14 @@ func TestSanitizeEWMA_ScrubsPoisonedPointsOnLoad(t *testing.T) {
 	}
 	if p.FirstSeenAt.IsZero() {
 		t.Error("scrub must preserve FirstSeenAt (trial window), only zero the values")
+	}
+
+	r := out["sub/residual"]
+	if !r.Short.UpdatedAt.IsZero() || r.Short.Value != 0 {
+		t.Errorf("residual short sentinel (~3.2e5) not scrubbed by lowered floor: %+v", r.Short)
+	}
+	if r.Long.Value != 5000 || r.Long.UpdatedAt.IsZero() {
+		t.Errorf("residual node's real long value wrongly scrubbed: %+v", r.Long)
 	}
 
 	c := out["sub/clean"]
