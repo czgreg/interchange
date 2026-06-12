@@ -100,6 +100,13 @@ type NotificationsConfig struct {
 	// locally; urgent events that exhaust retries get re-attempted on
 	// the next scoring round (best-effort recovery).
 	RetryAttempts int `yaml:"retry_attempts"`
+
+	// InstanceName identifies which gateway sent a notification, surfaced
+	// in the Lark message header (e.g. "leap-gateway@92"). With multiple
+	// nodes (89 / 92) posting to the same Lark channel, the operator can't
+	// otherwise tell which one a pool-flap or node-dead alert came from.
+	// Defaults to the OS hostname when left empty.
+	InstanceName string `yaml:"instance_name"`
 }
 
 // LarkConfig is the Lark/Feishu webhook target. URL is yaml-stored; the
@@ -666,6 +673,14 @@ func (n *NotificationsConfig) applyDefaults() {
 	}
 	if n.RetryAttempts == 0 {
 		n.RetryAttempts = 3
+	}
+	if n.InstanceName == "" {
+		// Identify the sending gateway in the Lark header. Hostname is the
+		// natural per-node identity (e.g. "dianweiserver"); operator can
+		// override with a friendlier label via yaml `instance_name`.
+		if h, err := os.Hostname(); err == nil {
+			n.InstanceName = h
+		}
 	}
 	if n.Lark.SecretFile == "" {
 		n.Lark.SecretFile = "/var/lib/leap/lark-secret"

@@ -33,11 +33,12 @@ type larkClient struct {
 	url      string
 	secret   string
 	signOn   bool
+	instance string // sending-gateway label, shown in the message header
 	attempts int
 	httpc    *http.Client
 }
 
-func newLarkClient(cfg config.LarkConfig, secret string, retries int) *larkClient {
+func newLarkClient(cfg config.LarkConfig, secret, instance string, retries int) *larkClient {
 	if retries <= 0 {
 		retries = 3
 	}
@@ -45,6 +46,7 @@ func newLarkClient(cfg config.LarkConfig, secret string, retries int) *larkClien
 		url:      cfg.WebhookURL,
 		secret:   secret,
 		signOn:   cfg.SignatureRequired,
+		instance: instance,
 		attempts: retries,
 		httpc:    &http.Client{Timeout: 8 * time.Second},
 	}
@@ -110,7 +112,7 @@ func (c *larkClient) Send(batch []Event) error {
 // line between.
 func (c *larkClient) buildBody(batch []Event) ([]byte, error) {
 	ts := time.Now().Unix()
-	content := renderBatch(batch)
+	content := renderBatch(batch, c.instance)
 	payload := map[string]any{
 		"timestamp": fmt.Sprintf("%d", ts),
 		"msg_type":  "text",
@@ -138,8 +140,10 @@ func signLark(timestamp int64, secret string) (string, error) {
 
 // renderBatch turns a list of events into the plain-text body Lark
 // renders inline. Header carries the highest severity in the batch +
-// count of events.
-func renderBatch(batch []Event) string {
+// count of events. instance identifies the sending gateway (e.g. "92")
+// so an operator watching one channel for both 89 and 92 can tell which
+// node fired the alert; empty instance falls back to a bare label.
+func renderBatch(batch []Event, instance string) string {
 	if len(batch) == 0 {
 		return ""
 	}
@@ -150,14 +154,18 @@ func renderBatch(batch []Event) string {
 			break
 		}
 	}
+	label := "leap-gateway"
+	if instance != "" {
+		label = "leap-gateway@" + instance
+	}
 	var b strings.Builder
 	switch maxSev {
 	case SeverityUrgent:
-		b.WriteString("🚨 leap-gateway URGENT")
+		fmt.Fprintf(&b, "🚨 %s URGENT", label)
 	case SeverityDone:
-		b.WriteString("✅ leap-gateway")
+		fmt.Fprintf(&b, "✅ %s", label)
 	default:
-		b.WriteString("ℹ️ leap-gateway")
+		fmt.Fprintf(&b, "ℹ️ %s", label)
 	}
 	if len(batch) > 1 {
 		fmt.Fprintf(&b, " — %d events\n\n", len(batch))

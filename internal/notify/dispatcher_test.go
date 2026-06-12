@@ -85,16 +85,24 @@ func TestLarkSign(t *testing.T) {
 // simplification keeps the operator's eye drawn to actually-urgent
 // items; "done" / "info" both mean "system did its job, FYI".
 func TestRenderBatchHeader(t *testing.T) {
-	got := renderBatch([]Event{{Severity: SeverityUrgent, Subject: "x"}})
+	got := renderBatch([]Event{{Severity: SeverityUrgent, Subject: "x"}}, "92")
 	if !strings.HasPrefix(got, "🚨") {
 		t.Errorf("urgent header missing 🚨: %q", got[:30])
 	}
-	got = renderBatch([]Event{{Severity: SeverityInfo, Subject: "x"}})
+	if !strings.Contains(got, "leap-gateway@92") {
+		t.Errorf("header missing instance label: %q", got[:40])
+	}
+	got = renderBatch([]Event{{Severity: SeverityInfo, Subject: "x"}}, "92")
 	if !strings.HasPrefix(got, "ℹ") {
 		t.Errorf("info header missing ℹ: %q", got[:30])
 	}
-	got = renderBatch([]Event{{Severity: SeverityDone, Subject: "x"}})
+	got = renderBatch([]Event{{Severity: SeverityDone, Subject: "x"}}, "92")
 	if !strings.HasPrefix(got, "ℹ") {
 		t.Errorf("done header should also use ℹ (not urgent): %q", got[:30])
+	}
+	// Empty instance falls back to the bare label (no trailing @).
+	got = renderBatch([]Event{{Severity: SeverityInfo, Subject: "x"}}, "")
+	if strings.Contains(got, "@") {
+		t.Errorf("empty instance should not produce a @ label: %q", got[:40])
 	}
 }

@@ -97,7 +97,7 @@ func New(cfg config.NotificationsConfig, secret string) *Notifier {
 		n.fileLog = newFileLogger(cfg.LocalLogPath)
 	}
 	if cfg.Enabled && cfg.Lark.WebhookURL != "" {
-		n.lark = newLarkClient(cfg.Lark, secret, cfg.RetryAttempts)
+		n.lark = newLarkClient(cfg.Lark, secret, cfg.InstanceName, cfg.RetryAttempts)
 	}
 	go n.run()
 	return n
@@ -118,7 +118,7 @@ func (n *Notifier) Configure(webhookURL, secret string, signatureRequired bool) 
 	if webhookURL != "" {
 		// Configuring a webhook = explicit operator opt-in.
 		n.cfg.Enabled = true
-		n.lark = newLarkClient(n.cfg.Lark, secret, n.cfg.RetryAttempts)
+		n.lark = newLarkClient(n.cfg.Lark, secret, n.cfg.InstanceName, n.cfg.RetryAttempts)
 	} else {
 		// Empty URL = remove the Lark channel. Don't toggle global
 		// Enabled — operator might still want local-log-only mode.
