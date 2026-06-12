@@ -485,10 +485,26 @@ func (s *Scorer) score(ctx context.Context) {
 	// the auto-mode evict/promote decisions in the K-gating branch
 	// below — short window (4h) for evict, long window (24h) for
 	// promote. See ewma.go for the math + half-life rationale.
+	//
+	// CRITICAL: skip no-measurement rounds. compositeScore returns the
+	// 1e9 sentinel for a node with ProbeCount==0 (so it ranks last in a
+	// single round's ordering). Feeding that sentinel into the EWMA
+	// poisons it: the smoothed value seeds at 1e9 and decays at the 24h
+	// half-life, swamping the real scores (~200–2800) by ~6 orders of
+	// magnitude for days. Every node's long EWMA then converges to "the
+	// decayed sentinel", so the promote ranking + SwapThresholdScore gate
+	// (default 100) compare differences of ~millions against a margin of
+	// 100 — i.e. they become noise, and the pool flaps. Caught on 92
+	// (2026-06-12): the 8th slot ping-ponged between two nodes ~18×/24h
+	// because the anti-flap gate was operating on garbage EWMA values.
+	// Only real measurements feed the EWMA; no-data nodes keep "no signal"
+	// (nodeLongEWMA → +Inf → ranks last), which is the correct treatment.
 	ewmaNow := time.Now()
 	for i := range nodes {
-		score := compositeScore(nodes[i])
-		s.updateNodeEWMA(nodes[i].Name, score, ewmaNow)
+		if nodes[i].ProbeCount == 0 {
+			continue
+		}
+		s.updateNodeEWMA(nodes[i].Name, compositeScore(nodes[i]), ewmaNow)
 	}
 
 	// us-pool membership policy: K-gated when PoolSizing.TActive>0; legacy

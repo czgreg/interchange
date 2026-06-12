@@ -156,6 +156,15 @@ func copyQuarantine(in map[string]time.Time) map[string]time.Time {
 
 // copyEWMA deep-copies the per-node EWMA map. Same rationale as
 // copyQuarantine: persisted snapshot is decoupled from runtime state.
+//
+// It also SCRUBS poisoned points: a window whose smoothed value is at or
+// near the no-measurement sentinel (1e9 decaying at the 24h half-life) is
+// the fingerprint of the pre-2026-06-12 bug that fed compositeScore's
+// no-data sentinel into the EWMA. Such a point is reset to "no signal"
+// (zero UpdatedAt) so the node re-seeds from its next real measurement
+// rather than carrying garbage for days. Applied on load and save, so an
+// already-poisoned state file heals on the next restart instead of waiting
+// out the decay.
 func copyEWMA(in map[string]*nodeEWMA) map[string]*nodeEWMA {
 	out := make(map[string]*nodeEWMA, len(in))
 	for k, v := range in {
@@ -163,9 +172,27 @@ func copyEWMA(in map[string]*nodeEWMA) map[string]*nodeEWMA {
 			continue
 		}
 		copied := *v
+		copied.Short = sanitizeEWMAPoint(copied.Short)
+		copied.Long = sanitizeEWMAPoint(copied.Long)
 		out[k] = &copied
 	}
 	return out
+}
+
+// poisonFloor is the threshold above which a smoothed EWMA value is
+// treated as sentinel-poisoned. Real composites top out in the low
+// thousands; the bug seeded the window at 1e9. Anything still above this
+// after any plausible amount of decay (1e9 stays above 1e6 for ~9.97
+// half-lives ≈ 10 days) is the decaying sentinel, never a real score.
+const poisonFloor = 1e6
+
+// sanitizeEWMAPoint zeroes a point whose value is sentinel-poisoned,
+// turning it back into "no signal yet" (nodeLongEWMA → +Inf).
+func sanitizeEWMAPoint(p ewmaPoint) ewmaPoint {
+	if p.Value >= poisonFloor {
+		return ewmaPoint{}
+	}
+	return p
 }
 
 // saveStateLocked persists scorer counters to disk. **CALLER MUST HOLD

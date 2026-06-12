@@ -140,11 +140,16 @@ func jsonBodyReader(b []byte) io.Reader {
 //     the weight of probe fail_rate because passive sample is smaller)
 func compositeScore(h NodeHealth) float64 {
 	if h.ProbeCount == 0 {
-		// No measurement yet — rank below any real-data node. 1e9 is
-		// large enough to lose to any reasonable composite (a node with
+		// No measurement yet — rank below any real-data node. The sentinel
+		// is large enough to lose to any reasonable composite (a node with
 		// p95=10000ms and fail=1.0 still scores ~15000) and small enough
 		// that insertion-order stable sort breaks ties deterministically.
-		return 1e9
+		//
+		// NOTE: this value must NEVER be fed into the EWMA (ewma.go) — it
+		// would poison the smoothed score for days. score() guards the EWMA
+		// feed on ProbeCount==0; ewmaPoint.update + sanitizeEWMA also reject
+		// values >= noMeasurementScore as belt-and-suspenders.
+		return noMeasurementScore
 	}
 	score := float64(h.RTTP95Ms) + 2*float64(h.JitterMs) + 5000*h.FailRate*h.FailRate
 	if h.Passive != nil && h.Passive.ClosedWindow > 0 {

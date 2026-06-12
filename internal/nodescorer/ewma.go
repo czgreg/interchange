@@ -53,6 +53,15 @@ const (
 	// a fresh subscription of unknown nodes from sweeping the top by
 	// luck of initial probe.
 	trialDuration = 24 * time.Hour
+
+	// noMeasurementScore is the compositeScore sentinel for a node with no
+	// probe history yet (see helpers.go). It must never enter the EWMA: it
+	// is ~6 orders of magnitude larger than a real composite (~200–2800),
+	// so once smoothed in it dominates the value for days at the 24h
+	// half-life and the promote ranking + SwapThresholdScore gate degrade
+	// to noise. ewmaPoint.update rejects observations >= this, and
+	// sanitizeEWMA scrubs any value the bug already wrote to disk.
+	noMeasurementScore = 1e9
 )
 
 // nodeEWMA carries the per-node EWMA state. Persisted in the state
@@ -77,6 +86,13 @@ type ewmaPoint struct {
 // observation overrides the prior smoothed value. First call (zero
 // UpdatedAt) seeds the EWMA at the observed value.
 func (p *ewmaPoint) update(observed float64, now time.Time, halfLife time.Duration) {
+	// Reject the no-measurement sentinel. score() already guards the feed
+	// on ProbeCount==0, but this is the last line of defense: a single
+	// sentinel observation poisons the window for days (see
+	// noMeasurementScore). A no-data round simply leaves the EWMA untouched.
+	if observed >= noMeasurementScore {
+		return
+	}
 	if p.UpdatedAt.IsZero() {
 		p.Value = observed
 		p.UpdatedAt = now
