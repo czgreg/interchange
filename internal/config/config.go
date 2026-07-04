@@ -825,11 +825,15 @@ func (c *NodeQualifyConfig) applyDefaults() {
 		c.HotReloadMinInterval = 90 * time.Second
 	}
 	if c.SwapThresholdScore == 0 {
-		// Modest stickiness gate: candidate must beat worst pool member
-		// by ≥ 100 score-points (≈ 100ms p95, or 0.10 fail_rate, or
-		// some combination). Operator can lower to 0 to revert to old
-		// "any improvement triggers swap" semantics.
-		c.SwapThresholdScore = 100
+		// Strong stickiness gate: candidate must beat worst pool member
+		// by ≥ 400 score-points before displacing it. At compositeScore
+		// scale (p95_ms + 2×jitter + 5000×fail²), 400 ≈ "400ms p95
+		// better, or fail_rate 0.28 lower" — a meaningful signal, not
+		// noise. Raised from 100 to reduce pool churn: with 100 the pool
+		// swapped ~67×/24h on a 22-node candidate set, causing IP drift
+		// that trips CF/OpenAI behavioral models. Operator can lower to
+		// 0 to revert to "any improvement triggers swap" semantics.
+		c.SwapThresholdScore = 400
 	}
 	if c.PoolMode == "" {
 		c.PoolMode = "auto"

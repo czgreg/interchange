@@ -615,15 +615,29 @@ func (s *Scorer) score(ctx context.Context) {
 
 	case "auto", "":
 		if kTarget == 0 {
-			// Legacy mode: everyone in. Maintain strikes/okRuns for diagnostics.
+			// Legacy mode: qualified nodes in, unqualified out immediately.
+			// "Everyone in" was the original behavior, but it admitted nodes
+			// that are confirmed dead (fail_rate=1.0) and nodes with no probe
+			// history — violating the "only put usable nodes in pool" rule.
+			// probe_count=0 nodes stay qualified (benefit-of-doubt for EWMA
+			// ranking) but do NOT enter the routing pool until they have real
+			// measurements. Unqualified nodes (failed scoreNode) exit
+			// immediately regardless of EvictStrikes — a dead node should
+			// never carry traffic.
 			for i := range nodes {
 				st := s.state[nodes[i].Name]
-				newPoolSet[nodes[i].Name] = true
-				nodes[i].InPool = true
-				if nodes[i].Qualified {
+				if nodes[i].Qualified && nodes[i].ProbeCount > 0 {
+					newPoolSet[nodes[i].Name] = true
+					nodes[i].InPool = true
 					st.strikes = 0
 					st.okRuns++
+				} else if nodes[i].Qualified {
+					// probe_count=0: benefit-of-doubt qualified but no data yet.
+					// Keep in us-pool (mihomo probes it) but not in routing set.
+					st.okRuns = 0
+					st.strikes++
 				} else {
+					// Unqualified: out immediately, no hysteresis.
 					st.okRuns = 0
 					st.strikes++
 				}
@@ -716,12 +730,19 @@ func (s *Scorer) score(ctx context.Context) {
 					// Not in top-K (or not qualified): increment strikes.
 					st.okRuns = 0
 					st.strikes++
-					if currentlyInPool && st.strikes < s.cfg.EvictStrikes {
+					// Unqualified nodes (failed the scoreNode gate) bypass
+					// hysteresis and exit the pool immediately — a node that
+					// can't pass the basic liveness check has no business
+					// carrying traffic regardless of how many strikes it has
+					// accumulated. Only ranking-demotion (wantInPool=false but
+					// Qualified=true) respects the EvictStrikes window.
+					qualifiedButDemoted := nodes[i].Qualified
+					if currentlyInPool && qualifiedButDemoted && st.strikes < s.cfg.EvictStrikes {
 						// Hysteresis: stay in pool until strikes reach evict bar.
 						newPoolSet[nodes[i].Name] = true
 						nodes[i].InPool = true
 					}
-					// else: out (or never was in)
+					// else: out immediately (unqualified) or evicted (strikes >= bar)
 				}
 				nodes[i].Strikes = st.strikes
 				nodes[i].OkRounds = st.okRuns
