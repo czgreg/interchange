@@ -7,9 +7,7 @@
 // sibling key (mihomo expects this layout).
 //
 // Coverage matches what the subscribe package actually parses:
-//   shadowsocks, trojan, vmess, vless, hysteria2, tuic.
-// Anything else is dropped (filtered by caller — never reaches a mihomo
-// outbound entry).
+//   shadowsocks, trojan, vmess, vless, hysteria2, tuic, anytls.
 
 package mihomo
 
@@ -27,7 +25,7 @@ import (
 func outboundToProxy(o subscribe.Outbound) map[string]any {
 	t := o.Type()
 	switch t {
-	case "shadowsocks", "trojan", "vmess", "vless", "hysteria2", "tuic":
+	case "shadowsocks", "trojan", "vmess", "vless", "hysteria2", "tuic", "anytls":
 		// fall through
 	default:
 		return nil
@@ -102,6 +100,15 @@ func outboundToProxy(o subscribe.Outbound) map[string]any {
 			p["password"] = v
 		}
 		applyTLSToClash(p, o)
+	case "anytls":
+		p["type"] = "anytls"
+		if v, ok := o["password"].(string); ok && v != "" {
+			p["password"] = v
+		}
+		applyTLSToClash(p, o)
+		if v, ok := o["client-fingerprint"].(string); ok && v != "" {
+			p["client-fingerprint"] = v
+		}
 	}
 
 	return p

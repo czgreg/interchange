@@ -153,7 +153,7 @@ post Plan-A 语义注意：
 
 ## GET /api/proxies/active
 
-数据面活跃状态快照。
+数据面活跃状态快照。15 秒内判断是否需要介入的主要运维视图。
 
 ```json
 {
@@ -170,20 +170,32 @@ post Plan-A 语义注意：
   },
   "active_proxy": {
     "reachable": true,
-    "active_urltest": "us-pool",
+    "active_group": "us-pool",
     "pool_filter": "美国|🇺🇸|\\bUS",
+    "pool_mode": "auto",
+    "last_swap_at": "2026-06-06T11:58:00Z",
     "pools": [
       {
-        "tag": "us-pool", "pool_size": 19, "active": true,
+        "tag": "us-pool", "pool_size": 8, "active": true,
         "egress": {"ip": "12.34.56.78", "country": "US", "asn": "AS???"},
         "nodes": [
-          {"tag": "ctc-02/US-C30-01", "delay_ms": 155, "last_check": "..."}
+          {"tag": "ctc-02/US-C30-01", "delay_ms": 155, "last_check": "...", "fail_rate": 0.0}
         ]
       }
     ]
   }
 }
 ```
+
+| 字段 | 说明 |
+|---|---|
+| `active_group` | `out` selector 当前指向的 group（`us-pool` / `pin` / `DIRECT`） |
+| `pool_mode` | `node_qualify.pool_mode`：`auto`（scorer 自动换池）/ `manual`（手动维护）|
+| `last_swap_at` | 池成员最近一次变更时间。频繁变化说明 scorer 在抖动，配合 `/api/pool/transitions` 查原因 |
+| `pool_size` | routing pool 成员数（K-gating top-K）。K-gating 未启用时等于所有合格候选数 |
+| `nodes[]` | 当前 routing pool 成员（K-gating top-K 子集）。scorer 不活跃时降级为全量 us-pool 成员 |
+| `nodes[].fail_rate` | 来自 NodeScorer 的探针失败率（0.0–1.0）。scorer 不可用时为 -1 |
+| `nodes[].delay_ms` | mihomo url-test 最近一次延迟（ms）。0 表示尚无测量 |
 
 ---
 
@@ -232,6 +244,20 @@ override 不 sticky：NodeScorer 只管 us-pool 成员，不回写 selector 指�
 ```json
 {"url": "https://...", "user_agent": "clash.meta/v1.19.26"}
 ```
+
+### user_agent 常用值
+
+不同机场按 UA 判断客户端版本，UA 不对会返回警告占位节点而非真实节点。省略时用全局默认（`ClashforWindows/0.20.39`），部分面板会将其判定为版本过旧。
+
+| user_agent | 适用场景 |
+|---|---|
+| `mihomo/1.18.4` | 狗狗加速等按 mihomo 版本放行的面板；通常返回节点数最多 |
+| `clash.meta` | 多数 Clash 系面板的通用兼容值 |
+| `ClashforWindows/0.20.39` | 全局默认；老面板兼容性好，新面板可能拦截 |
+| `sing-box/1.10.7` | 仅限明确要求 sing-box 格式的机场；clash 系面板通常返回 0 节点 |
+| `clash-verge/1.7.7` | Clash Verge 系面板 |
+
+排查节点数不及预期时，用不同 UA 各拉一次对比返回的 `name:` 行数，取节点数最多的值。
 
 ## DELETE /api/subscriptions/{name}
 
@@ -705,6 +731,25 @@ curl -s $BASE/api/whitelist/resolved | jq -r '.domains[]' | head -20
 ---
 
 ## 接入变更日志（前端 / 控制平台）
+
+### 2026-07-04（active 接口运维增强）
+
+**Breaking**：
+
+| 字段 | 变化 |
+|---|---|
+| `active_proxy.active_urltest` | → `active_proxy.active_group`（语义更准确，原字段删除） |
+| `active_proxy.history_len` | **已删除**（无运维价值） |
+| `pools[].pool_size` | 语义变更：原为 mihomo `all` 全量大小，现为 routing pool（top-K）实际大小 |
+| `pools[].nodes[]` | 语义变更：原返回全量 us-pool 成员，现只返回 routing pool 成员（scorer 不活跃时降级为全量） |
+
+**新增字段**：
+
+| 字段 | 说明 |
+|---|---|
+| `active_proxy.pool_mode` | `"auto"` / `"manual"`，决定运维操作方向 |
+| `active_proxy.last_swap_at` | 池成员最近一次变更时间（RFC3339） |
+| `pools[].nodes[].fail_rate` | NodeScorer 探针失败率（0.0–1.0）；scorer 不可用时为 -1 |
 
 ### 2026-06-10（清理 manual 模式遗留）— 当前版本
 

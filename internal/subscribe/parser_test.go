@@ -194,10 +194,10 @@ func TestFilterOutbounds(t *testing.T) {
 		{"type": "vless", "tag": "🇭🇰 香港01 境外中转"},
 	}
 	got := filterOutbounds(in)
-	if len(got) != 3 {
-		t.Fatalf("want 3 kept, got %d: %#v", len(got), got)
+	if len(got) != 4 {
+		t.Fatalf("want 4 kept, got %d: %#v", len(got), got)
 	}
-	wantTags := []string{"hk-01", "jp-01", "🇭🇰 香港01 境外中转"}
+	wantTags := []string{"hk-01", "hk-02-anytls", "jp-01", "🇭🇰 香港01 境外中转"}
 	for i, w := range wantTags {
 		if got[i].Tag() != w {
 			t.Errorf("[%d] want %q, got %q", i, w, got[i].Tag())

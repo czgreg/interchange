@@ -2,34 +2,19 @@ package subscribe
 
 import "strings"
 
-// filterOutbounds drops nodes that should never reach the sing-box config.
-//
-// Two categories:
-//
-//  1. Unsupported types. anytls is sing-box ≥ 1.12 only — older runtimes
-//     refuse to load the config when these are present. Remove this from
-//     skipTypes once the deployed sing-box is ≥ 1.12.
-//
-//  2. Info-banner pseudo-nodes. Many subscription providers ship the user's
-//     remaining quota / expiry / homepage URL as fake outbounds, with bogus
-//     server addresses. They'd land in the urltest pool and probe forever.
-//     Match by tag substring against the provider's banner conventions.
+// filterOutbounds drops nodes that should never reach the mihomo config:
+// info-banner pseudo-nodes that many providers ship as fake outbounds
+// (remaining quota, expiry, homepage URL). They'd land in the urltest
+// pool and probe forever. Match by tag substring against provider conventions.
 func filterOutbounds(in []Outbound) []Outbound {
 	out := make([]Outbound, 0, len(in))
 	for _, o := range in {
-		if skipTypes[o.Type()] {
-			continue
-		}
 		if isBannerTag(o.Tag()) {
 			continue
 		}
 		out = append(out, o)
 	}
 	return out
-}
-
-var skipTypes = map[string]bool{
-	"anytls": true,
 }
 
 // bannerSubstrings catches Chinese subscription banner conventions. Match is

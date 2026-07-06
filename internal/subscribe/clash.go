@@ -78,6 +78,13 @@ func clashProxyToOutbound(p map[string]any) (Outbound, error) {
 		o["uuid"], _ = p["uuid"].(string)
 		o["password"], _ = p["password"].(string)
 		applyClashTLS(o, p)
+	case "anytls":
+		o["type"] = "anytls"
+		o["password"], _ = p["password"].(string)
+		applyClashTLS(o, p)
+		if fp, ok := p["client-fingerprint"].(string); ok && fp != "" {
+			o["client-fingerprint"] = fp
+		}
 	default:
 		return nil, fmt.Errorf("unsupported clash type %q", typ)
 	}
