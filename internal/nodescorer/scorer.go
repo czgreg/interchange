@@ -103,6 +103,12 @@ type Snapshot struct {
 	// SupplyLimited=true when |Tier1| was the binding ceiling — operator
 	// should consider raising the acceptance bar or adding subscriptions.
 	PoolSizing PoolSizingSnapshot `json:"pool_sizing"`
+	// RoutingPool is the top-K subset actually rendered into mihomo's
+	// us-pool (routingMembers). Empty when K-gating is disabled (full
+	// qualified set is routed) or before the first scoring round.
+	RoutingPool []string `json:"routing_pool"`
+	// PoolMode mirrors node_qualify.pool_mode ("auto" | "manual").
+	PoolMode string `json:"pool_mode"`
 }
 
 // PoolSizingSnapshot is the runtime view of the K-gating decision.
@@ -507,33 +513,26 @@ func (s *Scorer) score(ctx context.Context) {
 		s.updateNodeEWMA(nodes[i].Name, compositeScore(nodes[i]), ewmaNow)
 	}
 
-	// us-pool membership policy: K-gated when PoolSizing.TActive>0; legacy
-	// "every qualified candidate in pool" otherwise.
+	// us-pool membership policy: K-gated ranking is always on.
 	//
-	// K-gated mode (post-2026-06-09):
+	// K-gated mode:
 	//   1. Compute K from the operator's PoolSizing config + current
 	//      qualified count (computeK in helpers.go).
-	//   2. Rank Qualified candidates ascending by compositeScore (latency
-	//      tail + jitter + fail rates; lower=better).
+	//   2. Rank Qualified candidates ascending by long EWMA (lower=better).
 	//   3. Top-K is the "preferred set" for this round.
-	//   4. Apply hysteresis using the existing strikes/okRuns counters:
-	//      a node enters pool only after ReadmitStrikes consecutive rounds
-	//      in the preferred set (default 1); a member exits only after
-	//      EvictStrikes consecutive rounds out (default 2). Bootstrap:
-	//      when the current pool is below K, fill greedily from preferred
-	//      to avoid starving the data plane during cold-start.
+	//   4. Asymmetric hysteresis:
+	//      - Enter pool: requires ReadmitStrikes consecutive rounds in
+	//        preferred set (default 1). Bootstrap fills greedily.
+	//      - Exit pool: immediate when pool > MinPoolSize. When pool would
+	//        drop below MinPoolSize, retain the best available nodes
+	//        (including cold-start/trial nodes) as fallback.
 	//   5. HotReloadMinInterval still throttles reload frequency.
 	//
 	// Why this preserves anti-detection: per-terminal HRW (perterminal.go)
-	// gives each terminal one stable egress; K-gating just keeps the pool
+	// gives each terminal one stable egress; K-gating keeps the pool
 	// small + uniformly high-quality so HRW never lands a terminal on a
-	// degraded node. Pool changes are slow (hysteresis × throttle), so each
-	// terminal's egress IP is stable for hours-to-days, matching what
-	// CF/OpenAI expect from a residential identity.
-	//
-	// Legacy mode (TActive=0): every candidate is marked InPool=true. This
-	// is what production has run since Plan A (2026-06-07). Set
-	// node_qualify.pool_sizing.t_active in yaml to opt into K-gating.
+	// degraded node. Pool changes are slow (readmit throttle), so each
+	// terminal's egress IP is stable for hours-to-days.
 	qualifiedNodes := make([]*NodeHealth, 0, len(nodes))
 	for i := range nodes {
 		if nodes[i].Qualified {
@@ -541,6 +540,10 @@ func (s *Scorer) score(ctx context.Context) {
 		}
 	}
 	kTarget, supplyLimited := computeK(s.cfg.PoolSizing, len(qualifiedNodes))
+	minPool := s.cfg.PoolSizing.MinPoolSize
+	if minPool <= 0 {
+		minPool = 3
+	}
 
 	switch s.cfg.PoolMode {
 	case "manual":
@@ -614,45 +617,15 @@ func (s *Scorer) score(ctx context.Context) {
 		_ = emergencyMutated // surface via /api/pool/state; reload comes from poolChanged below
 
 	case "auto", "":
-		if kTarget == 0 {
-			// Legacy mode: qualified nodes in, unqualified out immediately.
-			// "Everyone in" was the original behavior, but it admitted nodes
-			// that are confirmed dead (fail_rate=1.0) and nodes with no probe
-			// history — violating the "only put usable nodes in pool" rule.
-			// probe_count=0 nodes stay qualified (benefit-of-doubt for EWMA
-			// ranking) but do NOT enter the routing pool until they have real
-			// measurements. Unqualified nodes (failed scoreNode) exit
-			// immediately regardless of EvictStrikes — a dead node should
-			// never carry traffic.
-			for i := range nodes {
-				st := s.state[nodes[i].Name]
-				if nodes[i].Qualified && nodes[i].ProbeCount > 0 {
-					newPoolSet[nodes[i].Name] = true
-					nodes[i].InPool = true
-					st.strikes = 0
-					st.okRuns++
-				} else if nodes[i].Qualified {
-					// probe_count=0: benefit-of-doubt qualified but no data yet.
-					// Keep in us-pool (mihomo probes it) but not in routing set.
-					st.okRuns = 0
-					st.strikes++
-				} else {
-					// Unqualified: out immediately, no hysteresis.
-					st.okRuns = 0
-					st.strikes++
-				}
-				nodes[i].Strikes = st.strikes
-				nodes[i].OkRounds = st.okRuns
-				st.health = nodes[i]
-			}
-		} else {
+		{
 			// K-gated mode. Two-window EWMA decisions:
 			//   - Sort qualified by LONG EWMA (24h half-life) → drives the
 			//     promote ranking. Conservative: a recently-recovered node
 			//     stays out until the long window forgets the bad period.
-			//   - Trial filter: nodes with <24h history can't be promoted
-			//     unless they're already in pool (don't rotate them out
-			//     solely because they're new).
+			//   - Trial filter: nodes with <24h history can't be promoted from
+			//     outside the pool — they need to prove stability first.
+			//     Already-in-pool trial nodes stay (rotating them out for
+			//     being new defeats the bootstrap path).
 			//   - Quarantine filter: nodes recently rolled-back stay out.
 			//   - Absolute swap threshold: promoting a non-pool candidate
 			//     over a current member requires the candidate's long
@@ -685,8 +658,7 @@ func (s *Scorer) score(ctx context.Context) {
 			// Absolute swap threshold: even when a non-pool candidate is
 			// in top-K by EWMA, we only promote if its long EWMA is
 			// SIGNIFICANTLY better than the worst current pool member's
-			// long EWMA. Default 0 = no extra gate (behave like before).
-			// Operator tunes via cfg.SwapThresholdScore.
+			// long EWMA. Default 0 = no extra gate.
 			swapThreshold := s.cfg.SwapThresholdScore
 			if swapThreshold > 0 {
 				worstInPoolEWMA := -math.Inf(1)
@@ -695,11 +667,9 @@ func (s *Scorer) score(ctx context.Context) {
 						worstInPoolEWMA = e
 					}
 				}
-				// Walk preferredSet, drop any "wants-in but not currently-in"
-				// member whose EWMA isn't worstInPool - threshold or better.
 				for name := range preferredSet {
 					if s.poolSet[name] {
-						continue // existing member, untouched by threshold
+						continue
 					}
 					if s.nodeLongEWMA(name)+swapThreshold > worstInPoolEWMA {
 						delete(preferredSet, name)
@@ -707,10 +677,8 @@ func (s *Scorer) score(ctx context.Context) {
 				}
 			}
 
-			// First-round bootstrap: pool is empty (or hasn't been K-gated
-			// before). Fill greedily from preferred so the data plane has a
-			// healthy us-pool immediately rather than waiting ReadmitStrikes
-			// rounds with an empty pool.
+			// First-round bootstrap: pool is empty. Fill greedily from
+			// preferred so the data plane has a healthy us-pool immediately.
 			bootstrap := len(s.poolSet) == 0
 
 			for i := range nodes {
@@ -727,41 +695,29 @@ func (s *Scorer) score(ctx context.Context) {
 						nodes[i].InPool = true
 					}
 				} else {
-					// Not in top-K (or not qualified): increment strikes.
+					// Not in top-K (or not qualified): exit immediately.
+					// No EvictStrikes hysteresis — ranking is the sole criterion.
+					// MinPoolSize safety net is applied in the post-pass below.
 					st.okRuns = 0
 					st.strikes++
-					// Unqualified nodes (failed the scoreNode gate) bypass
-					// hysteresis and exit the pool immediately — a node that
-					// can't pass the basic liveness check has no business
-					// carrying traffic regardless of how many strikes it has
-					// accumulated. Only ranking-demotion (wantInPool=false but
-					// Qualified=true) respects the EvictStrikes window.
-					qualifiedButDemoted := nodes[i].Qualified
-					if currentlyInPool && qualifiedButDemoted && st.strikes < s.cfg.EvictStrikes {
-						// Hysteresis: stay in pool until strikes reach evict bar.
-						newPoolSet[nodes[i].Name] = true
-						nodes[i].InPool = true
-					}
-					// else: out immediately (unqualified) or evicted (strikes >= bar)
 				}
 				nodes[i].Strikes = st.strikes
 				nodes[i].OkRounds = st.okRuns
 				st.health = nodes[i]
 			}
 
-			// Post-pass — enforce |pool| == kTarget exactly. Two cases:
+			// Post-pass — enforce |pool| == kTarget, with MinPoolSize as hard floor.
 			//
-			//   under: hysteresis blocked some preferred members from entering
-			//          on their first round; pool fell below K. Fill greedily
-			//          from preferred order so the data plane stays at capacity.
-			//   over:  hysteresis kept old members (strikes < EvictStrikes) AND
-			//          new preferred members entered (okRuns >= ReadmitStrikes);
-			//          their union exceeds K. Drop hysteresis-retained members
-			//          (those NOT in preferredSet this round) by score, worst
-			//          first. Preferred members are never dropped — they earned
-			//          their slots by ranking top-K.
+			//   under kTarget: readmit throttle blocked some preferred members;
+			//     fill greedily from preferredSet first, then (if still under
+			//     minPool) from all qualified nodes including trial nodes.
+			//   over kTarget: shouldn't happen with immediate eviction, but
+			//     guard anyway — drop worst non-preferred members.
 			if len(newPoolSet) < kTarget {
-				for i := 0; i < kTarget && i < len(qualifiedNodes); i++ {
+				for i := 0; i < len(qualifiedNodes); i++ {
+					if len(newPoolSet) >= kTarget {
+						break
+					}
 					name := qualifiedNodes[i].Name
 					if newPoolSet[name] {
 						continue
@@ -773,13 +729,40 @@ func (s *Scorer) score(ctx context.Context) {
 							break
 						}
 					}
-					if len(newPoolSet) >= kTarget {
-						break
+				}
+			}
+			// MinPoolSize safety net: if pool is still under floor, admit
+			// trial and quarantined nodes (best available, sorted by EWMA).
+			// Only Qualified nodes are eligible — catastrophic-fail nodes
+			// (Qualified=false) must never carry traffic.
+			if len(newPoolSet) < minPool {
+				type fallback struct {
+					name string
+					ewma float64
+				}
+				candidates := make([]fallback, 0, len(nodes))
+				for i := range nodes {
+					if nodes[i].Qualified && nodes[i].ProbeCount > 0 && !newPoolSet[nodes[i].Name] {
+						candidates = append(candidates, fallback{nodes[i].Name, s.nodeLongEWMA(nodes[i].Name)})
 					}
 				}
-			} else if len(newPoolSet) > kTarget {
-				// Build score map for nodes currently in newPoolSet that are NOT
-				// preferred this round (hysteresis stragglers, eligible for drop).
+				sort.Slice(candidates, func(i, j int) bool {
+					return candidates[i].ewma < candidates[j].ewma
+				})
+				for _, c := range candidates {
+					if len(newPoolSet) >= minPool {
+						break
+					}
+					newPoolSet[c.name] = true
+					for j := range nodes {
+						if nodes[j].Name == c.name {
+							nodes[j].InPool = true
+							break
+						}
+					}
+				}
+			}
+			if len(newPoolSet) > kTarget {
 				type drop struct {
 					name  string
 					score float64
@@ -794,12 +777,15 @@ func (s *Scorer) score(ctx context.Context) {
 						drops = append(drops, drop{name, scoreOf[name]})
 					}
 				}
-				// Worst score first (highest compositeScore = lowest quality).
 				sort.Slice(drops, func(i, j int) bool {
 					return drops[i].score > drops[j].score
 				})
 				for _, d := range drops {
 					if len(newPoolSet) <= kTarget {
+						break
+					}
+					// Never drop below minPool.
+					if len(newPoolSet) <= minPool {
 						break
 					}
 					delete(newPoolSet, d.name)
@@ -878,6 +864,18 @@ func (s *Scorer) score(ctx context.Context) {
 		lastPoolUpdate = s.snap.LastPoolUpdate
 	}
 
+	// routingPool = the nodes actually rendered into per-terminal HRW:
+	// top-K (newPoolSet) when K-gating active, else all qualified candidates.
+	var routingPool []string
+	if kTarget > 0 {
+		routingPool = setToSortedSlice(newPoolSet)
+	} else {
+		routingPool = make([]string, 0, len(qualifiedNodes))
+		for _, qn := range qualifiedNodes {
+			routingPool = append(routingPool, qn.Name)
+		}
+		sort.Strings(routingPool)
+	}
 	s.snap = Snapshot{
 		Qualified:      qualified,
 		Total:          len(nodes),
@@ -885,6 +883,8 @@ func (s *Scorer) score(ctx context.Context) {
 		LastScoredAt:   now,
 		Thresholds:     s.cfg,
 		Nodes:          nodes,
+		RoutingPool:    routingPool,
+		PoolMode:       s.cfg.PoolMode,
 		PoolSizing: PoolSizingSnapshot{
 			KTarget:       kTarget,
 			KCurrent:      len(newPoolSet),
@@ -961,10 +961,13 @@ func (s *Scorer) score(ctx context.Context) {
 		// When K-gating is disabled (kTarget=0), routingMembers=nil tells
 		// the renderer to fall back to us-pool for per-terminal slicing —
 		// legacy behavior (every us-pool member is a routing target).
-		usPoolAll := make([]string, 0, len(qualifiedNodes))
-		for _, qn := range qualifiedNodes {
-			usPoolAll = append(usPoolAll, qn.Name)
-		}
+		// usPoolAll = ALL pattern-matched candidates (not just qualifiedNodes).
+		// Mihomo probes every member of us-pool; keeping all candidates here
+		// ensures new/cold-start nodes accumulate probe history and can
+		// graduate to qualifiedNodes in future rounds. Narrowing to
+		// qualifiedNodes here caused a bootstrap deadlock: cold nodes never
+		// got probed → ProbeCount stayed 0 → never qualified → never re-added.
+		usPoolAll := append([]string(nil), candidates...)
 		sort.Strings(usPoolAll)
 		var routingMembers []string
 		if kTarget > 0 {

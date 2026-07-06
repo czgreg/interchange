@@ -50,6 +50,19 @@ const (
 	perTerminalGroupPrefix = "fb-"
 )
 
+// perTerminalMembers returns the routing-member pool used for per-terminal
+// HRW assignment. Both perTerminalSlices and perTerminalFallbackGroups must
+// call this so they always operate on the same set — if they diverge, rules
+// can reference fb-<ip> groups that were never emitted (or vice versa),
+// causing mihomo to reject the config with "proxy not found".
+func (r *Renderer) perTerminalMembers(outbounds []subscribe.Outbound) []string {
+	members := r.intersectWithPresent(r.routingMembers, outbounds)
+	if len(members) == 0 {
+		members = r.usPoolMembers(outbounds)
+	}
+	return members
+}
+
 // perTerminalSlices returns the `perterm` sub-rule body. Every host in the
 // client subnet maps to its dedicated fb-<ip> fallback group, and the
 // MATCH fallback at the end catches sources outside the subnet.
@@ -58,15 +71,19 @@ const (
 // with empty outbounds, or unconfigured perTerminal); the caller then
 // falls back to a single us-pool MATCH rule.
 func (r *Renderer) perTerminalSlices(outbounds []subscribe.Outbound) []string {
-	members := r.intersectWithPresent(r.routingMembers, outbounds)
-	if len(members) == 0 {
-		members = r.usPoolMembers(outbounds)
-	}
+	members := r.perTerminalMembers(outbounds)
 	if len(members) == 0 {
 		return nil
 	}
 	hosts := enumerateHosts(r.node.ClientSubnet, maxPerTerminalHosts)
 	if len(hosts) == 0 {
+		return nil
+	}
+	// Only emit fb-<ip> rules when we have enough members to form a fallback
+	// group (perTerminalFallbackDepth=2). With <2 members perTerminalFallbackGroups
+	// returns nil (no groups emitted), so the SRC-IP-CIDR rules would reference
+	// nonexistent groups and mihomo rejects the config.
+	if len(members) < perTerminalFallbackDepth {
 		return nil
 	}
 	rules := make([]string, 0, len(hosts)+1)
@@ -87,13 +104,12 @@ func (r *Renderer) perTerminalSlices(outbounds []subscribe.Outbound) []string {
 // it has active flows — keeps probe traffic proportional to actual
 // terminal activity rather than the static subnet size.
 func (r *Renderer) perTerminalFallbackGroups(outbounds []subscribe.Outbound, probeURL string, intervalSec int) []map[string]any {
-	members := r.intersectWithPresent(r.routingMembers, outbounds)
-	if len(members) == 0 {
-		members = r.usPoolMembers(outbounds)
-	}
-	if len(members) < 2 {
-		// Need at least 2 members to form a useful fallback chain.
-		// With <2, fallback adds no value vs. the single-target rule.
+	members := r.perTerminalMembers(outbounds)
+	if len(members) < perTerminalFallbackDepth {
+		// Need at least perTerminalFallbackDepth members to form a useful
+		// fallback chain. perTerminalSlices checks the same condition, so
+		// when this returns nil no SRC-IP-CIDR rules referencing fb-<ip>
+		// will have been emitted either.
 		return nil
 	}
 	hosts := enumerateHosts(r.node.ClientSubnet, maxPerTerminalHosts)

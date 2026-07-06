@@ -42,17 +42,17 @@ func newFetcher(timeout time.Duration, ua string) *fetcher {
 }
 
 // newFetcherWithProxy builds a fetcher that routes upstream HTTPS through
-// the given HTTP proxy URL. Production use: route through the local mihomo /
-// sing-box loopback HTTP inbound (LeapInternalProxyURL) so subscription
-// fetches don't try to dial fakeip-tainted upstream addresses returned by
-// the host's resolver. Without this, fetches to randomly-named airport
-// hostnames timeout against 198.18.x.x — caught in production 2026-06-05
-// when 3 of 5 subscriptions stopped pulling nodes.
+// the given HTTP proxy URL. Production use: route through the local mihomo
+// loopback HTTP inbound (LeapInternalProxyURL) so subscription fetches
+// egress through the pool instead of dialing overseas airport hostnames
+// directly into the GFW. Without this, fetches to those hostnames time out
+// — caught in production 2026-06-05 when 3 of 5 subscriptions stopped
+// pulling nodes.
 //
 // Transport-layer failures (proxy unreachable, dial timeout) automatically
-// fall back to direct dial inside leaphttp.NewClient — better to fetch via
-// fakeip-tainted resolver and risk one failure than to lock the operator
-// out of refresh entirely while the data plane is recovering. HTTP-status
+// fall back to direct dial inside leaphttp.NewClient — better to attempt a
+// direct fetch and risk one failure than to lock the operator out of
+// refresh entirely while the data plane is recovering. HTTP-status
 // errors (4xx/5xx) do NOT trigger fallback because the upstream answered
 // and a different egress path won't change its mind.
 //

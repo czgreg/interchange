@@ -48,10 +48,10 @@ func NewManagerWithFetch(entries []config.SubscriptionEntry, timeout time.Durati
 }
 
 // NewManagerWithFetchAndProxy is NewManagerWithFetch + proxyURL routing.
-// Production wires this with the local mihomo / sing-box loopback HTTP
-// inbound (LeapInternalProxyURL) so subscription fetches don't go through
-// the host's resolver — which under fakeip mode returns 198.18.x.x for any
-// non-CN domain, making direct dial fail. Caught in production 2026-06-05.
+// Production wires this with the local mihomo loopback HTTP inbound
+// (LeapInternalProxyURL) so subscription fetches egress through the pool
+// instead of dialing overseas subscription hosts directly into the GFW,
+// where they time out. Caught in production 2026-06-05.
 //
 // Empty proxyURL → direct OS network (used by tests + standalone CLIs).
 func NewManagerWithFetchAndProxy(entries []config.SubscriptionEntry, timeout time.Duration, ua, proxyURL string) *Manager {

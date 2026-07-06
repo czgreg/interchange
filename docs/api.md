@@ -310,7 +310,7 @@ override 不 sticky：NodeScorer 只管 us-pool 成员，不回写 selector 指�
 
 整体替换（PUT 语义，不是 PATCH）。body 同 GET 结构。
 
-`fake_ip_skip` 写法：`paigod.work` / `.paigod.work` / `+.paigod.work` 均可，统一规范化为 `+.` 前缀。
+`fake_ip_skip` 写法：`paigod.work` / `.paigod.work` / `+.paigod.work` 均可，统一规范化为 `+.` 前缀。列出的内网域名后缀会走国内 DoH 解析。
 
 `geosites` / `geoips` 中每个 tag 必须在 `/api/rule-sets` catalog 中；不在磁盘则按需从 MetaCubeX 拉取（.mrs），失败 502。
 

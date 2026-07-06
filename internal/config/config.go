@@ -286,8 +286,6 @@ type LoadBalanceConfig struct {
 type DNSConfig struct {
 	// Listen overrides the default <Tun0GatewayIP>:53. Useful in lab.
 	Listen string `yaml:"listen"`
-	// FakeIPRange is the IPv4 fake-IP pool. Default 198.18.0.0/15.
-	FakeIPRange string `yaml:"fakeip_range"`
 	// CNDoH is the upstream pool for CN-side resolution.
 	CNDoH []string `yaml:"cn_doh"`
 	// ProxyDoH is the upstream pool for non-CN resolution. Routed through
@@ -302,11 +300,12 @@ type DNSConfig struct {
 	// PreloadInterval is how often each preloaded domain is re-queried.
 	// Default 5m. 0 disables preload (regardless of PreloadDomains).
 	PreloadInterval time.Duration `yaml:"preload_interval,omitempty"`
-	// FakeIPSkipSuffixes lists domain suffixes that must NOT receive a
-	// fake-IP. Required for internal/private services whose hostnames
-	// are not on geosite-cn but resolve to CN/LAN IPs that should be
-	// reached DIRECTly. Without this, mihomo's fake-ip mode hands out
-	// 198.18.x.x and DIRECT outbound dials the unreachable fake IP.
+	// FakeIPSkipSuffixes lists intranet/private domain suffixes that must
+	// resolve via CN DoH (they land in nameserver-policy → CNDoH). Needed
+	// for services whose hostnames aren't on geosite-cn but resolve to
+	// CN/LAN IPs reached DIRECTly — the default nameserver is proxyDoH
+	// (overseas), which has no records for them. Name kept for yaml/API
+	// back-compat; predates the 2026-07-06 redir-host switch.
 	FakeIPSkipSuffixes []string `yaml:"fake_ip_skip_suffixes,omitempty"`
 }
 
@@ -543,9 +542,10 @@ type NodeQualifyConfig struct {
 // PoolSizingConfig controls dynamic K computation. See NodeQualifyConfig.PoolSizing.
 type PoolSizingConfig struct {
 	// TActive is the operator-supplied 7-day distinct active terminal
-	// count. 0 disables K-gating entirely (legacy: every qualified
-	// candidate enters us-pool). Set this from FeiLian's accounting / DHCP
-	// data; recompute weekly, ignore daily fluctuations.
+	// count. Used to compute K (pool target size). Set this from FeiLian's
+	// accounting / DHCP data; recompute weekly, ignore daily fluctuations.
+	// Default 50. Previously, TActive=0 triggered legacy "all qualified
+	// nodes in pool" behavior — that mode is removed; K-gating is always on.
 	TActive int `yaml:"t_active"`
 	// CapPerNode is the per-egress sustained terminal capacity. Operator-
 	// tuned per subscription tier; default 10 (conservative — fishcloud
@@ -555,7 +555,7 @@ type PoolSizingConfig struct {
 	// Surge is the peak/avg ratio. Default 1.5 (evening peak ~1.5× the
 	// daytime mean). Drives the K_demand calculation.
 	Surge float64 `yaml:"surge"`
-	// KMin is the absolute floor on K (independent of T). Default 2 — even
+	// KMin is the absolute floor on K (independent of T). Default 3 — even
 	// for tiny terminal counts, we want some redundancy so a single node
 	// failure doesn't strand all flows.
 	KMin int `yaml:"k_min"`
@@ -565,6 +565,11 @@ type PoolSizingConfig struct {
 	// matters more than absolute count, but a low ceiling further reduces
 	// the surface for IP cataloging.
 	KMax int `yaml:"k_max"`
+	// MinPoolSize is the hard lower bound on routing pool size. When the
+	// pool would fall below this (due to evictions or insufficient qualified
+	// nodes), the scorer fills with the best available nodes including
+	// cold-start (trial) nodes. Default 3.
+	MinPoolSize int `yaml:"min_pool_size"`
 }
 
 // ProbeConfig is one site-specific reachability check. Probes are NOT
@@ -738,9 +743,6 @@ func (c *DataPlaneConfig) ApplyDefaults() {
 	}
 
 	// DNS defaults.
-	if c.DNS.FakeIPRange == "" {
-		c.DNS.FakeIPRange = "198.18.0.0/15"
-	}
 	if len(c.DNS.CNDoH) == 0 {
 		c.DNS.CNDoH = []string{
 			"https://doh.pub/dns-query",
@@ -852,9 +854,13 @@ func (c *NodeQualifyConfig) applyDefaults() {
 	}
 }
 
-// applyDefaults fills PoolSizingConfig defaults. TActive=0 keeps the legacy
-// "every qualified candidate in pool" behavior — opt-in by setting TActive>0.
+// applyDefaults fills PoolSizingConfig defaults. K-gating is always on;
+// TActive=0 in yaml gets the default of 50 (a reasonable starting point
+// — operator should tune to their actual terminal count).
 func (p *PoolSizingConfig) applyDefaults() {
+	if p.TActive == 0 {
+		p.TActive = 50
+	}
 	if p.CapPerNode == 0 {
 		p.CapPerNode = 10
 	}
@@ -862,9 +868,12 @@ func (p *PoolSizingConfig) applyDefaults() {
 		p.Surge = 1.5
 	}
 	if p.KMin == 0 {
-		p.KMin = 2
+		p.KMin = 3
 	}
 	if p.KMax == 0 {
 		p.KMax = 12
+	}
+	if p.MinPoolSize == 0 {
+		p.MinPoolSize = 3
 	}
 }

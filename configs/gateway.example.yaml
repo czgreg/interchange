@@ -69,11 +69,11 @@ data_plane:
     # (data_plane.tproxy_port), not gvisor. Stack choice only affects CPU.
     stack: "system"
 
-  # mihomo's DNS server. fakeip is enabled by the renderer; cn_doh handles
-  # CN domains (geosite-cn / nameserver-policy hits), proxy_doh handles
-  # everything else (routed via us-pool).
+  # mihomo's DNS server. enhanced-mode 为 redir-host（真实 IP），不再
+  # 全局劫持。cn_doh 处理 CN 域名（geosite-cn / nameserver-policy 命中）、
+  # 内网后缀（fake_ip_skip_suffixes），proxy_doh 处理海外域名（经 us-pool
+  # 解析，绕过 GFW 污染）。
   dns:
-    fakeip_range: "198.18.0.0/15"
     cn_doh:
       - "https://doh.pub/dns-query"
       - "https://dns.alidns.com/dns-query"
@@ -82,10 +82,9 @@ data_plane:
       - "https://doh.pub/dns-query"
     bootstrap_resolver: "udp://119.29.29.29"
 
-    # DNS preload — leap-gateway 周期性 resolve 这里列的域名，把对应 A 记
-    # 录灌进 mihomo 的 DNS 缓存（store-fake-ip 跨 hot-reload 持久化）。员
-    # 工首次访问这些域名时不再付 ~400ms 跨境 DoH 冷查询的代价。条目不
-    # 要过多（20 以内）。空列表 = 关闭。
+    # DNS preload — leap-gateway 周期性 resolve 这里列的域名，把对应真实
+    # IP 灌进 mihomo 的 DNS 缓存。员工首次访问这些域名时不再付 ~400ms
+    # 跨境 DoH 冷查询的代价。条目不要过多（20 以内）。空列表 = 关闭。
     preload_domains:
       - claude.ai
       - anthropic.com
@@ -98,9 +97,11 @@ data_plane:
       - perplexity.ai
     preload_interval: 5m
 
-    # 内网/私有域名：mihomo 不发 fakeip，让 DIRECT 出站拿真实 IP。没这条
-    # 的话 ai.paigod.work 这种内网服务会拿到 198.18.x.x 然后超时（生产
-    # 2026-06-05 现场修过）。任意写法被 normalizer 转成 "+." 前缀。
+    # 内网/私有域名后缀：写入 nameserver-policy → CN DoH，确保内网域名
+    # 走国内解析（默认 nameserver 是 proxy_doh，查不到内网记录）。
+    # 2026-07-06 起不再需要排除 fake-ip（改 redir-host 后所有域名本就
+    # 拿真实 IP），也不再需要加节点服务器域名（quandao.com 等自动真实
+    # IP）。任意写法被 normalizer 转成 "+." 前缀。
     fake_ip_skip_suffixes: []
 
   # Route classification (geosite-cn / geoip-cn for CN-direct, whitelist
@@ -222,8 +223,8 @@ node_qualify:
       timeout:  10s
       check:
         max_status: 399
-    - name: api.github.com
-      url:  https://api.github.com/
+    - name: github
+      url:  https://github.com/favicon.ico
       interval: 5m
       timeout:  10s
       check:

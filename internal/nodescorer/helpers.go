@@ -159,21 +159,18 @@ func compositeScore(h NodeHealth) float64 {
 }
 
 // computeK returns the target us-pool size from the operator's pool-sizing
-// config and the current Tier-1 supply. Returns (0, false) when TActive=0
-// (K-gating disabled — legacy "everyone in pool" behavior preserved).
+// config and the current Tier-1 supply. K-gating is always on (legacy
+// TActive=0 mode is removed; applyDefaults ensures TActive >= 1).
 //
 //	K = clamp(
 //	  ⌈T × surge / cap⌉,                                 // K_demand
-//	  max(KMin, ⌈T / (cap × 1.5)⌉ + 1),                  // K_min(T) — failure resilience
+//	  max(KMin, MinPoolSize, ⌈T / (cap × 1.5)⌉ + 1),     // K_min(T) — failure resilience
 //	  min(KMax, qualifiedCount),                          // supply ceiling
 //	)
 //
 // supplyLimited is true when |Tier1| was the binding ceiling — used by
 // /api/status to surface "want K=N, have only M trusted" advisories.
 func computeK(p config.PoolSizingConfig, qualifiedCount int) (k int, supplyLimited bool) {
-	if p.TActive <= 0 {
-		return 0, false
-	}
 	cap := p.CapPerNode
 	if cap <= 0 {
 		cap = 10
@@ -184,17 +181,24 @@ func computeK(p config.PoolSizingConfig, qualifiedCount int) (k int, supplyLimit
 	}
 	kMin := p.KMin
 	if kMin <= 0 {
-		kMin = 2
+		kMin = 3
+	}
+	if p.MinPoolSize > kMin {
+		kMin = p.MinPoolSize
 	}
 	kMax := p.KMax
 	if kMax <= 0 {
 		kMax = 12
 	}
+	tActive := p.TActive
+	if tActive <= 0 {
+		tActive = 50
+	}
 
-	kDemand := int(math.Ceil(float64(p.TActive) * surge / float64(cap)))
+	kDemand := int(math.Ceil(float64(tActive) * surge / float64(cap)))
 	// K_min(T) — survive 1-node failure with 1.5× surge headroom on
 	// remaining members. Ensures T/(K-1) ≤ cap × 1.5 → K ≥ T/(cap×1.5) + 1.
-	kFloor := int(math.Ceil(float64(p.TActive)/(float64(cap)*1.5))) + 1
+	kFloor := int(math.Ceil(float64(tActive)/(float64(cap)*1.5))) + 1
 	if kFloor < kMin {
 		kFloor = kMin
 	}

@@ -69,9 +69,9 @@ func main() {
 	}
 
 	// Wire fetcher through mihomo's loopback HTTP inbound so subscription
-	// fetches bypass the host resolver (fakeip mode hands out 198.18.x.x
-	// for non-CN domains; direct dial fails). mihomo answers DNS via
-	// cn-doh and routes the CONNECT correctly.
+	// fetches egress through the pool instead of dialing overseas hosts
+	// directly into the GFW (where they time out). mihomo resolves the
+	// host and routes the CONNECT correctly.
 	mgr := subscribe.NewManagerWithFetchAndProxy(
 		cfg.Subscriptions, cfg.Subscribe.HTTPTimeout, cfg.Subscribe.UserAgent,
 		dataplane.LeapInternalProxyURL)
@@ -123,7 +123,7 @@ func main() {
 	// helper binary on disk.
 	//
 	// WithProxy routes the .srs / domain-list fetches through mihomo's
-	// loopback HTTP inbound, avoiding host-resolver fakeip pollution
+	// loopback HTTP inbound so they egress past the GFW
 	// (see internal/leaphttp). Direct fallback handles the bootstrap
 	// window before mihomo is ready.
 	const singboxCLI = "/usr/local/bin/sing-box"

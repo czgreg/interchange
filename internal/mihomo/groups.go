@@ -110,6 +110,16 @@ func (r *Renderer) buildProxyGroups(outbounds []subscribe.Outbound) []map[string
 		},
 	}
 
+	// Build a presence set for all currently-available node tags. Used below
+	// to filter stale poolMembers entries: nodescorer writes poolMembers
+	// asynchronously; if a subscription is deleted between two scorer rounds,
+	// poolMembers may still name nodes that are no longer in proxies:, causing
+	// mihomo to reject the config with 400 "proxy not found".
+	tagSet := make(map[string]bool, len(tags))
+	for _, t := range tags {
+		tagSet[t] = true
+	}
+
 	// Named pools (openai-pool etc.) — one load-balance group each.
 	// Members come from r.poolMembers[name] (us-pool ∩ passing that pool's
 	// probes, set by nodescorer); absent → fall back to the full us-pool
@@ -117,7 +127,18 @@ func (r *Renderer) buildProxyGroups(outbounds []subscribe.Outbound) []map[string
 	for _, p := range r.pools {
 		members := pool
 		if m, ok := r.poolMembers[p.Name]; ok {
-			members = m
+			// Intersect with current outbounds to drop any nodes that no
+			// longer exist (deleted subscription). mihomo validates that
+			// every name in a group's proxies: is present in proxies:.
+			filtered := make([]string, 0, len(m))
+			for _, tag := range m {
+				if tagSet[tag] {
+					filtered = append(filtered, tag)
+				}
+			}
+			if len(filtered) > 0 {
+				members = filtered
+			}
 		}
 		if len(members) == 0 {
 			// No qualified members yet — fall back to full us-pool so the

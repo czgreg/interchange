@@ -87,7 +87,7 @@ type Expander struct {
 	// the active rule-sets dir holds .mrs files that sing-box CLI can't
 	// decompile. srsHTTPClient routes the fetch through the local proxy
 	// engine's HTTP inbound (via leaphttp's proxy-or-direct fallback) so
-	// fakeip resolver pollution doesn't poison the upstream connect.
+	// the upstream connect egresses through the pool, not direct into the GFW.
 	srsCacheDir   string
 	srsHTTPClient *http.Client
 
@@ -117,11 +117,10 @@ func New(cachePath string) *Expander {
 // HTTP from this expander — the v2fly domain fetcher AND the on-demand
 // .srs cache fetcher.
 //
-// Without this, the expander's `&http.Client{}` dials directly through
-// the host's resolver, which mihomo's fakeip mode pollutes; result is
-// indefinite timeouts on every category fetch (caught in production
-// 2026-06-06 — domain count silently dropped from 2400+ to 6 = literals
-// only).
+// Without this, the expander's `&http.Client{}` dials the overseas source
+// directly into the GFW; result is indefinite timeouts on every category
+// fetch (caught in production 2026-06-06 — domain count silently dropped
+// from 2400+ to 6 = literals only).
 //
 // The returned client falls back to direct dial if the proxy is
 // unreachable, so the bootstrap window (mihomo not yet up) and data-
@@ -152,10 +151,9 @@ func (e *Expander) WithRuleSets(dir, singboxBin string) *Expander {
 // .srs cache at cacheDir, fetching from MetaCubeX /sing/ branch on demand.
 //
 // Pair with WithProxy(...) to route the fetch through the local proxy
-// engine's loopback inbound (avoids fakeip resolver pollution). When
-// WithProxy hasn't been called the srs fetcher dials direct — which
-// usually fails under mihomo for the same fakeip reason; deliberate
-// caller responsibility, not silently swallowed.
+// engine's loopback inbound (egresses through the pool). When WithProxy
+// hasn't been called the srs fetcher dials direct — which usually fails
+// against the GFW; deliberate caller responsibility, not silently swallowed.
 func (e *Expander) WithMihomoSrsCache(cacheDir string) *Expander {
 	e.srsCacheDir = cacheDir
 	e.srsHTTPClient = leaphttp.NewClient(e.proxyURL, httpTimeout, "whitelistexpand-srs")
@@ -457,8 +455,8 @@ func (e *Expander) decompileGeoip(tag string) ([]string, error) {
 // fetchSrsToCache downloads <tag>.srs from MetaCubeX /sing/ branch into
 // dest. Used by decompileGeoip under mihomo mode where the engine's
 // rule-sets dir only has .mrs. Tries the proxy client first (routes
-// through the local data plane to bypass fakeip resolver pollution),
-// falls back to direct on connection error.
+// through the local data plane to egress past the GFW), falls back to
+// direct on connection error.
 func (e *Expander) fetchSrsToCache(tag, dest string) error {
 	if e.srsHTTPClient == nil {
 		return fmt.Errorf("srs cache not configured (call WithMihomoSrsCache)")

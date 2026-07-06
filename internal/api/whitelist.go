@@ -23,12 +23,13 @@ import (
 //   - IPCIDR: CIDR or bare IP literals; bare IPs normalized to /32 or /128.
 //
 // DNS side:
-//   - FakeIPSkip: domains that must not receive a fakeip from the engine's
-//     DNS server. Required for internal services whose hostnames resolve to
-//     CN/LAN IPs but aren't on geosite-cn (paigod.work, feilian.cn, …).
-//     Accepted formats: "+.example.com" / ".example.com" / "example.com"
-//     — all normalised to "+." prefix. Synced to
-//     cfg.DataPlane.DNS.FakeIPSkipSuffixes on every successful PUT.
+//   - FakeIPSkip: intranet domain suffixes routed to CN DoH via
+//     nameserver-policy. Required for internal services whose hostnames
+//     resolve to CN/LAN IPs but aren't on geosite-cn (paigod.work,
+//     feilian.cn, …) — the default nameserver is proxyDoH (overseas),
+//     which has no records for them. Accepted formats: "+.example.com" /
+//     ".example.com" / "example.com" — all normalised to "+." prefix.
+//     Synced to cfg.DataPlane.DNS.FakeIPSkipSuffixes on every successful PUT.
 type whitelistDTO struct {
 	Mode         string   `json:"mode"`
 	Geosites     []string `json:"geosites"`
@@ -316,7 +317,7 @@ func (s *Server) rerenderAndReload(ctx context.Context) error {
 	wl := s.deps.Cfg.DataPlane.Route.Whitelist
 	s.deps.Renderer.SetWhitelist(s.deps.Cfg.DataPlane.Route.Mode, wl)
 	// Sync fake_ip_skip to the renderer's DNS config layer so the updated
-	// fake-ip-filter is emitted without requiring a full config reload.
+	// nameserver-policy is emitted without requiring a full config reload.
 	s.deps.Renderer.SetFakeIPSkip(s.deps.Cfg.DataPlane.DNS.FakeIPSkipSuffixes)
 	out := s.deps.Subscribe.AllOutbounds()
 	if _, err := s.deps.Renderer.Write(out); err != nil {

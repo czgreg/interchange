@@ -1,12 +1,39 @@
 // dns.go — mihomo DNS block.
 //
+// enhanced-mode: redir-host (real IPs, no fake-ip).
+//
+//   Every domain resolves to its real address. Routing does NOT depend
+//   on DNS: mihomo's sniffer (see sniffer.go) extracts the domain from
+//   TLS SNI / HTTP Host / QUIC ALPN — including from pure-IP flows via
+//   parse-pure-ip — and geosite rule-sets classify from that. The DNS
+//   answer's IP is never the routing key, so returning the real IP costs
+//   nothing in routing correctness.
+//
+//   We ran fake-ip until 2026-07-06. It was a global default-hijack model
+//   (every domain gets a 198.18.x.x unless carved out in fake-ip-filter)
+//   and its two theoretical wins don't apply here:
+//     - consistent-hash key stability under load-balance — N/A, we route
+//       per-terminal (single node per SRC-IP), not by dst-IP hash.
+//     - DNS-poison defense — already covered: proxied domains resolve via
+//       proxyDoH through the overseas pool, never the pollutable CN path;
+//       and TPROXY forces all client DNS through us, so the sniffer path
+//       (not fake-ip back-mapping) is what actually carries routing.
+//   Its recurring cost was real: any hostname not in fake-ip-filter got a
+//   198.18.x.x and then timed out on DIRECT/probe dial. Bit intranet
+//   services (ai.paigod.work, 2026-06-05) and, when a subscription
+//   provider's node domain was missed, silently killed node health probes
+//   — every node alive=False because mihomo dialed the fake IP
+//   (11us.quandao.com, 2026-07-06). redir-host removes that failure mode
+//   entirely: node server domains and intranet hosts resolve to real IPs
+//   with zero per-provider maintenance.
+//
 // Schema:
-//   - enhanced-mode: fake-ip (global; carve-outs via fake-ip-filter).
 //   - default-nameserver: bare-IP UDP, used to bootstrap-resolve the DoH
 //     hostnames in nameserver / nameserver-policy themselves.
 //   - nameserver:        proxy DoH — default for everything not matched
 //                        by nameserver-policy. Routed through us-pool by
-//                        mihomo's outbound dispatch.
+//                        mihomo's outbound dispatch. Overseas domains
+//                        resolve through the proxy, dodging CN poisoning.
 //   - nameserver-policy: domain-keyed routing. CN domains and intranet
 //                        skip-suffixes resolve direct via CN DoH; this
 //                        short-circuits the parallel-fallback pattern
@@ -14,16 +41,6 @@
 //   - proxy-server-nameserver: airport-node hostname resolution. Always
 //                        CN DoH so we don't recurse through the proxy
 //                        we're trying to set up.
-//   - fake-ip-filter:    domains that must NEVER receive a fake IP.
-//                        Defaults cover .lan / .local / .cn / qq edge.
-//                        Operators extend via cfg.DNS.FakeIPSkipSuffixes
-//                        for internal services whose hostnames aren't on
-//                        geosite-cn but resolve to CN/LAN IPs that need
-//                        DIRECT reachability (paigod.work, feilian.cn,
-//                        etc.). Without those skip entries, mihomo's
-//                        fakeip mode hands out 198.18.x.x for them and
-//                        DIRECT dials the unreachable fake IP — caught
-//                        in production 2026-06-05 (ai.paigod.work).
 //
 // Why no fallback-filter:
 //   The earlier setup used `nameserver: cnDoH; fallback: proxyDoH;
@@ -35,13 +52,12 @@
 //   under typical CN-heavy workload, plus deterministic single-RTT
 //   resolution.
 //
-// Why fake-ip-skip suffixes also appear in nameserver-policy:
-//   Skip-suffixes (paigod.work, feilian.cn, ...) MUST resolve via CN
-//   DoH. They land in fake-ip-filter so mihomo doesn't fakeip them, but
-//   the resolution itself flows through the nameserver chain — and the
-//   default nameserver is proxyDoH (overseas), which won't have records
-//   for intranet domains. Mirroring the suffix list into nameserver-
-//   policy points each one explicitly at CN DoH.
+// FakeIPSkipSuffixes (cfg.DNS) is retained but now feeds ONLY
+// nameserver-policy: intranet suffixes (paigod.work, feilian.cn, ...)
+// must resolve via CN DoH, because the default nameserver is proxyDoH
+// (overseas) which has no records for intranet domains. Under fake-ip
+// these suffixes also had to be listed in fake-ip-filter; under
+// redir-host that carve-out is unnecessary — nothing is hijacked.
 
 package mihomo
 
@@ -62,12 +78,10 @@ func (r *Renderer) buildDNS() map[string]any {
 	dns := map[string]any{
 		"enable":                  true,
 		"ipv6":                    false,
-		"enhanced-mode":           "fake-ip",
-		"fake-ip-range":           defaultIfEmpty(r.cfg.DNS.FakeIPRange, "198.18.0.0/15"),
+		"enhanced-mode":           "redir-host",
 		"default-nameserver":      []string{stripScheme(bootstrap)},
 		"nameserver":              proxyDoH,
 		"nameserver-policy":       buildNameserverPolicy(cnDoH, r.cfg.DNS.FakeIPSkipSuffixes),
-		"fake-ip-filter":          fakeIPFilter(r.cfg.DNS.FakeIPSkipSuffixes),
 		"proxy-server-nameserver": cnDoH,
 	}
 
@@ -107,8 +121,8 @@ func buildNameserverPolicy(cnDoH, fakeIPSkip []string) map[string]any {
 }
 
 // normalizePolicySuffix accepts ".paigod.work", "paigod.work", or
-// "+.paigod.work" and returns "+.paigod.work". Same shape as
-// fakeIPFilter's normalization so the two stay in lockstep.
+// "+.paigod.work" and returns "+.paigod.work" — the wildcard form
+// mihomo's nameserver-policy keys expect.
 func normalizePolicySuffix(s string) string {
 	if len(s) == 0 {
 		return ""
@@ -132,41 +146,4 @@ func stripScheme(s string) string {
 		}
 	}
 	return s
-}
-
-// fakeIPFilter returns the merged "+.<suffix>" list emitted into
-// dns.fake-ip-filter. Defaults (lan/local/cn + qq edge) are always
-// included; operator-supplied extras are normalized to "+." prefix and
-// appended in stable order. Duplicate suffixes are collapsed.
-func fakeIPFilter(extra []string) []string {
-	defaults := []string{
-		"+.lan",
-		"+.local",
-		"+.cn",
-		"localhost.ptlogin2.qq.com",
-	}
-	seen := make(map[string]bool, len(defaults)+len(extra))
-	out := make([]string, 0, len(defaults)+len(extra))
-	for _, d := range defaults {
-		if !seen[d] {
-			seen[d] = true
-			out = append(out, d)
-		}
-	}
-	for _, raw := range extra {
-		s := raw
-		if len(s) == 0 {
-			continue
-		}
-		if s[0] == '.' {
-			s = "+" + s
-		} else if len(s) < 2 || s[:2] != "+." {
-			s = "+." + s
-		}
-		if !seen[s] {
-			seen[s] = true
-			out = append(out, s)
-		}
-	}
-	return out
 }

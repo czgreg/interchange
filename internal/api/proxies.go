@@ -36,15 +36,16 @@ type leapDTO struct {
 }
 
 type activeProxyDTO struct {
-	Now           string          `json:"now"`            // currently-selected airport node tag inside the active pool (mirrors pool.now)
-	DelayMs       int             `json:"delay_ms"`       // mirrors active pool's selected node's last delay
-	LastCheck     string          `json:"last_check,omitempty"`
-	PoolSize      int             `json:"pool_size"` // size of the active load-balance pool
-	PoolFilter    string          `json:"pool_filter,omitempty"`
-	HistoryLen    int             `json:"history_len"`
-	Reachable     bool            `json:"reachable"`      // whether clash-api responded
-	ActiveURLTest string          `json:"active_urltest"` // mihomo: "us-pool" (kept name for backward compat with dashboard scrapers)
-	Pools         []poolStatusDTO `json:"pools,omitempty"`
+	Now         string          `json:"now"`         // currently-selected node tag inside the active pool
+	DelayMs     int             `json:"delay_ms"`    // active pool's selected node's last delay
+	LastCheck   string          `json:"last_check,omitempty"`
+	PoolSize    int             `json:"pool_size"`   // size of the routing pool (top-K nodes)
+	PoolFilter  string          `json:"pool_filter,omitempty"`
+	Reachable   bool            `json:"reachable"`   // whether clash-api responded
+	ActiveGroup string          `json:"active_group"` // which group "out" selector currently points at
+	PoolMode    string          `json:"pool_mode,omitempty"`   // "auto" | "manual"
+	LastSwapAt  string          `json:"last_swap_at,omitempty"` // last time pool membership changed
+	Pools       []poolStatusDTO `json:"pools,omitempty"`
 }
 
 type poolStatusDTO struct {
@@ -65,9 +66,10 @@ type poolStatusDTO struct {
 }
 
 type nodeStatusDTO struct {
-	Tag       string `json:"tag"`
-	DelayMs   int    `json:"delay_ms"`              // 0 if no measurement available
-	LastCheck string `json:"last_check,omitempty"` // RFC3339 timestamp from clash-api
+	Tag       string  `json:"tag"`
+	DelayMs   int     `json:"delay_ms"`             // 0 if no measurement available
+	LastCheck string  `json:"last_check,omitempty"` // RFC3339 timestamp from clash-api
+	FailRate  float64 `json:"fail_rate"`            // from NodeScorer; -1 if scorer unavailable
 }
 
 func (s *Server) handleProxiesActive(w http.ResponseWriter, r *http.Request) {
@@ -138,31 +140,56 @@ func (s *Server) queryActiveProxy(ctx context.Context) activeProxyDTO {
 		return activeProxyDTO{PoolFilter: pf}
 	}
 	dto := activeProxyDTO{
-		PoolFilter:    pf,
-		Reachable:     true,
-		ActiveURLTest: out.Now,
+		PoolFilter:  pf,
+		Reachable:   true,
+		ActiveGroup: out.Now,
 	}
+
+	// Build fail_rate index and routing pool set from scorer snapshot.
+	failRates := map[string]float64{}
+	routingSet := map[string]bool{}
+	var poolMode string
+	var lastSwapAt string
+	if s.deps.NodeScorer != nil {
+		snap := s.deps.NodeScorer.GetSnapshot()
+		poolMode = snap.PoolMode
+		for _, nh := range snap.Nodes {
+			failRates[nh.Name] = nh.FailRate
+		}
+		for _, tag := range snap.RoutingPool {
+			routingSet[tag] = true
+		}
+		if !snap.LastPoolUpdate.IsZero() {
+			lastSwapAt = snap.LastPoolUpdate.UTC().Format(time.RFC3339)
+		}
+	}
+	dto.PoolMode = poolMode
+	dto.LastSwapAt = lastSwapAt
 
 	for _, name := range out.All {
 		pool, ok := bulk.Proxies[name]
 		if !ok {
 			continue
 		}
-		// mihomo's us-pool is type LoadBalance. Skip leaf nodes / DIRECT
-		// / REJECT / Selector children — those have other types.
 		if pool.Type != "LoadBalance" {
 			continue
 		}
 		ps := poolStatusDTO{
-			Tag:      name,
-			Now:      pool.Now,
-			PoolSize: len(pool.All),
-			Active:   name == out.Now,
+			Tag:    name,
+			Now:    pool.Now,
+			Active: name == out.Now,
 		}
-		// Per-member delay from each node's own history.
+
+		// Filter to routing pool members when scorer is active.
 		ps.Nodes = make([]nodeStatusDTO, 0, len(pool.All))
 		for _, member := range pool.All {
-			n := nodeStatusDTO{Tag: member}
+			if len(routingSet) > 0 && !routingSet[member] {
+				continue
+			}
+			n := nodeStatusDTO{Tag: member, FailRate: -1}
+			if fr, ok := failRates[member]; ok {
+				n.FailRate = fr
+			}
 			if mp, ok := bulk.Proxies[member]; ok && len(mp.History) > 0 {
 				h := mp.History[len(mp.History)-1]
 				n.DelayMs = h.Delay
@@ -170,17 +197,15 @@ func (s *Server) queryActiveProxy(ctx context.Context) activeProxyDTO {
 			}
 			ps.Nodes = append(ps.Nodes, n)
 		}
-		// Egress probe — through the leap-internal HTTP proxy. mihomo
-		// routes 11080 through "out → us-pool", so the IP we sample is
-		// the pool's egress IP. Cached 60s by egressCache.
+		ps.PoolSize = len(ps.Nodes)
+
 		if ps.Active {
 			ps.Egress = s.egress.GetOrRefresh(name, dataplane.LeapInternalProxyURL, pool.Now)
 		}
 		dto.Pools = append(dto.Pools, ps)
 		if ps.Active {
 			dto.Now = pool.Now
-			dto.PoolSize = len(pool.All)
-			dto.HistoryLen = len(pool.History)
+			dto.PoolSize = ps.PoolSize
 			if n := len(pool.History); n > 0 {
 				last := pool.History[n-1]
 				dto.DelayMs = last.Delay
@@ -189,9 +214,6 @@ func (s *Server) queryActiveProxy(ctx context.Context) activeProxyDTO {
 		}
 	}
 
-	// Edge case: "out" points at "DIRECT" or "pin" (Selector type, filtered
-	// out above) — Now stays "", PoolSize 0, ActiveURLTest reflects what was
-	// selected.
 	return dto
 }
 

@@ -1,27 +1,29 @@
 // Package leaphttp is the canonical HTTP-client factory for any leap-gateway
-// outbound that talks to a host subject to mihomo's enhanced-mode fake-IP
-// pollution (i.e. anything overseas — anything not on 127.0.0.0/8, the
+// outbound that talks to an OVERSEAS host (anything not on 127.0.0.0/8, the
 // 10.8.x.x FeiLian client subnet, or other LAN ranges).
 //
 // # Why this package exists
 //
-// leap-gateway runs co-located with the mihomo data plane.
-// Mihomo's fake-IP DNS rewrites every overseas A/AAAA answer to 198.18.x.x
-// at the HOST RESOLVER level. A direct `net.Dial` from inside leap-gateway
-// — running as the same user, sharing the same /etc/resolv.conf — to a
-// host like raw.githubusercontent.com sees that fake IP and routes it
-// through the host's main interface, where nothing is listening. Result:
-// indefinite timeout. This was the root cause of the subscribe-fetcher
-// outage memo'd as feilian-forwarding-node-quirks pitfall #6, and again
-// of the whitelistexpand 6-domain bug caught 2026-06-06.
+// leap-gateway runs co-located with the mihomo data plane. A direct
+// `net.Dial` to an overseas host like raw.githubusercontent.com egresses
+// through the host's main interface — straight into the GFW, where the
+// connection is reset or blackholed. Result: indefinite timeout. This was
+// the root cause of the subscribe-fetcher outage memo'd as
+// feilian-forwarding-node-quirks pitfall #6, and again of the
+// whitelistexpand 6-domain bug caught 2026-06-06.
+//
+// (Under the former fake-ip DNS mode this bit harder: the host resolver
+// handed back 198.18.x.x for overseas names and the direct dial went
+// nowhere. Since the 2026-07-06 redir-host switch the resolver returns a
+// real IP, but a direct dial still hits the GFW — routing through the
+// pool is required either way.)
 //
 // # The pattern
 //
 // Dial THROUGH the loopback HTTP proxy mihomo exposes
-// (singbox.LeapInternalProxyURL = http://127.0.0.1:11080). Mihomo's own
-// DNS handles fake→real translation correctly because it can map the
-// fake IP back to the original SNI/Host. Then the proxy egresses through
-// us-pool to a real overseas peer.
+// (LeapInternalProxyURL = http://127.0.0.1:11080). Mihomo resolves the
+// host via its own DNS and egresses through us-pool to a real overseas
+// peer, past the GFW.
 //
 // Two failure modes argue for "proxy with direct fallback", not "proxy
 // only":
@@ -39,11 +41,10 @@
 // # The rule
 //
 // Anything in this codebase that does `&http.Client{}` for an OVERSEAS
-// host is a bug — it'll work intermittently (when fake-IP doesn't cover
-// that host) and break catastrophically when it does. **Use NewClient
-// always.** The only allowed exception is loopback-only HTTP (clash-api
-// on 127.0.0.1:9090, leap-internal HTTP inbounds on 127.0.0.1:1108x):
-// no fakeip risk there, no fallback complication.
+// host is a bug — the direct dial hits the GFW and times out. **Use
+// NewClient always.** The only allowed exception is loopback-only HTTP
+// (clash-api on 127.0.0.1:9090, leap-internal HTTP inbounds on
+// 127.0.0.1:1108x): local, no need to egress through the pool.
 //
 // # Body rewinding
 //

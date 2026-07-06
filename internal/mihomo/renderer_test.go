@@ -304,17 +304,23 @@ func TestRenderer_EmptyPoolFallsBackToDirect(t *testing.T) {
 	}
 }
 
-// TestRenderer_FakeIPSkipSuffixes guards the production fix from 2026-06-05:
-// internal services like ai.paigod.work resolve to CN/LAN IPs but aren't on
-// geosite-cn. Mihomo's fakeip mode hands them 198.18.x.x by default, breaking
-// DIRECT dial. Operators extend dns.fake_ip_skip_suffixes to carve them out;
-// renderer normalizes each to "+.<suffix>" and adds to fake-ip-filter.
-func TestRenderer_FakeIPSkipSuffixes(t *testing.T) {
+// TestRenderer_RedirHostNoFakeIP guards the 2026-07-06 switch from fake-ip
+// to redir-host. Under redir-host every domain resolves to its real IP, so
+// the whole default-hijack machinery must be gone: no enhanced-mode fake-ip,
+// no fake-ip-range, no fake-ip-filter. This is the fix for the recurring
+// failure where a hostname missing from fake-ip-filter got a 198.18.x.x and
+// then timed out on DIRECT/probe dial — intranet services (ai.paigod.work,
+// 2026-06-05) and, worst, every node health probe when a subscription
+// provider's node domain was missed (11us.quandao.com, 2026-07-06:
+// all nodes alive=False because mihomo dialed the fake IP).
+func TestRenderer_RedirHostNoFakeIP(t *testing.T) {
 	r := newTestRenderer(t)
+	// Suffixes that used to require a fake-ip-filter carve-out. Under
+	// redir-host they need no carve-out at all — assert none is emitted.
 	r.cfg.DNS.FakeIPSkipSuffixes = []string{
-		"paigod.work",   // bare suffix — should normalize to +.paigod.work
-		".feilian.cn",   // leading dot — should normalize to +.feilian.cn
-		"+.intra.local", // already prefixed — pass through
+		"paigod.work",
+		".feilian.cn",
+		"+.intra.local",
 	}
 	body, err := r.Write(sampleOutbounds())
 	if err != nil {
@@ -323,22 +329,22 @@ func TestRenderer_FakeIPSkipSuffixes(t *testing.T) {
 	var doc map[string]any
 	_ = yaml.Unmarshal(body, &doc)
 	dns, _ := doc["dns"].(map[string]any)
-	filter, _ := dns["fake-ip-filter"].([]any)
-	want := map[string]bool{
-		"+.paigod.work": false,
-		"+.feilian.cn":  false,
-		"+.intra.local": false,
+
+	if dns["enhanced-mode"] != "redir-host" {
+		t.Errorf("dns.enhanced-mode = %v, want redir-host", dns["enhanced-mode"])
 	}
-	for _, e := range filter {
-		s, _ := e.(string)
-		if _, ok := want[s]; ok {
-			want[s] = true
-		}
+	if _, has := dns["fake-ip-filter"]; has {
+		t.Error("dns.fake-ip-filter must be absent under redir-host (nothing is hijacked)")
 	}
-	for k, seen := range want {
-		if !seen {
-			t.Errorf("fake-ip-filter missing %q", k)
-		}
+	if _, has := dns["fake-ip-range"]; has {
+		t.Error("dns.fake-ip-range must be absent under redir-host")
+	}
+
+	// store-fake-ip has no meaning under redir-host — must be false.
+	exp, _ := doc["experimental"].(map[string]any)
+	cf, _ := exp["cache-file"].(map[string]any)
+	if cf["store-fake-ip"] != false {
+		t.Errorf("experimental.cache-file.store-fake-ip = %v, want false", cf["store-fake-ip"])
 	}
 }
 

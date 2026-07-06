@@ -8,7 +8,7 @@
 #   sing-box              (1.10.x linux/amd64, CLI-only — used by
 #                          whitelistexpand for `rule-set decompile`,
 #                          NOT run as a service)
-#   geoip.metadb          (mihomo's MaxMind DB; required by fakeip mode)
+#   geoip.metadb          (mihomo's MaxMind DB; required by geoip routing rules)
 #   gateway.yaml          (operator-supplied; defaults to ./gateway.yaml)
 #   <deploy/node/* files> (install.sh, *.service, nft.conf.tmpl,
 #                          iproute.sh, logrotate-leap.conf)
@@ -99,8 +99,8 @@ gunzip -c "$M_GZ" > "$STAGE_DIR/mihomo"
 chmod 0755 "$STAGE_DIR/mihomo"
 ls -lh "$STAGE_DIR/mihomo" | awk '{print "[stage] mihomo", $5}'
 
-# geoip.metadb — mihomo's dns.fallback-filter geoip:CN check requires
-# this; without it, mihomo refuses to load when fakeip is on.
+# geoip.metadb — mihomo's geoip-cn routing rule requires this MaxMind DB;
+# without it mihomo refuses to load geoip rule-sets.
 METADB_FILE="$STAGE_CACHE/geoip.metadb"
 if [ ! -s "$METADB_FILE" ]; then
   url="https://github.com/MetaCubeX/meta-rules-dat/releases/download/latest/geoip.metadb"

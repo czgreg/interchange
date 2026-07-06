@@ -62,9 +62,9 @@ type Renderer interface {
 	// whitelist must call this before triggering a re-render — otherwise
 	// rendered config is stale (rule-providers / rules drop new tags).
 	SetWhitelist(mode string, wl config.WhitelistConfig)
-	// SetFakeIPSkip re-seats the DNS fake-ip-filter skip-list.
+	// SetFakeIPSkip re-seats the DNS intranet skip-suffix list.
 	// Synced on every PUT /api/whitelist so the renderer emits the updated
-	// fake-ip-filter without a separate config reload.
+	// nameserver-policy without a separate config reload.
 	SetFakeIPSkip(suffixes []string)
 	// AssignmentForIP returns the HRW-ordered routing members assigned to
 	// one terminal IP. ([primary, secondary, ...], true) when the IP is

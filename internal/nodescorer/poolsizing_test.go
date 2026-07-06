@@ -25,10 +25,11 @@ func TestComputeK(t *testing.T) {
 		overrides         func(*config.PoolSizingConfig)
 	}{
 		{
-			name:      "disabled when t_active=0",
+			name:      "t_active=0 uses default of 50",
 			t:         0,
 			qualified: 22,
-			wantK:     0,
+			// TActive defaults to 50: kDemand=⌈50*1.5/10⌉=8, kFloor=max(3,⌈50/15⌉+1)=4 → K=8
+			wantK: 8,
 		},
 		{
 			name:      "tiny T pinned to KMin floor",

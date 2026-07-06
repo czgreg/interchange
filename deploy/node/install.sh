@@ -9,7 +9,7 @@
 #   - mihomo             1.19.x binary (the data plane)
 #   - sing-box           1.10.x binary (CLI helper for whitelistexpand
 #                        rule-set decompile — NOT run as a service)
-#   - geoip.metadb       MaxMind DB for mihomo's fakeip mode
+#   - geoip.metadb       MaxMind DB for mihomo's geoip routing rules (geoip-cn etc.)
 #   - gateway.yaml       Filled-in config (subscription URL + node values)
 #
 # Companion files (same directory as this script):
@@ -240,10 +240,10 @@ install_leap() {
     log "rule-sets installed ($n .mrs in /var/lib/leap/mihomo/rule-sets/)"
   fi
 
-  # mihomo's geoip.metadb (used by mihomo's dns fallback-filter geoip:CN
-  # check). If staged, drop in the working dir; otherwise leave for mihomo
-  # to download on first start (works only when leap-gateway has already
-  # routed mihomo's HTTP fetches through itself, chicken-and-egg).
+  # mihomo's geoip.metadb (used by the geoip-cn routing rule). If staged,
+  # drop in the working dir; otherwise leave for mihomo to download on
+  # first start (works only when leap-gateway has already routed mihomo's
+  # HTTP fetches through itself, chicken-and-egg).
   if [ -f "$SCRIPT_DIR/geoip.metadb" ]; then
     install -m 0644 "$SCRIPT_DIR/geoip.metadb" /var/lib/leap/mihomo/geoip.metadb
     log "geoip.metadb installed for mihomo"

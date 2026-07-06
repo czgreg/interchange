@@ -3,11 +3,12 @@
 // domain doesn't pay the ~400ms cross-border DoH cold-resolve cost.
 //
 // Mechanism: on a fixed cadence, send a no-op A query for every preload
-// domain straight to sing-box's DNS listener (tun0_gateway_ip:53). The
-// query path inside sing-box matches what real client traffic would
-// trigger — fakeip allocation + remote DoH lookup with detour=out — so
-// the cache entry that lands is exactly the one the first real client
-// would otherwise have had to wait for.
+// domain straight to the engine's DNS listener (tun0_gateway_ip:53). The
+// query path matches what real client traffic would trigger — a remote
+// DoH lookup routed through the overseas pool — so the cached real IP
+// that lands is exactly the one the first real client would otherwise
+// have had to wait for. (Under the former fake-ip mode this also seeded
+// the fakeip mapping; under redir-host it warms the real-IP answer.)
 package dnspreload
 
 import (

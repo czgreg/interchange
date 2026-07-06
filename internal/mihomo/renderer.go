@@ -183,9 +183,12 @@ func (r *Renderer) SetWhitelist(mode string, wl config.WhitelistConfig) {
 	r.cfg.Route.Whitelist = wl
 }
 
-// SetFakeIPSkip re-seats the DNS fake-ip-filter skip-list. Called by the
-// API layer after PUT /api/whitelist so the updated fake-ip-filter is
-// emitted in the next Write without needing a full config reload.
+// SetFakeIPSkip re-seats the DNS skip-suffix list. Called by the API
+// layer after PUT /api/whitelist so the updated nameserver-policy is
+// emitted in the next Write without needing a full config reload. Under
+// redir-host these suffixes only steer intranet domains to CN DoH (they
+// no longer carve out a fake-ip-filter, since nothing is hijacked); the
+// field name is kept for API/config back-compat.
 func (r *Renderer) SetFakeIPSkip(suffixes []string) {
 	r.stateMu.Lock()
 	defer r.stateMu.Unlock()
@@ -304,14 +307,16 @@ func (r *Renderer) build(outbounds []subscribe.Outbound) map[string]any {
 	if r.probeListener {
 		doc["listeners"] = r.buildListeners()
 	}
-	// Persist DNS cache across hot-reloads and restarts. store-fake-ip keeps
-	// fakeip mappings alive so employees don't pay the cold DNS round-trip
-	// (~400ms cross-border DoH) after every nodescorer hot-reload.
+	// Persist mihomo's cache (DNS answers, fakeip pool if ever re-enabled)
+	// across hot-reloads and restarts. store-fake-ip is false under
+	// redir-host — there are no fakeip mappings to persist; the DNS
+	// answer cache still survives, so warm domains keep their real IPs
+	// through a nodescorer hot-reload without a fresh DoH round-trip.
 	doc["experimental"] = map[string]any{
 		"cache-file": map[string]any{
 			"enable":        true,
 			"path":          "./cache.db",
-			"store-fake-ip": true,
+			"store-fake-ip": false,
 		},
 	}
 
