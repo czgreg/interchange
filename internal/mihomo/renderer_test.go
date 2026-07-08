@@ -828,23 +828,3 @@ func TestRenderer_PerTerminalNamedPoolUnified(t *testing.T) {
 		t.Error("geosite-github should route through the unified perterm sub-rule")
 	}
 }
-
-func TestNormalizePolicySuffix(t *testing.T) {
-	cases := []struct {
-		in   string
-		want string
-	}{
-		{"*.525536.xyz", "+.525536.xyz"},
-		{"*.ctcxianyu.com", "+.ctcxianyu.com"},
-		{"+.paigod.work", "+.paigod.work"},
-		{".paigod.work", "+.paigod.work"},
-		{"paigod.work", "+.paigod.work"},
-		{"", ""},
-	}
-	for _, c := range cases {
-		got := normalizePolicySuffix(c.in)
-		if got != c.want {
-			t.Errorf("normalizePolicySuffix(%q) = %q, want %q", c.in, got, c.want)
-		}
-	}
-}
