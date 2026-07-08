@@ -159,11 +159,19 @@ func applyTLSToClash(p map[string]any, o subscribe.Outbound) {
 		p["reality-opts"] = ro
 	}
 	// Surface the utls fingerprint as the sibling client-fingerprint key.
-	// We synthesize it on the parse side (clash.go) when reality is on; if
-	// it leaked through some other path with utls but no reality, still
-	// preserve the user's intent.
+	// Two sources, in priority order:
+	//  1. tls.utls.fingerprint — set by clash.go (Clash YAML parse path)
+	//     and clash.go's applyClashTLS when reality is on.
+	//  2. o["client-fingerprint"] sibling key — set by uri.go (URI parse
+	//     path) when the URI carries fp=<value>. Clash YAML paths already
+	//     land in tls.utls, so this is only the URI path's fingerprint.
 	if utls, ok := tls["utls"].(map[string]any); ok {
 		if fp, ok := utls["fingerprint"].(string); ok && fp != "" {
+			p["client-fingerprint"] = fp
+		}
+	}
+	if _, already := p["client-fingerprint"]; !already {
+		if fp, ok := o["client-fingerprint"].(string); ok && fp != "" {
 			p["client-fingerprint"] = fp
 		}
 	}

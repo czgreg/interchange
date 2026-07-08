@@ -79,6 +79,71 @@ func TestNormalizeWSHeaders(t *testing.T) {
 	}
 }
 
+// TestOutboundToProxy_VlessRealityFingerprint verifies that the URI parse
+// path's client-fingerprint sibling key (set by uri.go from fp=) survives
+// the outboundToProxy render. This is the regression guard for the ash
+// subscription incident: URI format carries fp=chrome, clash.go path carries
+// it via tls.utls.fingerprint — both must land as client-fingerprint in the
+// mihomo proxy entry.
+func TestOutboundToProxy_VlessRealityFingerprint(t *testing.T) {
+	// Simulate the URI parse path: fp= lands as a sibling key (no tls.utls).
+	uriPath := subscribe.Outbound{
+		"type":               "vless",
+		"tag":                "ash-us-02",
+		"server":             "example.com",
+		"server_port":        31513,
+		"uuid":               "2e2aa39e-dd37-496e-85e4-fc9689892743",
+		"flow":               "xtls-rprx-vision",
+		"client-fingerprint": "chrome",
+		"tls": map[string]any{
+			"enabled":     true,
+			"server_name": "v5-dy-e.ixigua.com",
+			"reality": map[string]any{
+				"enabled":    true,
+				"public_key": "kwsYRITkG2Z9WAhuTAPoP3eqG-mpFkfnXoQV4cjsRx0",
+				"short_id":   "07c418eb",
+			},
+		},
+	}
+	p := outboundToProxy(uriPath)
+	if p == nil {
+		t.Fatal("outboundToProxy returned nil")
+	}
+	if p["client-fingerprint"] != "chrome" {
+		t.Errorf("URI path: client-fingerprint = %v, want chrome", p["client-fingerprint"])
+	}
+
+	// Simulate the Clash YAML parse path: fingerprint in tls.utls.
+	clashPath := subscribe.Outbound{
+		"type":        "vless",
+		"tag":         "ash-us-02",
+		"server":      "example.com",
+		"server_port": 31513,
+		"uuid":        "2e2aa39e-dd37-496e-85e4-fc9689892743",
+		"flow":        "xtls-rprx-vision",
+		"tls": map[string]any{
+			"enabled":     true,
+			"server_name": "v5-dy-e.ixigua.com",
+			"utls": map[string]any{
+				"enabled":     true,
+				"fingerprint": "chrome",
+			},
+			"reality": map[string]any{
+				"enabled":    true,
+				"public_key": "kwsYRITkG2Z9WAhuTAPoP3eqG-mpFkfnXoQV4cjsRx0",
+				"short_id":   "07c418eb",
+			},
+		},
+	}
+	p2 := outboundToProxy(clashPath)
+	if p2 == nil {
+		t.Fatal("outboundToProxy returned nil (clash path)")
+	}
+	if p2["client-fingerprint"] != "chrome" {
+		t.Errorf("Clash path: client-fingerprint = %v, want chrome", p2["client-fingerprint"])
+	}
+}
+
 // End-to-end at the renderer boundary: a vless+ws outbound carrying the
 // list-shape Host header (the cyberguard subscription shape that crashlooped
 // 89 on 2026-06-09) must come out of outboundToProxy as a plain string under
