@@ -81,7 +81,7 @@ func (r *Renderer) buildDNS() map[string]any {
 		"enhanced-mode":           "redir-host",
 		"default-nameserver":      []string{stripScheme(bootstrap)},
 		"nameserver":              proxyDoH,
-		"nameserver-policy":       buildNameserverPolicy(cnDoH, r.cfg.DNS.FakeIPSkipSuffixes),
+		"nameserver-policy":       buildNameserverPolicy(cnDoH, r.cfg.DNS.FakeIPSkipSuffixes, r.cfg.DNS.ExtraPolicies),
 		"proxy-server-nameserver": cnDoH,
 	}
 
@@ -104,7 +104,7 @@ func (r *Renderer) buildDNS() map[string]any {
 // because the rule-provider geosite-cn is already declared in
 // rule-providers (loaded from .mrs on disk) — no second copy of the
 // domain database, no dependency on bundled geodata.
-func buildNameserverPolicy(cnDoH, fakeIPSkip []string) map[string]any {
+func buildNameserverPolicy(cnDoH, fakeIPSkip []string, extraPolicies map[string][]string) map[string]any {
 	policy := map[string]any{
 		"rule-set:geosite-cn": cnDoH,
 	}
@@ -116,6 +116,14 @@ func buildNameserverPolicy(cnDoH, fakeIPSkip []string) map[string]any {
 		}
 		seen[s] = true
 		policy[s] = cnDoH
+	}
+	for raw, upstreams := range extraPolicies {
+		s := normalizePolicySuffix(raw)
+		if s == "" || seen[s] || len(upstreams) == 0 {
+			continue
+		}
+		seen[s] = true
+		policy[s] = upstreams
 	}
 	return policy
 }
