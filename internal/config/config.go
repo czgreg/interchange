@@ -307,17 +307,6 @@ type DNSConfig struct {
 	// (overseas), which has no records for them. Name kept for yaml/API
 	// back-compat; predates the 2026-07-06 redir-host switch.
 	FakeIPSkipSuffixes []string `yaml:"fake_ip_skip_suffixes,omitempty"`
-	// ExtraPolicies maps domain wildcard suffixes to custom upstream resolvers.
-	// Use when a subscription provider's node domains require a specific DNS
-	// server (e.g. a provider-operated DoH) to resolve correctly.
-	// Each entry: suffix (e.g. "*.525536.xyz") → list of upstream URLs.
-	// Suffix formats accepted: "*.example.com", "+.example.com", ".example.com",
-	// or "example.com" — all normalised to "+.example.com" by the renderer.
-	// Example:
-	//   extra_policies:
-	//     "*.525536.xyz":
-	//       - "https://38.76.213.238:8080/dns-query"
-	ExtraPolicies map[string][]string `yaml:"extra_policies,omitempty"`
 }
 
 type RouteConfig struct {
