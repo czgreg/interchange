@@ -75,25 +75,6 @@ func (r *Renderer) buildDNS() map[string]any {
 		bootstrap = "udp://119.29.29.29"
 	}
 
-	// proxy-server-nameserver resolves proxy node server domains. It must
-	// include any DoH servers declared in extra_policies, otherwise nodes
-	// whose domains require a custom resolver (e.g. *.525536.xyz) will fail
-	// to resolve at the proxy-connection layer even though nameserver-policy
-	// covers them for regular DNS queries.
-	proxyServerNS := append([]string(nil), cnDoH...)
-	seen := map[string]bool{}
-	for _, s := range cnDoH {
-		seen[s] = true
-	}
-	for _, upstreams := range r.cfg.DNS.ExtraPolicies {
-		for _, u := range upstreams {
-			if !seen[u] {
-				seen[u] = true
-				proxyServerNS = append(proxyServerNS, u)
-			}
-		}
-	}
-
 	dns := map[string]any{
 		"enable":                  true,
 		"ipv6":                    false,
@@ -101,7 +82,7 @@ func (r *Renderer) buildDNS() map[string]any {
 		"default-nameserver":      []string{stripScheme(bootstrap)},
 		"nameserver":              proxyDoH,
 		"nameserver-policy":       buildNameserverPolicy(cnDoH, r.cfg.DNS.FakeIPSkipSuffixes, r.cfg.DNS.ExtraPolicies),
-		"proxy-server-nameserver": proxyServerNS,
+		"proxy-server-nameserver": cnDoH,
 	}
 
 	if l := r.cfg.DNS.Listen; l != "" {
