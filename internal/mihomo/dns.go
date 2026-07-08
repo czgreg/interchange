@@ -128,12 +128,16 @@ func buildNameserverPolicy(cnDoH, fakeIPSkip []string, extraPolicies map[string]
 	return policy
 }
 
-// normalizePolicySuffix accepts ".paigod.work", "paigod.work", or
-// "+.paigod.work" and returns "+.paigod.work" — the wildcard form
+// normalizePolicySuffix accepts ".paigod.work", "paigod.work", "*.paigod.work",
+// or "+.paigod.work" and returns "+.paigod.work" — the wildcard form
 // mihomo's nameserver-policy keys expect.
 func normalizePolicySuffix(s string) string {
 	if len(s) == 0 {
 		return ""
+	}
+	// strip leading "*." (user-supplied glob wildcard form)
+	if len(s) >= 2 && s[:2] == "*." {
+		s = s[2:]
 	}
 	if s[0] == '.' {
 		return "+" + s
