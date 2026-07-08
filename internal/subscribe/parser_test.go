@@ -144,6 +144,61 @@ func TestParseURIList_Base64(t *testing.T) {
 	}
 }
 
+// TestParseVlessRealityURI verifies that every query parameter a VLESS+REALITY
+// URI can carry lands in the expected Outbound field. This is the regression
+// guard against silent field drops across uri.go / clash.go / proxies.go.
+func TestParseVlessRealityURI(t *testing.T) {
+	uri := "vless://2e2aa39e-dd37-496e-85e4-fc9689892743@example.com:31513" +
+		"?type=tcp&security=reality&flow=xtls-rprx-vision" +
+		"&fp=chrome&sni=v5-dy-e.ixigua.com" +
+		"&pbk=kwsYRITkG2Z9WAhuTAPoP3eqG-mpFkfnXoQV4cjsRx0&sid=07c418eb" +
+		"&alpn=h2%2Chttp%2F1.1&insecure=0" +
+		"#%F0%9F%87%BA%F0%9F%87%B8US-01"
+
+	out, err := parseURIList([]byte(uri))
+	if err != nil {
+		t.Fatalf("parseURIList: %v", err)
+	}
+	if len(out) != 1 {
+		t.Fatalf("want 1 outbound, got %d", len(out))
+	}
+	o := out[0]
+
+	check := func(field string, want any) {
+		t.Helper()
+		if o[field] != want {
+			t.Errorf("field %q: want %v, got %v", field, want, o[field])
+		}
+	}
+
+	check("type", "vless")
+	check("server", "example.com")
+	check("server_port", 31513)
+	check("uuid", "2e2aa39e-dd37-496e-85e4-fc9689892743")
+	check("flow", "xtls-rprx-vision")
+	// client-fingerprint is a sibling key (not inside tls), matching how
+	// clash.go and proxies.go handle it for mihomo rendering.
+	check("client-fingerprint", "chrome")
+
+	tls, ok := o["tls"].(map[string]any)
+	if !ok {
+		t.Fatalf("tls block missing or wrong type: %#v", o["tls"])
+	}
+	if tls["server_name"] != "v5-dy-e.ixigua.com" {
+		t.Errorf("tls.server_name: want v5-dy-e.ixigua.com, got %v", tls["server_name"])
+	}
+	reality, ok := tls["reality"].(map[string]any)
+	if !ok {
+		t.Fatalf("tls.reality block missing: %#v", tls)
+	}
+	if reality["public_key"] != "kwsYRITkG2Z9WAhuTAPoP3eqG-mpFkfnXoQV4cjsRx0" {
+		t.Errorf("reality.public_key wrong: %v", reality["public_key"])
+	}
+	if reality["short_id"] != "07c418eb" {
+		t.Errorf("reality.short_id wrong: %v", reality["short_id"])
+	}
+}
+
 func TestParseSIP008(t *testing.T) {
 	body := []byte(`[{"remarks":"a","server":"1.2.3.4","server_port":8388,"method":"aes-256-gcm","password":"p"}]`)
 	out, err := parseSIP008(body)

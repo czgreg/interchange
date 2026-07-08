@@ -94,24 +94,17 @@ func main() {
 	dpCtl.SystemdUnit = "leap-mihomo.service"
 	store := configstore.New(*cfgPath)
 
-	// Persist UA auto-discoveries: when Refresh's fallback finds a working
-	// per-subscription UA (Clash↔sing-box swap), write it back into yaml so
-	// the next refresh hits the right UA on the first try.
+	// UA auto-discovery fires when a subscription returns 5xx or 0 nodes on
+	// the global UA and the alternate family (Clash↔sing-box) yields nodes.
+	// We intentionally do NOT persist the discovered UA back to yaml:
+	// subscriptions[] is operator-owned (see CLAUDE.md), and auto-writing it
+	// caused a production incident where a transient error on the working UA
+	// triggered a permanent flip to a broken one with no self-healing path.
+	// The discovery still rescues the current refresh round; the log line
+	// below is the signal for the operator to fix the yaml explicitly.
 	mgr.WithUADiscoveryCallback(func(name, ua string) {
-		err := store.Mutate(cfg, func(c *config.Config) error {
-			for i := range c.Subscriptions {
-				if c.Subscriptions[i].Name == name {
-					c.Subscriptions[i].UserAgent = ua
-					return nil
-				}
-			}
-			return nil
-		})
-		if err != nil {
-			slog.Warn("subscribe: persist discovered ua failed", "name", name, "ua", ua, "err", err)
-			return
-		}
-		mgr.SetEntries(cfg.Subscriptions)
+		slog.Info("subscribe: discovered working ua — update gateway.yaml manually if you want to persist it",
+			"subscription", name, "working_ua", ua)
 	})
 
 	ni := nodeinfo.New(cfg.Node, Version, engineName)

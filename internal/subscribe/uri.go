@@ -207,6 +207,12 @@ func applyURIQueryTLS(o Outbound, kind string, q url.Values) {
 		}
 		tls["reality"] = r
 	}
+	// fp= is the uTLS browser fingerprint (e.g. "chrome"). Stored as a
+	// sibling key on the outbound, not inside tls, matching how clash.go
+	// and proxies.go handle it.
+	if fp := q.Get("fp"); fp != "" {
+		o["client-fingerprint"] = fp
+	}
 	o["tls"] = tls
 }
 
