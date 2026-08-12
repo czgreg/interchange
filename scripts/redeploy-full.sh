@@ -80,8 +80,12 @@ EXIT=$(grep '^INSTALL_EXIT=' "/tmp/install-${HOST}-${TS}.log" | tail -1 | cut -d
 # retry the API curl.
 log "verifying $HOST API (may take a few seconds while services restart)"
 sleep 6
+# LEAP_TOKEN, when exported, authenticates against api.token. Unset → no
+# header, correct for nodes that leave api.token empty.
+AUTH=()
+[ -n "${LEAP_TOKEN:-}" ] && AUTH=(-H "Authorization: Bearer $LEAP_TOKEN")
 for i in 1 2 3; do
-  RESP=$(curl -s --max-time 6 "http://$HOST:18080/api/proxies/active" 2>/dev/null || true)
+  RESP=$(curl -s --max-time 6 "${AUTH[@]}" "http://$HOST:18080/api/proxies/active" 2>/dev/null || true)
   [ -n "$RESP" ] && break
   sleep 3
 done

@@ -268,11 +268,34 @@ install_nft() {
   source /etc/leap/env
   [ -n "${LEAP_CLIENT_SUBNET:-}" ] || fail "LEAP_CLIENT_SUBNET missing in /etc/leap/env (re-run install_leap)"
   [ -n "${LEAP_API_PORT:-}" ]      || fail "LEAP_API_PORT missing in /etc/leap/env (re-run install_leap)"
+
+  # Render one `ip saddr <cidr> ... accept` line per api.allow_from entry.
+  # Empty list → no lines → only the `iif "lo"` rule accepts, so the API is
+  # loopback-only. Refuse any CIDR that overlaps the tun0 client subnet:
+  # those are untrusted end-user terminals and must never reach the control
+  # plane (see APIConfig.AllowFrom).
+  api_allow_rules=""
+  for cidr in ${LEAP_API_ALLOW_FROM:-}; do
+    if [ "$cidr" = "$LEAP_CLIENT_SUBNET" ]; then
+      fail "api.allow_from must not contain the tun0 client_subnet ($cidr) — VPN clients are untrusted"
+    fi
+    api_allow_rules="${api_allow_rules}    ip saddr $cidr tcp dport $LEAP_API_PORT accept"$'\n'
+  done
+  # Strip the trailing newline so the template's own line break is not doubled.
+  api_allow_rules="${api_allow_rules%$'\n'}"
+
   sed -e "s|@CLIENT_SUBNET@|$LEAP_CLIENT_SUBNET|g" \
       -e "s|@API_PORT@|$LEAP_API_PORT|g" \
       "$SCRIPT_DIR/nft.conf.tmpl" \
-    > /etc/leap/nft.conf
-  log "nft.conf rendered (client_subnet=$LEAP_CLIENT_SUBNET, api_port=$LEAP_API_PORT)"
+    > /etc/leap/nft.conf.stage
+  # Substitute the multi-line allowlist separately: sed's `s` can't carry
+  # embedded newlines portably, so use awk to splice at the placeholder.
+  awk -v repl="$api_allow_rules" '
+    $0 ~ /@API_ALLOW_RULES@/ { if (repl != "") print repl; next }
+    { print }
+  ' /etc/leap/nft.conf.stage > /etc/leap/nft.conf
+  rm -f /etc/leap/nft.conf.stage
+  log "nft.conf rendered (client_subnet=$LEAP_CLIENT_SUBNET, api_port=$LEAP_API_PORT, api_allow_from='${LEAP_API_ALLOW_FROM:-<loopback only>}')"
 
   install -m 0755 "$SCRIPT_DIR/iproute.sh" /etc/leap/iproute.sh
   log "iproute.sh installed"

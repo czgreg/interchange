@@ -655,6 +655,60 @@ func (s *Scorer) score(ctx context.Context) {
 				preferredSet[name] = true
 			}
 
+			// Fast eviction on the SHORT window. This is the other half of
+			// the two-window design described above, which was written but
+			// never wired: nodeShortEWMA (4h half-life, docstring "for
+			// evict decisions") had zero callers until 2026-08-12, so every
+			// ranking AND eviction decision ran on the 24h long window.
+			//
+			// Why that hurt: at a 24h half-life and a 5min scoring round,
+			// alpha is ~0.0024. A pool member degrading from 247ms to
+			// 3000ms takes ~23 rounds (1.9h) for its long EWMA to even
+			// cross the worst other pool member, so it keeps carrying
+			// terminals for hours after users feel it. Measured drift on 92
+			// the same day: Hutao/BGP_D had composite 252 (2nd best in
+			// pool) while its long EWMA read 499 (worst in pool), and
+			// US-02·AWS-SG had composite 301 with long EWMA 262 (best) —
+			// the ranking was being driven by hours-old history that
+			// contradicted current measurements.
+			//
+			// Deliberately asymmetric, and deliberately NOT a swap of the
+			// sort key above:
+			//   - promote still uses the LONG window. That conservatism is
+			//     the point (see the comment block above): a node that just
+			//     recovered should not be trusted until the long window
+			//     forgets its bad period.
+			//   - eviction uses the SHORT window, and only for nodes
+			//     ALREADY in the pool. Nothing here can promote, so this
+			//     adds no new flap source: who backfills is still decided
+			//     by long-EWMA ranking plus the swap threshold.
+			//
+			// Trigger is relative to the pool's own short-EWMA median, not
+			// an absolute ms figure, so it travels across subscription
+			// tiers and does not need retuning when the whole pool is
+			// slow. MinPoolSize is respected by the post-pass below.
+			evicted := map[string]bool{}
+			if med := s.poolShortEWMAMedian(); med > 0 {
+				limit := med * evictShortEWMAFactor
+				for name := range s.poolSet {
+					e := s.nodeShortEWMA(name)
+					if math.IsInf(e, 1) || e <= limit {
+						continue
+					}
+					// Never evict the last usable members on this signal
+					// alone: with |pool| at or below the floor, a slow node
+					// still beats no node.
+					if len(s.poolSet)-len(evicted) <= minPool {
+						break
+					}
+					evicted[name] = true
+					delete(preferredSet, name)
+					slog.Warn("nodescorer: fast-evict on short EWMA",
+						"node", name, "short_ewma", e, "pool_median", med,
+						"limit", limit, "factor", evictShortEWMAFactor)
+				}
+			}
+
 			// Absolute swap threshold: even when a non-pool candidate is
 			// in top-K by EWMA, we only promote if its long EWMA is
 			// SIGNIFICANTLY better than the worst current pool member's
@@ -713,14 +767,41 @@ func (s *Scorer) score(ctx context.Context) {
 			//     minPool) from all qualified nodes including trial nodes.
 			//   over kTarget: shouldn't happen with immediate eviction, but
 			//     guard anyway — drop worst non-preferred members.
+			//
+			// Two constraints this pass MUST respect, both added 2026-08-12:
+			//
+			//   1. Fast-evicted nodes stay out. Without this the short-EWMA
+			//      eviction above is undone on the very next lines — the
+			//      node is not in newPoolSet, so it looks like a free slot.
+			//
+			//   2. A composite ceiling. This pass ignores inTrial and
+			//      inQuarantine by design (a slot must be filled), but it
+			//      also ignored quality entirely, and `Qualified` is a
+			//      liveness gate rather than a quality one: it deliberately
+			//      does not test RTT/jitter (see scoreNode — thresholds at
+			//      30s granularity churned the pool every cycle). Measured
+			//      on 92: ash/US-04·GCP carried p95=5000ms, jitter=4587,
+			//      composite=14674 with Qualified=true, against a
+			//      configured MaxRTTP95Ms of 800. Ranking normally keeps
+			//      such a node out of a full pool, but THIS path bypasses
+			//      ranking, so it was the one way a node that bad could
+			//      start carrying terminals.
 			if len(newPoolSet) < kTarget {
+				ceil := s.poolFillCeiling(nodes)
 				for i := 0; i < len(qualifiedNodes); i++ {
 					if len(newPoolSet) >= kTarget {
 						break
 					}
 					name := qualifiedNodes[i].Name
-					if newPoolSet[name] {
+					if newPoolSet[name] || evicted[name] {
 						continue
+					}
+					if ceil > 0 {
+						if c := compositeScore(*qualifiedNodes[i]); c > ceil {
+							slog.Warn("nodescorer: fill candidate rejected by composite ceiling",
+								"node", name, "composite", c, "ceiling", ceil)
+							continue
+						}
 					}
 					newPoolSet[name] = true
 					for j := range nodes {
@@ -735,18 +816,32 @@ func (s *Scorer) score(ctx context.Context) {
 			// trial and quarantined nodes (best available, sorted by EWMA).
 			// Only Qualified nodes are eligible — catastrophic-fail nodes
 			// (Qualified=false) must never carry traffic.
+			//
+			// This is the last resort, so unlike the kTarget fill above it
+			// applies NO composite ceiling and does not exclude fast-evicted
+			// nodes: below the floor, a slow node beats no node. Evicted
+			// ones are merely sorted last, so they are taken only when
+			// nothing else is left.
 			if len(newPoolSet) < minPool {
 				type fallback struct {
-					name string
-					ewma float64
+					name    string
+					ewma    float64
+					evicted bool
 				}
 				candidates := make([]fallback, 0, len(nodes))
 				for i := range nodes {
 					if nodes[i].Qualified && nodes[i].ProbeCount > 0 && !newPoolSet[nodes[i].Name] {
-						candidates = append(candidates, fallback{nodes[i].Name, s.nodeLongEWMA(nodes[i].Name)})
+						candidates = append(candidates, fallback{
+							nodes[i].Name,
+							s.nodeLongEWMA(nodes[i].Name),
+							evicted[nodes[i].Name],
+						})
 					}
 				}
 				sort.Slice(candidates, func(i, j int) bool {
+					if candidates[i].evicted != candidates[j].evicted {
+						return !candidates[i].evicted
+					}
 					return candidates[i].ewma < candidates[j].ewma
 				})
 				for _, c := range candidates {

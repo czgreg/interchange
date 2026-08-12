@@ -234,10 +234,47 @@ func ipInSubnet(ip, cidr string) bool {
 	return ipnet.Contains(parsed)
 }
 
+// splitmix64 is the finalizer applied to the FNV output in hrwTopN.
+//
+// FNV-1a has weak avalanche: it is a multiply-xor over bytes with no
+// final mixing step, so structured inputs leave visible correlation in
+// the high bits that decide the HRW argmax. Measured on 92's live
+// 8-member routing pool over the whole 254-terminal /24, member[0] came
+// out as [5 9 17 17 23 59 62 62] — a 12.4x spread between the least and
+// most loaded egress, chi2=136 against uniform.
+//
+// This is NOT about the CJK/emoji node names, which was the initial
+// suspicion. An ASCII control set (n1..n8) skewed 11.2x with one node
+// taking 52.8% of terminals, i.e. worse. The skew depends
+// unpredictably on the particular name set.
+//
+// splitmix64's finalizer fixes it: the same measurement becomes
+// [22 26 31 32 34 35 36 38], 1.7x, chi2=6.3. It also removes the
+// "K=3 needs a lucky triple" problem — across all 56 three-member
+// subsets of that pool, subsets putting >=45% of terminals on one node
+// drop from 40/56 to 0/56, and the worst-case single-node share drops
+// from 52.0% to 40.6%.
+//
+// Rejected alternative: hashing member-then-ip instead of ip-then-member.
+// It is dramatically worse, not better — 74.8% of terminals landed on a
+// single node (chi2=981), because the trailing ip bytes are nearly
+// identical across a /24 and FNV's tail dominates the result.
+func splitmix64(x uint64) uint64 {
+	x += 0x9e3779b97f4a7c15
+	x = (x ^ (x >> 30)) * 0xbf58476d1ce4e5b9
+	x = (x ^ (x >> 27)) * 0x94d049bb133111eb
+	return x ^ (x >> 31)
+}
+
 // hrwTopN returns the top-N members for an IP in HRW score order
 // (highest score first = primary). Deterministic; the same (ip, members)
 // always produces the same ordering. Adding/removing one member only
 // reshuffles entries containing that member; others stay stable.
+//
+// NOTE: changing the hash changes every terminal's assignment exactly
+// once. The splitmix64 finalizer was added 2026-08-12 and reshuffled all
+// 254 terminals in one step; that is a one-time cost, not a recurring
+// one, and the HRW stability property above is unaffected.
 func hrwTopN(ip string, members []string, n int) []string {
 	if n <= 0 || len(members) == 0 {
 		return nil
@@ -252,7 +289,7 @@ func hrwTopN(ip string, members []string, n int) []string {
 		_, _ = h.Write([]byte(ip))
 		_, _ = h.Write([]byte{0})
 		_, _ = h.Write([]byte(m))
-		scoredMembers[i] = scored{m, h.Sum64()}
+		scoredMembers[i] = scored{m, splitmix64(h.Sum64())}
 	}
 	sort.Slice(scoredMembers, func(i, j int) bool {
 		return scoredMembers[i].score > scoredMembers[j].score

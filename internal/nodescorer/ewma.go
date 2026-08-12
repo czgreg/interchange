@@ -29,6 +29,7 @@ package nodescorer
 
 import (
 	"math"
+	"sort"
 	"time"
 )
 
@@ -53,6 +54,22 @@ const (
 	// a fresh subscription of unknown nodes from sweeping the top by
 	// luck of initial probe.
 	trialDuration = 24 * time.Hour
+
+	// evictShortEWMAFactor is how much worse than the pool's own median
+	// short EWMA a member may get before it is evicted immediately,
+	// without waiting for the 24h long window to notice.
+	//
+	// Relative to the pool median rather than an absolute ms value so the
+	// gate travels across subscription tiers: when every node is slow the
+	// median rises with them and nothing is evicted for being normal.
+	//
+	// 2.0 is the deliberately conservative starting point. At the observed
+	// pool median short EWMA of ~250-400 that puts the trigger around
+	// 500-800, i.e. roughly "twice as bad as typical", which no healthy
+	// node in the measured population reaches. Lower it only with evidence
+	// — the failure mode of a too-tight factor is pool churn, which is what
+	// the long-window conservatism exists to prevent.
+	evictShortEWMAFactor = 2.0
 
 	// noMeasurementScore is the compositeScore sentinel for a node with no
 	// probe history yet (see helpers.go). It must never enter the EWMA: it
@@ -164,4 +181,75 @@ func (s *Scorer) nodeShortEWMA(name string) float64 {
 		return math.Inf(1)
 	}
 	return e.Short.Value
+}
+
+// poolShortEWMAMedian is the median short EWMA across current pool
+// members, and the reference point for fast eviction.
+//
+// Median rather than mean: the mean is dragged by exactly the degraded
+// member we are trying to detect, which raises the threshold and hides it.
+// Nodes with no short-window signal yet (+Inf) are skipped rather than
+// treated as infinitely bad — they would push the median to +Inf and
+// disable eviction entirely on a freshly-restarted gateway.
+//
+// Returns 0 when fewer than 3 members have a usable signal: with 1-2
+// samples "median" is not a population statistic, and evicting against it
+// risks removing a healthy node because its one peer happens to be fast.
+// Callers treat 0 as "do not evict this round".
+//
+// CALLER MUST HOLD s.mu.
+func (s *Scorer) poolShortEWMAMedian() float64 {
+	vals := make([]float64, 0, len(s.poolSet))
+	for name := range s.poolSet {
+		v := s.nodeShortEWMA(name)
+		if math.IsInf(v, 1) {
+			continue
+		}
+		vals = append(vals, v)
+	}
+	if len(vals) < 3 {
+		return 0
+	}
+	sort.Float64s(vals)
+	mid := len(vals) / 2
+	if len(vals)%2 == 1 {
+		return vals[mid]
+	}
+	return (vals[mid-1] + vals[mid]) / 2
+}
+
+// poolFillCeiling is the maximum compositeScore a node may carry and still
+// be admitted by the kTarget fill post-pass. Derived from the median
+// composite of the CURRENT pool so it adapts to the tier, times the same
+// factor used for fast eviction (a node too slow to keep is also too slow
+// to add).
+//
+// Returns 0 ("no ceiling") when the current pool has fewer than 3 measured
+// members — during bootstrap or a supply collapse there is no meaningful
+// population to compare against, and refusing to fill would leave the data
+// plane emptier than it needs to be.
+//
+// CALLER MUST HOLD s.mu.
+func (s *Scorer) poolFillCeiling(nodes []NodeHealth) float64 {
+	vals := make([]float64, 0, len(s.poolSet))
+	for i := range nodes {
+		if !s.poolSet[nodes[i].Name] || nodes[i].ProbeCount == 0 {
+			continue
+		}
+		c := compositeScore(nodes[i])
+		if c >= noMeasurementScore {
+			continue
+		}
+		vals = append(vals, c)
+	}
+	if len(vals) < 3 {
+		return 0
+	}
+	sort.Float64s(vals)
+	mid := len(vals) / 2
+	med := vals[mid]
+	if len(vals)%2 == 0 {
+		med = (vals[mid-1] + vals[mid]) / 2
+	}
+	return med * evictShortEWMAFactor
 }

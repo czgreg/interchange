@@ -21,6 +21,7 @@ expand-whitelist.py — 把 leap-gateway 的白名单展开成域名后缀列表
 
 import argparse
 import json
+import os
 import sys
 import urllib.request
 from urllib.error import HTTPError, URLError
@@ -48,9 +49,10 @@ def fetch_v2fly(name: str) -> str:
     raise RuntimeError(f"all sources failed; last: {last_err}")
 
 
-def fetch_url(url: str) -> str:
+def fetch_url(url: str, headers: dict | None = None) -> str:
     try:
-        with urllib.request.urlopen(url, timeout=10) as r:
+        req = urllib.request.Request(url, headers=headers or {})
+        with urllib.request.urlopen(req, timeout=10) as r:
             return r.read().decode("utf-8", errors="replace")
     except (HTTPError, URLError) as e:
         raise RuntimeError(f"fetch {url}: {e}")
@@ -103,8 +105,14 @@ def parse_geosite(name: str, seen: set, out: set) -> None:
 
 
 def fetch_whitelist_api(api_addr: str) -> dict:
+    # LEAP_TOKEN, when set, authenticates against api.token in gateway.yaml.
+    # Unset → no header, correct for nodes that leave api.token empty.
     url = f"http://{api_addr}/api/whitelist"
-    body = fetch_url(url)
+    headers = {}
+    token = os.environ.get("LEAP_TOKEN", "")
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    body = fetch_url(url, headers=headers)
     return json.loads(body)
 
 

@@ -399,8 +399,9 @@ func TestRenderer_SnifferEnabled(t *testing.T) {
 //     intranet domains (paigod.work etc.) resolve via the right side
 //   - no `fallback` / `fallback-filter` keys (otherwise we're paying for
 //     parallel queries again)
-//   - proxy-server-nameserver still cnDoH (airport-node hostnames must
-//     resolve direct, not through the proxy we're trying to set up)
+//   - proxy-server-nameserver = cnDoH only (airport-node hostnames must
+//     resolve direct, not through the proxy we're trying to set up), and
+//     no proxy-server-nameserver-policy unless the operator named suffixes
 func TestRenderer_DNSNameserverPolicy(t *testing.T) {
 	r := newTestRenderer(t)
 	r.cfg.DNS.CNDoH = []string{"https://doh.pub/dns-query"}
@@ -429,12 +430,24 @@ func TestRenderer_DNSNameserverPolicy(t *testing.T) {
 		t.Errorf("dns.nameserver = %v, want [tls://1.1.1.1:853] (proxyDoH default)", ns)
 	}
 
-	// proxy-server-nameserver = cnDoH + NodeResolver (default plain UDP).
-	// The UDP upstream is load-bearing: a DoH frontend that answers
-	// NXDOMAIN for a live node hostname is not recoverable within psn.
+	// proxy-server-nameserver = cnDoH only.
+	//
+	// It briefly (2026-08-12, commit 86aacc8) also carried a plain-UDP
+	// upstream from DNS.NodeResolver. That was reverted: psn upstreams race
+	// in parallel and NXDOMAIN is not an error in that path, so appending a
+	// healthy upstream does not rescue a DoH frontend returning NXDOMAIN
+	// (measured: 10/10 dials still failed). It also silently promoted the
+	// 4x-faster UDP upstream to de facto primary for every node hostname.
+	// The scoped replacement is proxy-server-nameserver-policy, asserted
+	// below.
 	psn, _ := dns["proxy-server-nameserver"].([]any)
-	if len(psn) != 2 || psn[0] != "https://doh.pub/dns-query" || psn[1] != "udp://119.29.29.29" {
-		t.Errorf("proxy-server-nameserver = %v, want [cnDoH..., udp://119.29.29.29]", psn)
+	if len(psn) != 1 || psn[0] != "https://doh.pub/dns-query" {
+		t.Errorf("proxy-server-nameserver = %v, want [https://doh.pub/dns-query] (cnDoH only)", psn)
+	}
+	// With no node_resolver_suffixes configured, no policy block at all —
+	// the default config must contain no plain-UDP resolution path.
+	if _, has := dns["proxy-server-nameserver-policy"]; has {
+		t.Error("proxy-server-nameserver-policy must be absent when no suffixes are configured")
 	}
 	// psn must never contain proxyDoH — that recurses through the proxy
 	// whose server hostname we are trying to resolve.

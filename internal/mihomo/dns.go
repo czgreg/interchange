@@ -39,15 +39,13 @@
 //                        short-circuits the parallel-fallback pattern
 //                        (see "Why no fallback-filter" below).
 //   - proxy-server-nameserver: airport-node hostname resolution. CN DoH
-//                        plus cfg.DNS.NodeResolver (default plain UDP to
-//                        119.29.29.29). Never proxyDoH — that would recurse
-//                        through the proxy we're trying to set up. Plain
-//                        UDP is safe here for the same reason
-//                        default-nameserver is: it's an IP literal, so it
-//                        needs no prior resolution. The UDP upstream is
-//                        required because a DoH frontend answering NXDOMAIN
-//                        for a live node hostname is not recoverable within
-//                        psn — see buildProxyServerNameserver.
+//                        only. Never proxyDoH — that would recurse
+//                        through the proxy we're trying to set up.
+//   - proxy-server-nameserver-policy: per-suffix override of the above,
+//                        for provider ingress domains whose DoH frontend
+//                        intermittently returns NXDOMAIN for live names.
+//                        Deterministic map lookup, NOT a race — see
+//                        buildProxyServerNameserverPolicy.
 //
 // Why no fallback-filter:
 //   The earlier setup used `nameserver: cnDoH; fallback: proxyDoH;
@@ -93,7 +91,14 @@ func (r *Renderer) buildDNS() map[string]any {
 		"default-nameserver":      []string{stripScheme(bootstrap)},
 		"nameserver":              proxyDoH,
 		"nameserver-policy":       buildNameserverPolicy(cnDoH, r.cfg.DNS.FakeIPSkipSuffixes),
-		"proxy-server-nameserver": buildProxyServerNameserver(cnDoH, nodeResolver),
+		"proxy-server-nameserver": dedupeUpstreams(cnDoH),
+	}
+
+	// Per-suffix node-resolver pinning. Emitted only when the operator has
+	// named suffixes, so the default config carries no plain-UDP path.
+	if pol := buildProxyServerNameserverPolicy(
+		r.cfg.DNS.NodeResolverSuffixes, nodeResolver); len(pol) > 0 {
+		dns["proxy-server-nameserver-policy"] = pol
 	}
 
 	if l := r.cfg.DNS.Listen; l != "" {
@@ -105,34 +110,69 @@ func (r *Renderer) buildDNS() map[string]any {
 	return dns
 }
 
-// buildProxyServerNameserver returns the upstream list for mihomo's
-// proxy-server-nameserver: CN DoH first (unchanged behavior, keeps node
-// lookups off the proxy we're trying to build), then the node-resolver
-// upstreams appended and deduplicated.
-//
-// The appended plain-UDP upstream is not redundant with CN DoH. psn is a
-// distinct resolver instance from `nameserver`, and a DoH frontend that
-// answers NXDOMAIN for a live name yields "dns resolve failed: couldn't
-// find ip" at dial time. Measured on node 92 (2026-08-12) against
-// z7mp4a9xq2k8f3r-r9.edg3.org over 15 dials: [doh.pub, alidns] produced 22
-// resolve failures; the same list plus udp://119.29.29.29 produced 1.
-// See DNSConfig.NodeResolver for why this is separate from CNDoH.
-func buildProxyServerNameserver(cnDoH, nodeResolver []string) []string {
-	out := make([]string, 0, len(cnDoH)+len(nodeResolver))
-	seen := make(map[string]bool, len(cnDoH)+len(nodeResolver))
-	for _, u := range cnDoH {
-		if u != "" && !seen[u] {
-			seen[u] = true
-			out = append(out, u)
+// dedupeUpstreams drops empty entries and duplicates while preserving
+// order. Used for proxy-server-nameserver, which is CNDoH-only.
+func dedupeUpstreams(in []string) []string {
+	out := make([]string, 0, len(in))
+	seen := make(map[string]bool, len(in))
+	for _, u := range in {
+		if u == "" || seen[u] {
+			continue
 		}
-	}
-	for _, u := range nodeResolver {
-		if u != "" && !seen[u] {
-			seen[u] = true
-			out = append(out, u)
-		}
+		seen[u] = true
+		out = append(out, u)
 	}
 	return out
+}
+
+// buildProxyServerNameserverPolicy maps each configured node-resolver
+// suffix to the node-resolver upstreams, producing mihomo's
+// proxy-server-nameserver-policy block.
+//
+// This replaced an earlier approach (2026-08-12, commit 86aacc8) that
+// simply appended a plain-UDP upstream to the psn LIST. That approach was
+// built on a wrong model of how psn resolves:
+//
+//   - mihomo fires ALL psn upstreams in PARALLEL through `picker` and takes
+//     the first non-error response.
+//   - NXDOMAIN is not an error in that path. Only RcodeServerFailure and
+//     RcodeRefused convert to errors; RcodeNameError returns (msg, nil).
+//   - So the FASTEST upstream wins, and a fast NXDOMAIN beats a correct
+//     answer from a slower peer. psn also has no `fallback` — ipExchange
+//     returns the picker result directly.
+//
+// Verified on the node rather than reasoned about: with psn =
+// [always-NXDOMAIN-server, udp://119.29.29.29], 10 dials produced 10
+// "dns resolve failed" errors. Adding the healthy upstream did not help at
+// all. With the same psn list plus a policy entry pinning the suffix to
+// udp://119.29.29.29, 10 dials produced 0 failures — the policy is a
+// deterministic lookup that bypasses the race entirely.
+//
+// The old approach also had a silent side effect: 119.29.29.29 answers in
+// 0.04-0.06s versus doh.pub's 0.164-0.291s, so in a latency race it became
+// the de facto primary for every node hostname, moving all node resolution
+// onto a spoofable transport. Scoping by suffix keeps that exposure to the
+// specific provider domains that need it.
+//
+// Returns nil when either input is empty, so no policy block is emitted
+// and psn stays CNDoH-only.
+func buildProxyServerNameserverPolicy(suffixes, nodeResolver []string) map[string]any {
+	ups := dedupeUpstreams(nodeResolver)
+	if len(suffixes) == 0 || len(ups) == 0 {
+		return nil
+	}
+	policy := make(map[string]any, len(suffixes))
+	for _, raw := range suffixes {
+		key := normalizePolicySuffix(raw)
+		if key == "" {
+			continue
+		}
+		policy[key] = ups
+	}
+	if len(policy) == 0 {
+		return nil
+	}
+	return policy
 }
 
 // buildNameserverPolicy maps domain-class keys to CN DoH so that:

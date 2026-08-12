@@ -38,6 +38,11 @@ type Deps struct {
 	// JSONL log). Always non-nil — even when notifications.enabled=false,
 	// API handlers can read status / recent log entries.
 	Notifier *notify.Notifier
+	// Asserter backs /healthz with real data-path assertions. Nil when
+	// gateway.yaml declares no TPROXY data path (client_subnet empty or
+	// tproxy_port 0), in which case /healthz reports liveness only and
+	// says so, rather than claiming a path it never checked.
+	Asserter *dataplane.Asserter
 }
 
 // Renderer is the interface internal/mihomo.Renderer satisfies. Kept as
@@ -160,8 +165,50 @@ func (s *Server) auth(h http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
+// handleHealth reports whether the TPROXY data path actually works.
+//
+// It used to be `writeJSON(w, 200, {"ok": true})` — a hardcoded constant
+// that asserted nothing. On 2026-08-12 proxy traffic was dead for 1h43m
+// (the fwmark policy rule had been deleted by a systemd-networkd restart)
+// and this endpoint returned 200 the entire time, as did engine_ok, which
+// only pings mihomo's clash API and traverses no part of the data path.
+// An endpoint that always says 200 is worse than no endpoint: it looks
+// like coverage.
+//
+// 503 when any assertion failed, so an external uptime monitor pointed
+// here measures something real. Unauthenticated by design (it is the one
+// route outside s.auth) — it exposes check names and states, not secrets.
 func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+	if s.deps.Asserter == nil {
+		// No TPROXY data path declared. Report liveness only, and be
+		// explicit that nothing was asserted.
+		writeJSON(w, http.StatusOK, map[string]any{
+			"ok":     true,
+			"scope":  "process-liveness-only",
+			"detail": "no data-path asserter configured (client_subnet empty or tproxy_port 0)",
+		})
+		return
+	}
+	snap := s.deps.Asserter.Snapshot()
+	if snap.At.IsZero() {
+		// First assertion round has not completed yet. Do not claim health
+		// we have not measured; 503 is the honest answer for the first
+		// few seconds after start.
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{
+			"ok":     false,
+			"detail": "first data-path assertion round has not completed yet",
+		})
+		return
+	}
+	code := http.StatusOK
+	if !snap.Healthy {
+		code = http.StatusServiceUnavailable
+	}
+	writeJSON(w, code, map[string]any{
+		"ok":       snap.Healthy,
+		"asserted": snap.At,
+		"checks":   snap.Checks,
+	})
 }
 
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {

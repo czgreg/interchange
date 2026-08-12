@@ -65,6 +65,10 @@ func main() {
 		fmt.Printf("export LEAP_TPROXY_PORT=%d\n", cfg.DataPlane.TProxyPort)
 		fmt.Printf("export LEAP_TUN0_IFACE=tun0\n")
 		fmt.Printf("export LEAP_API_PORT=%q\n", apiPort)
+		// Space-separated source CIDRs allowed to reach the API port, for
+		// nft.conf's input chain. Empty → loopback only (install.sh emits
+		// no saddr accept rule, so only the `iif lo` rule matches).
+		fmt.Printf("export LEAP_API_ALLOW_FROM=%q\n", strings.Join(cfg.API.AllowFrom, " "))
 		return
 	}
 
@@ -216,6 +220,27 @@ func main() {
 		return
 	}
 
+	// Data-path asserter. Nil when there is no TPROXY path to assert
+	// (client_subnet empty or tproxy_port 0) — /healthz then reports
+	// process liveness only and labels itself as such.
+	asserter := dataplane.NewAsserter(
+		cfg.Node.ClientSubnet, "tun0", cfg.DataPlane.TProxyPort, cfg.DataPlane.ClashAPI)
+	if asserter != nil {
+		asserter.Emit = func(subject, body string, urgent bool) {
+			sev := notify.SeverityInfo
+			if urgent {
+				sev = notify.SeverityUrgent
+			}
+			notifier.Emit(notify.Event{
+				Time:     time.Now(),
+				Severity: sev,
+				Type:     "dataplane_assert",
+				Subject:  subject,
+				Body:     body,
+			})
+		}
+	}
+
 	srv := api.NewServer(api.Deps{
 		Subscribe:  mgr,
 		Scheduler:  sched,
@@ -228,6 +253,7 @@ func main() {
 		RuleSets:   ruleMgr,
 		NodeScorer: nodeScorer,
 		Notifier:   notifier,
+		Asserter:   asserter,
 	})
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -304,6 +330,20 @@ func main() {
 			slog.Warn("whitelistexpand: startup warm failed", "err", err)
 		}
 	}()
+
+	// Data-path assertion + self-repair, every 30s.
+	//
+	// Exists because of the 2026-08-12 outage: a systemd-networkd restart
+	// deleted the `fwmark 0x44 lookup 101` policy rule and proxy traffic
+	// was dead for 1h43m with every health signal green. leap-nft.service
+	// is Type=oneshot + RemainAfterExit=yes, so it cannot re-run its own
+	// ExecStart to repair the loss. See internal/dataplane/assert.go.
+	if asserter != nil {
+		go asserter.Run(ctx, 30*time.Second)
+	} else {
+		slog.Warn("dataplane: asserter disabled — no TPROXY data path in config",
+			"client_subnet", cfg.Node.ClientSubnet, "tproxy_port", cfg.DataPlane.TProxyPort)
+	}
 
 	<-ctx.Done()
 	slog.Info("shutting down")

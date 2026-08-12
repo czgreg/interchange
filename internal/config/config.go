@@ -152,6 +152,26 @@ type CapacityConfig struct {
 type APIConfig struct {
 	Listen string `yaml:"listen"`
 	Token  string `yaml:"token"`
+	// AllowFrom is the source-CIDR allowlist enforced in nft (NOT in Go —
+	// the process still binds Listen as given). Rendered into nft.conf's
+	// input chain by install.sh: loopback plus these CIDRs may reach the
+	// API port, everything else is dropped.
+	//
+	// Needed because the input chain's policy is `accept`, so the old
+	// `tcp dport <api> accept` rule was decorative — deleting it changed
+	// nothing and every source could reach the port. Measured on 92
+	// (2026-08-12) with listen=0.0.0.0:18080 + token="": a VPN client on
+	// the tun0 client_subnet could GET /api/subscriptions and read every
+	// subscription URL including its token query param, and POST/DELETE
+	// /api/subscriptions to mutate them.
+	//
+	// Empty means "loopback only" — the safe default. Widen it only for
+	// the operator network that runs make redeploy-* / deploy.sh, and set
+	// Token as well: AllowFrom is network-layer defence, Token is the
+	// application-layer one, and neither substitutes for the other.
+	// NEVER include the tun0 client_subnet here; those are untrusted
+	// end-user terminals.
+	AllowFrom []string `yaml:"allow_from,omitempty"`
 }
 
 type SubscribeConfig struct {
@@ -294,34 +314,58 @@ type DNSConfig struct {
 	// BootstrapResolver is an IP literal used to resolve any DoH/DoT host
 	// names without chicken-and-egg (e.g. "udp://119.29.29.29").
 	BootstrapResolver string `yaml:"bootstrap_resolver"`
-	// NodeResolver lists additional upstreams appended to mihomo's
-	// proxy-server-nameserver (the resolver used for airport node server
-	// hostnames at dial time). Default ["udp://119.29.29.29"].
+	// NodeResolver lists the upstreams used to resolve the airport-node
+	// server hostnames matched by NodeResolverSuffixes. Default
+	// ["udp://119.29.29.29"]. Only takes effect together with
+	// NodeResolverSuffixes — on its own it does nothing.
 	//
-	// Why this exists, and why it is NOT just CNDoH: proxy-server-nameserver
-	// is a separate resolver instance from `nameserver`, and it does not
-	// recover from a DoH upstream that answers NXDOMAIN for a name that
-	// really exists. Measured on node 92 (2026-08-12) against the ash
-	// provider's ingress z7mp4a9xq2k8f3r-r9.edg3.org, whose CNAME chain is
-	// edge.ashnet.one -> debian18-jp1.2666777.xyz:
+	// Why a plain-UDP upstream is worth having at all: mihomo's
+	// proxy-server-nameserver ("psn") is a separate resolver instance from
+	// `nameserver`, and a DoH frontend that answers NXDOMAIN for a name
+	// that really exists produces "dns resolve failed: couldn't find ip" at
+	// dial time. Measured on node 92 (2026-08-12) against the ash
+	// provider's ingress z7mp4a9xq2k8f3r-r9.edg3.org: doh.pub's DoH
+	// frontend returned NXDOMAIN 0/3 while plain UDP to 119.29.29.29 (same
+	// operator, DNSPod) resolved 5/5. The two frontends do not share
+	// recursion state.
 	//
-	//   psn = [doh.pub, alidns]                -> 22 resolve failures / 15 dials
-	//   psn = [doh.pub, alidns, udp:119.29.29] ->  1 resolve failure  / 15 dials
+	// ⚠️ Appending an upstream to the psn LIST does not reliably fix that,
+	// and the original 2026-08-12 fix which did so was wrong about the
+	// mechanism. mihomo fires ALL psn upstreams in PARALLEL via `picker`
+	// and takes the first non-error answer; NXDOMAIN is NOT an error there
+	// (only SERVFAIL/REFUSED convert), so a fast NXDOMAIN WINS the race and
+	// defeats a healthy upstream in the same list. Verified directly: psn =
+	// [always-NXDOMAIN, udp://119.29.29.29] produced 10 resolve failures in
+	// 10 attempts. List order is cosmetic.
 	//
-	// Plain UDP to the same operator (119.29.29.29 is DNSPod, same as
-	// doh.pub) resolved the chain 5/5 where its own DoH frontend returned
-	// NXDOMAIN 0/3 — the DoH frontend and the UDP frontend do not share
-	// recursion state. This is kept separate from CNDoH deliberately:
-	// CNDoH also feeds nameserver-policy, and adding plain UDP there would
-	// downgrade CN-domain resolution integrity (UDP is spoofable) for every
-	// client query, which is not the tradeoff we want. Node-hostname
-	// resolution is a dial-time internal lookup where availability
-	// dominates.
+	// It also had a side effect: 119.29.29.29 answers in 0.04-0.06s versus
+	// doh.pub's 0.164-0.291s, so in a latency race the plain-UDP upstream
+	// silently became the de facto PRIMARY resolver for every node
+	// hostname, moving all of them onto a spoofable transport.
 	//
-	// To get the old CNDoH-only behavior, set node_resolver to the same
-	// values as cn_doh — they dedupe against each other at render time.
-	// An empty/omitted list takes the default (it is not an opt-out).
+	// Hence the suffix-scoped design: psn itself stays CNDoH-only, and
+	// NodeResolverSuffixes pins just the affected provider domains to these
+	// upstreams via proxy-server-nameserver-policy, which is a deterministic
+	// map lookup rather than a race. Everything else keeps resolving over
+	// DoH.
 	NodeResolver []string `yaml:"node_resolver,omitempty"`
+	// NodeResolverSuffixes lists the domain suffixes pinned to NodeResolver
+	// through mihomo's proxy-server-nameserver-policy. Empty (the default)
+	// means no policy is emitted and psn is CNDoH-only.
+	//
+	// Populate this only for provider ingress domains with a demonstrated
+	// DoH-NXDOMAIN problem, and keep it as narrow as possible: every suffix
+	// listed here is resolved over plain UDP, i.e. spoofable. Node-hostname
+	// resolution is a dial-time internal lookup where availability
+	// dominates integrity, but that tradeoff should be made per-domain, not
+	// globally.
+	//
+	// Accepts "edg3.org", ".edg3.org", or "+.edg3.org" — all normalize to
+	// mihomo's "+.edg3.org" wildcard key form.
+	//
+	// Supported since mihomo v1.19.26 (config/config.go:240); verified with
+	// `mihomo -t` on the node before rollout.
+	NodeResolverSuffixes []string `yaml:"node_resolver_suffixes,omitempty"`
 	// PreloadDomains is the list of overseas domains leap-gateway will
 	// keep warm in mihomo's DNS cache.
 	PreloadDomains []string `yaml:"preload_domains,omitempty"`
@@ -629,12 +673,21 @@ type ProbeCheckConfig struct {
 	// MaxStatus is the inclusive upper bound for status_code = pass.
 	// Default 399 (i.e. 1xx-3xx pass, 4xx/5xx fail).
 	MaxStatus int `yaml:"max_status"`
-	// RejectCFChallenge — if true, response carrying `cf-mitigated:
-	// challenge` header is treated as failure even if status_code is in
-	// range. Catches Cloudflare bot-challenge interstitials that return
-	// 200 + HTML challenge body. Default false; set true on probes that
-	// target CF-protected destinations (chatgpt.com, claude.ai).
-	RejectCFChallenge bool `yaml:"reject_cf_challenge"`
+
+	// NB: there is deliberately no reject_cf_challenge knob. A response
+	// carrying `cf-mitigated: challenge` is ALWAYS a probe failure — see
+	// checkResponse in internal/nodescorer/probe.go.
+	//
+	// The field existed until 2026-08-12 with yaml tag reject_cf_challenge
+	// and doc "default false", but probe.go never read it: the header check
+	// was unconditional from the start. Removed rather than wired up,
+	// because wiring it as documented would have been a regression. A
+	// challenge means the request never reached the origin, so for a probe
+	// whose entire job is measuring egress-IP reputation, counting it as a
+	// pass is exactly backwards — it would let a blocklisted node into
+	// openai-pool. For targets that challenge every headless client
+	// regardless of IP (chatgpt.com's root HTML), the fix is to not probe
+	// that URL; see the probe notes in configs/gateway.example.yaml.
 }
 
 // PoolConfig describes a named select group rendered alongside the default

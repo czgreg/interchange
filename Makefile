@@ -26,6 +26,12 @@ NODE_89     := dianwei@192.168.70.89
 NODE_92     := dianwei@192.168.70.92
 NODE_HOST   := $(word 2,$(subst @, ,$(NODE)))
 LEAP_API    ?= http://$(NODE_HOST):18080
+# Bearer token for the control-plane API (api.token in gateway.yaml).
+# Empty → no Authorization header, which is correct only when the node
+# also leaves api.token empty. Export LEAP_TOKEN in your shell or pass
+# `make LEAP_TOKEN=... status`.
+LEAP_TOKEN  ?=
+LEAP_AUTH   := $(if $(LEAP_TOKEN),-H "Authorization: Bearer $(LEAP_TOKEN)",)
 GATEWAY_YAML?= ./gateway.yaml
 GOOS        ?= linux
 GOARCH      ?= amd64
@@ -120,15 +126,15 @@ deploy-full-LOCAL-YAML: stage  ## ⚠️ 全量重装，使用本地 ./gateway.y
 
 .PHONY: status
 status:  ## GET /api/status
-	@curl -s --max-time 5 $(LEAP_API)/api/status | python3 -m json.tool
+	@curl -s --max-time 5 $(LEAP_AUTH) $(LEAP_API)/api/status | python3 -m json.tool
 
 .PHONY: health
 health:  ## GET /api/proxies/active
-	@curl -s --max-time 5 $(LEAP_API)/api/proxies/active | python3 -m json.tool
+	@curl -s --max-time 5 $(LEAP_AUTH) $(LEAP_API)/api/proxies/active | python3 -m json.tool
 
 .PHONY: nodes
 nodes:  ## GET /api/nodes/health (probe + passive stats)
-	@curl -s --max-time 5 $(LEAP_API)/api/nodes/health | python3 -m json.tool
+	@curl -s --max-time 5 $(LEAP_AUTH) $(LEAP_API)/api/nodes/health | python3 -m json.tool
 
 .PHONY: logs
 logs:  ## tail leap-gateway 日志

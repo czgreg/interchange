@@ -10,9 +10,25 @@ api:
   # 127.0.0.1:8080. Pick something out of the way.
   #
   # 默认 127.0.0.1：API 只接受本机连接。PoC / 内网调试想用 192.168.x.x 直连
-  # 时改成 "0.0.0.0:18080"，并在 token 字段加密钥 + nft 限源。
+  # 时改成 "0.0.0.0:18080"，并把 token 和 allow_from 一起配上。
   listen: "127.0.0.1:18080"
   # token: "change-me"  # uncomment to require Authorization: Bearer <token>
+  #
+  # allow_from：nft 层的源 CIDR 白名单（不在 Go 层生效，进程仍按 listen 绑定）。
+  # 由 install.sh 渲染进 nft.conf 的 input 链：loopback 加这些 CIDR 放行，
+  # 其余 drop。空 = 仅 loopback。
+  #
+  # 必须配，因为 input 链的 policy 是 accept —— 2026-08-12 之前这里只有一条
+  # `tcp dport 18080 accept`，是装饰性的：删掉它端口照样通。92 上实测
+  # listen=0.0.0.0 + token="" 时，tun0 上的 VPN 客户端可以 GET
+  # /api/subscriptions 读到全部订阅 URL（含 token 参数），并用 POST/DELETE
+  # 改写它们。
+  #
+  # ⛔ 绝不要把 node.client_subnet 写进来 —— 那是不可信的终端用户网段，
+  # install.sh 会直接拒绝。token 是应用层防护，allow_from 是网络层，两者
+  # 不能互相替代。
+  # allow_from:
+  #   - "192.168.70.0/24"   # 跑 make deploy-* / redeploy-* 的运维网段
 
 subscribe:
   # 0 = 关闭周期刷新；只接受 POST /api/subscribe/refresh 手动触发。
@@ -21,7 +37,9 @@ subscribe:
   #   2. 节点列表本来就低频变化（手动换 URL 时再调一次接口足够）；
   #   3. 节点健康度由 nodescorer 每 60s 探针在跑，不需要靠重拉订阅"刷新一下"。
   # 想要原来的周期刷新行为：填一个非零 duration（如 30m）。
-  refresh_interval: 0
+  # NB: must be a duration string, not a bare 0 — this field is a
+  # time.Duration and `0` fails to unmarshal ("cannot unmarshal !!int 0").
+  refresh_interval: 0s
   refresh_on_startup: true
   http_timeout: 30s
   # 全局默认 user_agent —— Clash UA 覆盖面广（ash 等机场对 sing-box UA 返回 HTTP 500）。
@@ -81,6 +99,30 @@ data_plane:
       - "tls://1.1.1.1:853"
       - "https://doh.pub/dns-query"
     bootstrap_resolver: "udp://119.29.29.29"
+
+    # 机场节点主机名的解析上游（proxy-server-nameserver）默认只用 cn_doh。
+    # 下面两项是针对「DoH 前端对活着的域名间歇返回 NXDOMAIN」的定向补丁：
+    # node_resolver_suffixes 命中的后缀，改用 node_resolver 解析。
+    #
+    # 为什么必须按后缀限定，而不是把 UDP 上游直接加进 psn 列表：
+    # mihomo 对 psn 的多个上游是**并行竞速**，取第一个非 error 的回答，而
+    # NXDOMAIN 在这条路径上**不算 error**（只有 SERVFAIL/REFUSED 才算）。
+    # 所以最快的 NXDOMAIN 会赢，加健康上游救不回来 —— 节点实测：psn =
+    # [永远 NXDOMAIN 的服务器, udp://119.29.29.29]，10 次拨号 10 次全失败。
+    # 而加上 policy 把后缀钉到 udp://119.29.29.29 后，10 次 0 失败。
+    #
+    # 另外 119.29.29.29 (0.04-0.06s) 比 doh.pub (0.164-0.291s) 快 4-5 倍，
+    # 放进同一个竞速列表会让它静默变成**所有**节点主机名的实际主解析器，
+    # 把节点解析整体挪到可被投毒的明文 UDP 上。按后缀限定就只有确实需要的
+    # provider 域名承担这个风险。
+    #
+    # 默认空 = 不下发 policy，全部走 DoH。只在确认某 provider 的 ingress
+    # 域名有 DoH-NXDOMAIN 问题时才加，并保持尽可能窄。
+    # 需要 mihomo >= v1.19.26。
+    node_resolver:
+      - "udp://119.29.29.29"
+    node_resolver_suffixes: []
+    #  - edg3.org        # ash 的 ingress，2026-08-12 实测 DoH 间歇 NXDOMAIN
 
     # DNS preload — leap-gateway 周期性 resolve 这里列的域名，把对应真实
     # IP 灌进 mihomo 的 DNS 缓存。员工首次访问这些域名时不再付 ~400ms
@@ -197,8 +239,15 @@ node_qualify:
   #     unauthenticated). A hard-blocked IP gets a CF challenge instead,
   #     so 401 = the node's egress IP is accepted by OpenAI. max_status:401.
   #   - api.anthropic.com/v1/models → 401 likewise.
-  # reject_cf_challenge still catches the case where even the API path is
-  # challenged (genuinely blocklisted IP).
+  #
+  # A `cf-mitigated: challenge` response is ALWAYS scored as a failure, on
+  # every probe, and there is no knob to turn that off — a challenge means
+  # the request never reached the origin, so it cannot count as reachable.
+  # That is what catches the case where even the API path is challenged
+  # (genuinely blocklisted egress IP). There WAS a reject_cf_challenge
+  # field until 2026-08-12; it never did anything (the check was always
+  # unconditional) and has been removed. Leftover reject_cf_challenge lines
+  # in an existing gateway.yaml are harmless — unknown keys are ignored.
   #
   # Default 5min interval × N nodes × M probes airport traffic; see the
   # capacity note. ~0.4-1.6% of a 70-100GB/sub monthly quota at 5min.
@@ -209,14 +258,12 @@ node_qualify:
       timeout:  10s
       check:
         max_status: 401          # 401 = reached API, IP accepted
-        reject_cf_challenge: true
     - name: anthropic-api
       url:  https://api.anthropic.com/v1/models
       interval: 5m
       timeout:  10s
       check:
         max_status: 401
-        reject_cf_challenge: true
     - name: accounts.google.com
       url:  https://accounts.google.com/
       interval: 5m

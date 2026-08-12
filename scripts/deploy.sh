@@ -125,7 +125,11 @@ for HOST in "${HOSTS[@]}"; do
   # Verify
   log "  verifying ..."
   sleep 3
-  DEPLOYED_VER=$(curl -s -m6 "http://$HOST:18080/api/proxies/active" \
+  # LEAP_TOKEN, when exported, authenticates against api.token. Unset →
+  # no header, correct for nodes that leave api.token empty.
+  AUTH=()
+  [ -n "${LEAP_TOKEN:-}" ] && AUTH=(-H "Authorization: Bearer $LEAP_TOKEN")
+  DEPLOYED_VER=$(curl -s -m6 "${AUTH[@]}" "http://$HOST:18080/api/proxies/active" \
     | python3 -c "import sys,json;print(json.load(sys.stdin)['leap']['gateway_version'])" 2>/dev/null || echo "API_UNREACHABLE")
   if [ "$DEPLOYED_VER" = "API_UNREACHABLE" ]; then
     fail "$HOST: API unreachable after restart — check 'journalctl -u leap-gateway'"

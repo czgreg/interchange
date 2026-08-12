@@ -3,6 +3,7 @@
 /dist/
 /build/
 *.exe
+/gateway
 
 # Stage cache (sing-box downloads)
 /.cache/

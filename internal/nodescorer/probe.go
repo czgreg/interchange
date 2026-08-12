@@ -184,6 +184,12 @@ func (s *Scorer) runProbe(ctx context.Context, p config.ProbeConfig) ProbeResult
 	// Cloudflare bot-challenge detection: CF returns 200 + a JS-challenge
 	// HTML body but sets cf-mitigated: challenge. Treat as failure even
 	// though the status code is in range.
+	//
+	// UNCONDITIONAL, by design — there is no per-probe opt-out. A challenge
+	// means the request never reached the origin, so a probe measuring
+	// egress-IP reputation must not score it as a pass. Config used to
+	// carry a reject_cf_challenge field that this code never read (removed
+	// 2026-08-12); see ProbeCheckConfig in internal/config/config.go.
 	if cf := resp.Header.Get("cf-mitigated"); strings.EqualFold(cf, "challenge") {
 		res.CFMitigated = true
 		res.LastError = "cloudflare challenge (cf-mitigated: challenge)"

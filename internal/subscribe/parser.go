@@ -36,10 +36,6 @@ type Manager struct {
 	onUADiscovered func(name, ua string)
 }
 
-func NewManager(entries []config.SubscriptionEntry) *Manager {
-	return NewManagerWithFetch(entries, 30*time.Second, "ClashforWindows/0.20.39")
-}
-
 // NewManagerWithFetch lets callers thread http_timeout and user_agent from
 // config — many subscription providers gate by UA, so the default
 // "leap-gateway/0.1" gets connection-reset on some upstreams.

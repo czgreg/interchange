@@ -23,9 +23,23 @@ table inet leap {
     # preserving the original client sourceIP (10.8.x.x).
   }
 
-  # leap-gateway API access.
+  # leap-gateway API access — source-restricted.
+  #
+  # This chain's policy is `accept`, so an `accept` rule alone grants
+  # nothing: before 2026-08-12 the rule here was `tcp dport @API_PORT@
+  # accept`, which was purely decorative. With listen=0.0.0.0 and an
+  # empty token that left the whole control plane open to every source
+  # that could route to the node — including tun0 VPN clients, which
+  # could read subscription URLs (with tokens) via GET /api/subscriptions
+  # and mutate them via POST/DELETE.
+  #
+  # The final `drop` is what actually restricts; the accepts above it are
+  # the allowlist. @API_ALLOW_RULES@ is rendered by install.sh from
+  # api.allow_from (empty → loopback only).
   chain input {
     type filter hook input priority filter; policy accept;
-    tcp dport @API_PORT@ accept
+    iif "lo" tcp dport @API_PORT@ accept
+@API_ALLOW_RULES@
+    tcp dport @API_PORT@ drop
   }
 }
