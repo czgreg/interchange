@@ -225,6 +225,62 @@ func TestParseSingBox(t *testing.T) {
 	}
 }
 
+// parseSingBox is the only parser that passes outbounds through instead of
+// rebuilding them, so it was the only one accepting an entry with no
+// server / server_port. Those reached the renderer as `server: <nil>`, and
+// — more damaging — an empty server is the bootstrap key for fault-domain
+// grouping, where it silently buckets unrelated nodes into one domain.
+// Assert the entries are dropped, and that dropping one does not discard
+// the valid siblings alongside it.
+func TestParseSingBox_RejectsMissingServerOrPort(t *testing.T) {
+	body := []byte(`{"outbounds":[
+		{"type":"vmess","tag":"ok","server":"1.1.1.1","server_port":443,"uuid":"x"},
+		{"type":"vmess","tag":"no-server","server_port":443,"uuid":"x"},
+		{"type":"vmess","tag":"empty-server","server":"","server_port":443,"uuid":"x"},
+		{"type":"vmess","tag":"no-port","server":"2.2.2.2","uuid":"x"},
+		{"type":"vmess","tag":"zero-port","server":"3.3.3.3","server_port":0,"uuid":"x"},
+		{"type":"trojan","tag":"ok2","server":"4.4.4.4","server_port":8443,"password":"p"}
+	]}`)
+	out, err := parseSingBox(body)
+	if err != nil {
+		t.Fatalf("parseSingBox: %v", err)
+	}
+	got := map[string]bool{}
+	for _, o := range out {
+		tag, _ := o["tag"].(string)
+		got[tag] = true
+	}
+	for _, want := range []string{"ok", "ok2"} {
+		if !got[want] {
+			t.Errorf("valid outbound %q was dropped; got %v", want, got)
+		}
+	}
+	for _, bad := range []string{"no-server", "empty-server", "no-port", "zero-port"} {
+		if got[bad] {
+			t.Errorf("outbound %q has no usable server/port and must be dropped; got %v", bad, got)
+		}
+	}
+	if len(out) != 2 {
+		t.Errorf("expected exactly the 2 valid outbounds, got %d (%v)", len(out), got)
+	}
+}
+
+// server_port arriving as a JSON string is normal in the wild (some
+// providers quote it). getInt handles that, so such an entry must survive
+// — the validation is "no usable port", not "port is not a JSON number".
+func TestParseSingBox_AcceptsStringPort(t *testing.T) {
+	body := []byte(`{"outbounds":[
+		{"type":"vmess","tag":"quoted","server":"1.1.1.1","server_port":"443","uuid":"x"}
+	]}`)
+	out, err := parseSingBox(body)
+	if err != nil {
+		t.Fatalf("parseSingBox: %v", err)
+	}
+	if len(out) != 1 || out[0]["tag"] != "quoted" {
+		t.Errorf("string server_port must be accepted, got %#v", out)
+	}
+}
+
 func TestDetectAndParse_Clash(t *testing.T) {
 	body := []byte("proxies:\n  - name: x\n    type: ss\n    server: 1.1.1.1\n    port: 8388\n    cipher: aes-256-gcm\n    password: p\n")
 	out, format, err := detectAndParse(body)

@@ -40,13 +40,29 @@ const (
 )
 
 // Controller manages the proxy data-plane process (mihomo). Reload
-// hot-reloads via clash-api PUT /configs?force=true (in-process,
-// preserves established TCP connections incl. the leap-gateway HTTP API
-// client and any in-flight ssh sessions). Falls back to `systemctl
-// restart` only when clash-api is unreachable — that path drops user
-// connections briefly and on at least one node (89, 2026-06-07) leaks
-// out to the host SSH session via leap-nft's PartOf=leap-mihomo restart
-// chain re-running iproute.sh.
+// hot-reloads via clash-api PUT /configs?force=true (in-process — no
+// process restart, so the listeners stay bound and leap-gateway's own API
+// client / in-flight ssh sessions survive).
+//
+// It does NOT preserve users' established proxied connections. This
+// comment claimed it did until 2026-08-12; the claim was wrong and had
+// two independent measurements against it:
+//   - a reload during a stress run reset the workers' in-flight
+//     connections, showing up as a 23.3% ERR spike for that tier
+//     (memory/stress-baseline-2026-06-07.md)
+//   - each reload rebuilds the LoadBalance consistent-hash ring, which
+//     breaks long-lived flows — the ChatGPT SSE stalls that motivated
+//     the Plan-A time-scale split
+//     (memory/nodescorer-time-scale-split.md)
+//
+// Treat every reload as user-visible: that is precisely why the scorer
+// throttles it (hot_reload_min_interval) and why pool churn is a cost
+// to be minimized rather than a free correction.
+//
+// Falls back to `systemctl restart` only when clash-api is unreachable —
+// that path additionally drops the listeners, and on at least one node
+// (89, 2026-06-07) leaked out to the host SSH session via leap-nft's
+// PartOf=leap-mihomo restart chain re-running iproute.sh.
 type Controller struct {
 	api    config.ClashAPIConfig
 	client *http.Client

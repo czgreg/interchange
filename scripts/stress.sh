@@ -104,12 +104,19 @@ cleanup() {
     done
     kill -9 "$CHILD_PID" 2>/dev/null || true
   fi
+  for wp in "${worker_pids[@]:-}"; do
+    [ -n "$wp" ] && kill "$wp" 2>/dev/null || true
+  done
   jobs -p | xargs -r kill 2>/dev/null || true
   rm -rf "$WORKDIR"
   [ -n "$CHILD_DIR" ] && rm -rf "$CHILD_DIR"
   return 0
 }
-trap cleanup EXIT
+# HUP/INT/TERM as well as EXIT: an EXIT-only trap does not fire when the
+# controlling ssh session is killed, which orphaned a child mihomo holding
+# port 21080 and made the next run refuse to start.
+trap cleanup EXIT HUP INT TERM
+worker_pids=()
 
 # ---- single-egress mode -------------------------------------------------
 
@@ -303,8 +310,15 @@ for tier in $TIERS; do
   : >"$WORKDIR/tier.log"
   # Spawn `tier` workers, each writing to the shared tier.log (append is
   # atomic for short lines on Linux).
+  # Collect worker PIDs explicitly. A bare `wait` would also wait on the
+  # child mihomo from single-egress mode, which never exits — that hung the
+  # first real run for 8 minutes at tier 5 with the tier data already
+  # collected. `wait` waits for ALL background jobs, and EGRESS mode adds
+  # one that runs forever, so the worker PIDs have to be named.
+  worker_pids=()
   for i in $(seq 1 "$tier"); do
     worker "$i" "$WORKDIR/tier.log" &
+    worker_pids+=($!)
   done
 
   # Let the tier warm up briefly, then sample proc over the hold window.
@@ -319,7 +333,10 @@ for tier in $TIERS; do
   done
 
   touch "$WORKDIR/stop"
-  wait 2>/dev/null || true
+  # Only the workers — never a bare `wait` (see worker_pids above).
+  for wp in "${worker_pids[@]}"; do
+    wait "$wp" 2>/dev/null || true
+  done
 
   # Aggregate request stats from tier.log (col1=http_code, col2=time_total s).
   cpu_avg=$((cpu_sum / (cpu_n>0?cpu_n:1)))

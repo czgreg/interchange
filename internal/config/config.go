@@ -565,7 +565,20 @@ type NodeQualifyConfig struct {
 	// Tuning: compositeScore is roughly p95_ms scale (with jitter +
 	// fail_rate contributions). 100 ≈ "100ms p95 better" — modest
 	// but meaningful. 300 = "300ms p95 better OR fail_rate 0.30 lower"
-	// = strong signal required. Default 100 in auto mode.
+	// = strong signal required.
+	//
+	// Default is 400 (applyDefaults), NOT 100 — this comment said 100
+	// until 2026-08-12 while the code had said 400 since the anti-flap
+	// work; 100 was measured to swap ~67×/24h.
+	//
+	// NB: this gate is an ABSOLUTE score margin, so it is calibrated to
+	// whatever scale compositeScore happens to be on. Any change to the
+	// score's dominant term rescales the gate's effective strictness
+	// without touching this number — e.g. moving the latency term from an
+	// unloaded rtt_p95 (~245ms observed) to a concurrent-load p95
+	// (~1562ms observed) inflates inter-node gaps ~6× and thereby
+	// weakens this gate ~6×. If you change compositeScore, re-derive
+	// this value in the same change.
 	SwapThresholdScore float64 `yaml:"swap_threshold_score"`
 
 	// PoolMode selects who owns pool composition.
