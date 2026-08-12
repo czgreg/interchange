@@ -199,7 +199,15 @@ type Scorer struct {
 	httpc      *http.Client // clash-api client
 	probeHTTPc *http.Client // dials through the leap-probe listener
 
-	// throughput tracking: previous /connections snapshot
+	// throughput tracking: previous /connections snapshot, keyed by
+	// CONNECTION ID (not node). Keyed by node until 2026-08-12, which made
+	// the delta wrong in both directions — see updateThroughput.
+	//
+	// Deliberately separate state from connSeen below, even though both
+	// track live connections: passivePoll runs on its own 10s ticker while
+	// updateThroughput runs once per scoring round, so sharing one map
+	// would make each overwrite the other's baseline and corrupt both
+	// time deltas.
 	connPrev  map[string]connBytes
 	connPrevT time.Time
 
@@ -288,7 +296,11 @@ type nodeState struct {
 	hardFailStart time.Time
 }
 
+// connBytes is one connection's last-observed cumulative counters, plus
+// the node it egresses through (needed to attribute its delta after the
+// connection is gone from the live set).
 type connBytes struct {
+	node     string
 	upload   int64
 	download int64
 }
@@ -1289,9 +1301,16 @@ func (s *Scorer) updateThroughput(ctx context.Context, proxies map[string]map[st
 		return nil
 	}
 	now := time.Now()
-	curr := map[string]connBytes{}
-	// Find which node (leaf of chains) each connection goes through.
+	// Snapshot per CONNECTION, not per node. Aggregating to the node here
+	// is what broke the old implementation: node totals are computed over
+	// the LIVE set, which churns, so the node-level difference conflated
+	// "bytes moved" with "which connections happen to be open".
+	curr := make(map[string]connBytes, len(conns))
 	for _, c := range conns {
+		id, _ := c["id"].(string)
+		if id == "" {
+			continue
+		}
 		chains, _ := c["chains"].([]interface{})
 		if len(chains) == 0 {
 			continue
@@ -1303,10 +1322,7 @@ func (s *Scorer) updateThroughput(ctx context.Context, proxies map[string]map[st
 		}
 		up, _ := c["upload"].(float64)
 		dn, _ := c["download"].(float64)
-		cb := curr[node]
-		cb.upload += int64(up)
-		cb.download += int64(dn)
-		curr[node] = cb
+		curr[id] = connBytes{node: node, upload: int64(up), download: int64(dn)}
 	}
 
 	result := map[string]float64{}
@@ -1316,19 +1332,36 @@ func (s *Scorer) updateThroughput(ctx context.Context, proxies map[string]map[st
 		s.connPrevT = now
 		return result
 	}
-	for node, cb := range curr {
-		prev := s.connPrev[node]
-		deltaUp := cb.upload - prev.upload
-		deltaDn := cb.download - prev.download
-		if deltaUp < 0 {
-			deltaUp = 0
+
+	// Per-connection deltas, then sum per node. Counters are monotonic
+	// within one connection's lifetime, so a negative delta can only mean
+	// an id was reused for a different connection; treat that as new.
+	byNode := map[string]int64{}
+	for id, cb := range curr {
+		prev, seen := s.connPrev[id]
+		var d int64
+		if !seen || cb.upload < prev.upload || cb.download < prev.download {
+			// New this interval (or reused id): everything it has moved
+			// was moved during this interval.
+			d = cb.upload + cb.download
+		} else {
+			d = (cb.upload - prev.upload) + (cb.download - prev.download)
 		}
-		if deltaDn < 0 {
-			deltaDn = 0
+		byNode[cb.node] += d
+	}
+	// Connections that closed during the interval are gone from `curr`, so
+	// their last-poll-to-close bytes are unrecoverable from /connections
+	// alone — a residual undercount bounded by one interval per closed
+	// connection. What matters is that this no longer zeroes the whole
+	// node: previously a single large connection closing made the node
+	// total drop, the delta go negative, and the clamp discard every
+	// still-live connection's traffic on that node as well.
+	for node, total := range byNode {
+		if total <= 0 {
+			continue
 		}
-		bps := float64(deltaUp+deltaDn) / dt
-		if bps > 0 {
-			result[node] = math.Round(bps)
+		if bps := math.Round(float64(total) / dt); bps > 0 {
+			result[node] = bps
 		}
 	}
 	s.connPrev = curr
