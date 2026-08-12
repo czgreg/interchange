@@ -82,10 +82,19 @@ log "verifying $HOST API (may take a few seconds while services restart)"
 sleep 6
 # LEAP_TOKEN, when exported, authenticates against api.token. Unset → no
 # header, correct for nodes that leave api.token empty.
-AUTH=()
-[ -n "${LEAP_TOKEN:-}" ] && AUTH=(-H "Authorization: Bearer $LEAP_TOKEN")
+# Auth header as a single optional arg rather than an array: under `set -u`,
+# bash <4.4 (macOS's system /bin/bash is 3.2) treats "${AUTH[@]}" on an
+# empty array as an unbound-variable error, not "expands to nothing" — hit
+# in production on 2026-08-12, aborting verification after every install
+# had already succeeded.
+AUTHOPT=""
+[ -n "${LEAP_TOKEN:-}" ] && AUTHOPT="Authorization: Bearer $LEAP_TOKEN"
 for i in 1 2 3; do
-  RESP=$(curl -s --max-time 6 "${AUTH[@]}" "http://$HOST:18080/api/proxies/active" 2>/dev/null || true)
+  if [ -n "$AUTHOPT" ]; then
+    RESP=$(curl -s --max-time 6 -H "$AUTHOPT" "http://$HOST:18080/api/proxies/active" 2>/dev/null || true)
+  else
+    RESP=$(curl -s --max-time 6 "http://$HOST:18080/api/proxies/active" 2>/dev/null || true)
+  fi
   [ -n "$RESP" ] && break
   sleep 3
 done

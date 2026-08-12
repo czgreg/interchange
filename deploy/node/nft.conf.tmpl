@@ -34,8 +34,17 @@ table inet leap {
   # and mutate them via POST/DELETE.
   #
   # The final `drop` is what actually restricts; the accepts above it are
-  # the allowlist. @API_ALLOW_RULES@ is rendered by install.sh from
-  # api.allow_from (empty → loopback only).
+  # the allowlist, rendered by install.sh from api.allow_from (empty →
+  # loopback only). The placeholder line for that allowlist is directly
+  # below this comment block — do NOT spell out its literal text (with
+  # the @ signs) anywhere else in this file. install.sh substitutes it
+  # with an awk substring match (sed can't splice embedded newlines
+  # portably), so a second occurrence — even inside a comment — gets
+  # replaced too and lands wherever that comment happens to sit, outside
+  # any chain. That happened on 2026-08-12: the sentence you are reading
+  # used to name the placeholder inline and broke `nft -f` in production,
+  # which made leap-nft.service's oneshot ExecStart fail before it ever
+  # reached `iproute.sh up`, leaving the node without its TPROXY rules.
   chain input {
     type filter hook input priority filter; policy accept;
     iif "lo" tcp dport @API_PORT@ accept
