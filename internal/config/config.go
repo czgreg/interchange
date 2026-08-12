@@ -294,6 +294,34 @@ type DNSConfig struct {
 	// BootstrapResolver is an IP literal used to resolve any DoH/DoT host
 	// names without chicken-and-egg (e.g. "udp://119.29.29.29").
 	BootstrapResolver string `yaml:"bootstrap_resolver"`
+	// NodeResolver lists additional upstreams appended to mihomo's
+	// proxy-server-nameserver (the resolver used for airport node server
+	// hostnames at dial time). Default ["udp://119.29.29.29"].
+	//
+	// Why this exists, and why it is NOT just CNDoH: proxy-server-nameserver
+	// is a separate resolver instance from `nameserver`, and it does not
+	// recover from a DoH upstream that answers NXDOMAIN for a name that
+	// really exists. Measured on node 92 (2026-08-12) against the ash
+	// provider's ingress z7mp4a9xq2k8f3r-r9.edg3.org, whose CNAME chain is
+	// edge.ashnet.one -> debian18-jp1.2666777.xyz:
+	//
+	//   psn = [doh.pub, alidns]                -> 22 resolve failures / 15 dials
+	//   psn = [doh.pub, alidns, udp:119.29.29] ->  1 resolve failure  / 15 dials
+	//
+	// Plain UDP to the same operator (119.29.29.29 is DNSPod, same as
+	// doh.pub) resolved the chain 5/5 where its own DoH frontend returned
+	// NXDOMAIN 0/3 — the DoH frontend and the UDP frontend do not share
+	// recursion state. This is kept separate from CNDoH deliberately:
+	// CNDoH also feeds nameserver-policy, and adding plain UDP there would
+	// downgrade CN-domain resolution integrity (UDP is spoofable) for every
+	// client query, which is not the tradeoff we want. Node-hostname
+	// resolution is a dial-time internal lookup where availability
+	// dominates.
+	//
+	// To get the old CNDoH-only behavior, set node_resolver to the same
+	// values as cn_doh — they dedupe against each other at render time.
+	// An empty/omitted list takes the default (it is not an opt-out).
+	NodeResolver []string `yaml:"node_resolver,omitempty"`
 	// PreloadDomains is the list of overseas domains leap-gateway will
 	// keep warm in mihomo's DNS cache.
 	PreloadDomains []string `yaml:"preload_domains,omitempty"`
@@ -757,6 +785,9 @@ func (c *DataPlaneConfig) ApplyDefaults() {
 	}
 	if c.DNS.BootstrapResolver == "" {
 		c.DNS.BootstrapResolver = "udp://119.29.29.29"
+	}
+	if len(c.DNS.NodeResolver) == 0 {
+		c.DNS.NodeResolver = []string{"udp://119.29.29.29"}
 	}
 	if c.DNS.PreloadInterval == 0 && len(c.DNS.PreloadDomains) > 0 {
 		c.DNS.PreloadInterval = 5 * time.Minute

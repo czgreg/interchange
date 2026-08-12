@@ -429,10 +429,21 @@ func TestRenderer_DNSNameserverPolicy(t *testing.T) {
 		t.Errorf("dns.nameserver = %v, want [tls://1.1.1.1:853] (proxyDoH default)", ns)
 	}
 
-	// proxy-server-nameserver = cnDoH (unchanged; airport-node resolution)
+	// proxy-server-nameserver = cnDoH + NodeResolver (default plain UDP).
+	// The UDP upstream is load-bearing: a DoH frontend that answers
+	// NXDOMAIN for a live node hostname is not recoverable within psn.
 	psn, _ := dns["proxy-server-nameserver"].([]any)
-	if len(psn) != 1 || psn[0] != "https://doh.pub/dns-query" {
-		t.Errorf("proxy-server-nameserver = %v, want cnDoH list", psn)
+	if len(psn) != 2 || psn[0] != "https://doh.pub/dns-query" || psn[1] != "udp://119.29.29.29" {
+		t.Errorf("proxy-server-nameserver = %v, want [cnDoH..., udp://119.29.29.29]", psn)
+	}
+	// psn must never contain proxyDoH — that recurses through the proxy
+	// whose server hostname we are trying to resolve.
+	for _, u := range psn {
+		for _, p := range r.cfg.DNS.ProxyDoH {
+			if u == p {
+				t.Errorf("proxy-server-nameserver contains proxyDoH %q — recursion risk", p)
+			}
+		}
 	}
 
 	// nameserver-policy keys
