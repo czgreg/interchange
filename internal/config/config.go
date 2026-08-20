@@ -152,23 +152,14 @@ type CapacityConfig struct {
 type APIConfig struct {
 	Listen string `yaml:"listen"`
 	Token  string `yaml:"token"`
-	// AllowFrom is the source-CIDR allowlist enforced in nft (NOT in Go —
-	// the process still binds Listen as given). Rendered into nft.conf's
-	// input chain by install.sh: loopback plus these CIDRs may reach the
-	// API port, everything else is dropped.
+	// AllowFrom is a legacy/additive source-CIDR accept list rendered into
+	// nft.conf by install.sh (NOT enforced in Go; the process still binds
+	// Listen as given). The nft policy denies 10.8.0.0/16 and accepts other
+	// sources by default, so this list is normally redundant.
 	//
-	// Needed because the input chain's policy is `accept`, so the old
-	// `tcp dport <api> accept` rule was decorative — deleting it changed
-	// nothing and every source could reach the port. Measured on 92
-	// (2026-08-12) with listen=0.0.0.0:18080 + token="": a VPN client on
-	// the tun0 client_subnet could GET /api/subscriptions and read every
-	// subscription URL including its token query param, and POST/DELETE
-	// /api/subscriptions to mutate them.
-	//
-	// Empty means "loopback only" — the safe default. Widen it only for
-	// the operator network that runs make redeploy-* / deploy.sh, and set
-	// Token as well: AllowFrom is network-layer defence, Token is the
-	// application-layer one, and neither substitutes for the other.
+	// The fixed 10.8.0.0/16 deny is independent of this list. Token remains
+	// the application-layer protection and should be configured when Listen
+	// is exposed beyond loopback.
 	// NEVER include the tun0 client_subnet here; those are untrusted
 	// end-user terminals.
 	AllowFrom []string `yaml:"allow_from,omitempty"`

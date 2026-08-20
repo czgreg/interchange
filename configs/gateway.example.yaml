@@ -9,24 +9,17 @@ api:
   # 18080 (not 8080) — feilian-sentry on the forwarding node already binds
   # 127.0.0.1:8080. Pick something out of the way.
   #
-  # 默认 127.0.0.1：API 只接受本机连接。PoC / 内网调试想用 192.168.x.x 直连
-  # 时改成 "0.0.0.0:18080"，并把 token 和 allow_from 一起配上。
+  # 默认 127.0.0.1：API 只接受本机连接。需要远程访问时改成
+  # "0.0.0.0:18080"；节点防火墙默认允许非 10.8.0.0/16 来源访问，
+  # 并固定拒绝 Fei连终端网段。生产环境仍应配置 token。
   listen: "127.0.0.1:18080"
   # token: "change-me"  # uncomment to require Authorization: Bearer <token>
   #
-  # allow_from：nft 层的源 CIDR 白名单（不在 Go 层生效，进程仍按 listen 绑定）。
-  # 由 install.sh 渲染进 nft.conf 的 input 链：loopback 加这些 CIDR 放行，
-  # 其余 drop。空 = 仅 loopback。
+  # allow_from：兼容旧配置的 nft 源 CIDR 放行项（不在 Go 层生效，进程仍按
+  # listen 绑定）。当前默认策略已经允许非 10.8.0.0/16 来源，故该列表通常
+  # 不需要填写；10.8.0.0/16 仍会被固定拒绝。
   #
-  # 必须配，因为 input 链的 policy 是 accept —— 2026-08-12 之前这里只有一条
-  # `tcp dport 18080 accept`，是装饰性的：删掉它端口照样通。92 上实测
-  # listen=0.0.0.0 + token="" 时，tun0 上的 VPN 客户端可以 GET
-  # /api/subscriptions 读到全部订阅 URL（含 token 参数），并用 POST/DELETE
-  # 改写它们。
-  #
-  # ⛔ 绝不要把 node.client_subnet 写进来 —— 那是不可信的终端用户网段，
-  # install.sh 会直接拒绝。token 是应用层防护，allow_from 是网络层，两者
-  # 不能互相替代。
+  # token 是应用层防护；即使网络层默认放行，也建议配置 token。
   # allow_from:
   #   - "192.168.70.0/24"   # 跑 make deploy-* / redeploy-* 的运维网段
 

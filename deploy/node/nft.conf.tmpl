@@ -23,7 +23,7 @@ table inet leap {
     # preserving the original client sourceIP (10.8.x.x).
   }
 
-  # leap-gateway API access — source-restricted.
+  # leap-gateway API access — deny FeiLian client addresses, allow the rest.
   #
   # This chain's policy is `accept`, so an `accept` rule alone grants
   # nothing: before 2026-08-12 the rule here was `tcp dport @API_PORT@
@@ -33,22 +33,21 @@ table inet leap {
   # could read subscription URLs (with tokens) via GET /api/subscriptions
   # and mutate them via POST/DELETE.
   #
-  # The final `drop` is what actually restricts; the accepts above it are
-  # the allowlist, rendered by install.sh from api.allow_from (empty →
-  # loopback only). The placeholder line for that allowlist is directly
-  # below this comment block — do NOT spell out its literal text (with
-  # the @ signs) anywhere else in this file. install.sh substitutes it
-  # with an awk substring match (sed can't splice embedded newlines
-  # portably), so a second occurrence — even inside a comment — gets
-  # replaced too and lands wherever that comment happens to sit, outside
-  # any chain. That happened on 2026-08-12: the sentence you are reading
-  # used to name the placeholder inline and broke `nft -f` in production,
-  # which made leap-nft.service's oneshot ExecStart fail before it ever
-  # reached `iproute.sh up`, leaving the node without its TPROXY rules.
+  # The client-source deny is enforced in iproute.sh before TPROXY, where
+  # the original destination can still be distinguished as node-local. Do
+  # not repeat that deny in this input chain: TPROXY makes remote destinations
+  # look locally delivered here, so a port-only source deny would also block
+  # remote servers' TCP/18080 connections.
+  # The final accept makes 18080 reachable from other routed networks by
+  # default. api.allow_from remains an additive, backward-compatible accept
+  # list, but is no longer required for access.
+  # The placeholder line for that list is directly below this comment block.
+  # install.sh substitutes it with an awk substring match (sed can't splice
+  # embedded newlines portably).
   chain input {
     type filter hook input priority filter; policy accept;
     iif "lo" tcp dport @API_PORT@ accept
 @API_ALLOW_RULES@
-    tcp dport @API_PORT@ drop
+    tcp dport @API_PORT@ accept
   }
 }

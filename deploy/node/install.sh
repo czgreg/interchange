@@ -270,10 +270,11 @@ install_nft() {
   [ -n "${LEAP_API_PORT:-}" ]      || fail "LEAP_API_PORT missing in /etc/leap/env (re-run install_leap)"
 
   # Render one `ip saddr <cidr> ... accept` line per api.allow_from entry.
-  # Empty list → no lines → only the `iif "lo"` rule accepts, so the API is
-  # loopback-only. Refuse any CIDR that overlaps the tun0 client subnet:
-  # those are untrusted end-user terminals and must never reach the control
-  # plane (see APIConfig.AllowFrom).
+  # The nft template now has a fixed deny for 10.8.0.0/16 followed by a
+  # default accept for other sources. These entries remain for compatibility
+  # with existing configs and are redundant unless the template is customized.
+  # Refuse the exact tun0 client subnet because those are untrusted end-user
+  # terminals and must never reach the control plane.
   api_allow_rules=""
   for cidr in ${LEAP_API_ALLOW_FROM:-}; do
     if [ "$cidr" = "$LEAP_CLIENT_SUBNET" ]; then

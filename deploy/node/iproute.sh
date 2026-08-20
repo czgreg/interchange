@@ -25,6 +25,7 @@ ENV_FILE="/etc/leap/env"
 
 CLIENT_SUBNET="${LEAP_CLIENT_SUBNET:-}"
 TPROXY_PORT="${LEAP_TPROXY_PORT:-0}"
+API_PORT="${LEAP_API_PORT:-18080}"
 TUN0_IFACE="${LEAP_TUN0_IFACE:-tun0}"
 TPROXY_MARK="0x44"
 TPROXY_TABLE="101"
@@ -36,6 +37,8 @@ TPROXY_TABLE="101"
 # rule targeting port 0.
 [ "$TPROXY_PORT" -gt 0 ] 2>/dev/null \
     || { echo "LEAP_TPROXY_PORT=$TPROXY_PORT — set data_plane.tproxy_port (e.g. 7893) in /etc/leap/gateway.yaml and re-run install.sh" >&2; exit 1; }
+[ "$API_PORT" -gt 0 ] 2>/dev/null \
+    || { echo "LEAP_API_PORT=$API_PORT — set api.listen to a valid port in /etc/leap/gateway.yaml and re-run install.sh" >&2; exit 1; }
 
 tproxy_up() {
     # Ensure xt_TPROXY module is loaded.
@@ -72,6 +75,17 @@ tproxy_up() {
         -j TPROXY --on-port "$TPROXY_PORT" --on-ip 127.0.0.1 \
         --tproxy-mark "$TPROXY_MARK/$TPROXY_MARK"
 
+    # Block FeiLian client addresses from reaching the gateway API before
+    # the generic TPROXY jump. Without this early drop, mihomo can accept a
+    # client connection to the node's own API port before the inet/leap input
+    # chain sees it, bypassing the source deny in nft.conf.
+    while iptables -t mangle -D PREROUTING -i "$TUN0_IFACE" \
+        -s 10.8.0.0/16 -m addrtype --dst-type LOCAL \
+        -p tcp --dport "$API_PORT" -j DROP 2>/dev/null; do :; done
+    iptables -t mangle -I PREROUTING 1 -i "$TUN0_IFACE" \
+        -s 10.8.0.0/16 -m addrtype --dst-type LOCAL \
+        -p tcp --dport "$API_PORT" -j DROP
+
     # Attach to PREROUTING: apply TPROXY only to client traffic on tun0.
     # Idempotent: delete existing rule before adding.
     iptables -t mangle -D PREROUTING -i "$TUN0_IFACE" -s "$CLIENT_SUBNET" \
@@ -83,6 +97,11 @@ tproxy_up() {
 }
 
 tproxy_down() {
+    # Remove the API deny rule before removing the generic TPROXY jump.
+    while iptables -t mangle -D PREROUTING -i "$TUN0_IFACE" \
+        -s 10.8.0.0/16 -m addrtype --dst-type LOCAL \
+        -p tcp --dport "$API_PORT" -j DROP 2>/dev/null; do :; done
+
     # Remove PREROUTING jump rule.
     iptables -t mangle -D PREROUTING -i "$TUN0_IFACE" -s "$CLIENT_SUBNET" \
         -j LEAP_TPROXY 2>/dev/null || true
