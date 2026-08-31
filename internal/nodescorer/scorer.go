@@ -1173,7 +1173,19 @@ func (s *Scorer) computeEligibleSetLocked(nodes []NodeHealth, minPool int, now t
 		name := nodes[i].Name
 		if nodes[i].Qualified &&
 			!s.inQuarantine(name, now) &&
-			(!s.inTrial(name, now) || s.poolSet[name]) {
+			(!s.inTrial(name, now) || s.poolSet[name]) &&
+			// Measured-history gate (O1): a node with no probe history yet
+			// is only admitted if it is already an INCUMBENT (in the current
+			// pool — e.g. restored by poolSet across a restart, still in its
+			// url-test-history-rebuild window). A NON-incumbent with
+			// ProbeCount==0 is a node whose alive bit just flickered on
+			// (scoreNode gives it Qualified=true "benefit of doubt"); routing
+			// traffic to it before a single real measurement is what let the
+			// flapping-dead ash nodes (US-01..05) get admitted, carry traffic
+			// for a round, reveal fail=1.0, and drop — ~3 flaps/15min of pure
+			// churn. It is still probed via usPoolAll, so it can EARN
+			// admission once ProbeCount>0; it just does not carry users first.
+			(nodes[i].ProbeCount > 0 || s.poolSet[name]) {
 			eligible[name] = true
 		}
 	}
@@ -1209,6 +1221,39 @@ func (s *Scorer) computeEligibleSetLocked(nodes []NodeHealth, minPool int, now t
 				break
 			}
 			eligible[c.name] = true
+		}
+
+		// Cold-start last resort: genuine first boot (empty poolSet, no
+		// node has probe history yet) leaves both the main gate and the
+		// ProbeCount>0 fill empty — which would starve the data plane of a
+		// us-pool entirely. Only here do we fall back to benefit-of-doubt
+		// (alive + Qualified, ProbeCount==0) nodes, best-EWMA first, purely
+		// to bring the pool up to the floor until real probes arrive. This
+		// does NOT reopen the flap: it fires only when fewer than minPool
+		// measured OR incumbent nodes exist, i.e. cold start, not steady
+		// state.
+		if len(eligible) < minPool {
+			cold := make([]string, 0, len(nodes))
+			for i := range nodes {
+				name := nodes[i].Name
+				// Availability floor: bypass trial AND quarantine here, same
+				// as the legacy MinPoolSize safety net — on cold start every
+				// node is in-trial (no history), so respecting trial would
+				// starve the pool for 24h. Only Qualified (alive, non-
+				// catastrophic) nodes are eligible.
+				if nodes[i].Qualified && !eligible[name] {
+					cold = append(cold, name)
+				}
+			}
+			sort.Slice(cold, func(i, j int) bool {
+				return s.nodeLongEWMA(cold[i]) < s.nodeLongEWMA(cold[j])
+			})
+			for _, name := range cold {
+				if len(eligible) >= minPool {
+					break
+				}
+				eligible[name] = true
+			}
 		}
 	}
 	return eligible

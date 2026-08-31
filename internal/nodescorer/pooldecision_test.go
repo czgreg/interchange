@@ -761,3 +761,73 @@ func TestShadowMode_DoesNotChangeLivePool(t *testing.T) {
 		t.Errorf("live pool = 9 → shadow leaked into the live decision (should be legacy K=%d)", k)
 	}
 }
+
+// TestEligibility_O1_FlapBackNodeExcluded: a non-incumbent alive node with
+// no probe history (ProbeCount==0, Qualified via benefit-of-doubt) must NOT
+// be admitted to routing — this is the flapping-dead-node case (US-01..05
+// flicker alive, get admitted, reveal fail=1.0, drop). It stays out until it
+// earns ProbeCount>0.
+func TestEligibility_O1_FlapBackNodeExcluded(t *testing.T) {
+	cfg := eligibilityCfg()
+	nodes := map[string]proxyNode{
+		"sub/good1":   {alive: true, history: goodHistory(100)},
+		"sub/good2":   {alive: true, history: goodHistory(120)},
+		"sub/good3":   {alive: true, history: goodHistory(140)},
+		"sub/flapper": {alive: true, history: []int{}}, // ProbeCount==0, just flickered alive
+	}
+	s, _, _ := newDecisionScorer(t, cfg, nodes)
+	// good1-3 established in pool; flapper is NOT (it just came back).
+	s.poolSet = map[string]bool{"sub/good1": true, "sub/good2": true, "sub/good3": true}
+	s.score(context.Background())
+
+	pool := inPoolNames(s.GetSnapshot())
+	if pool["sub/flapper"] {
+		t.Errorf("flap-back node (ProbeCount==0, non-incumbent) was admitted; pool=%v", pool)
+	}
+	if len(pool) != 3 {
+		t.Errorf("pool=%d want 3 (the 3 measured good nodes); pool=%v", len(pool), pool)
+	}
+}
+
+// TestEligibility_O1_IncumbentNoHistoryKept: an INCUMBENT with ProbeCount==0
+// (e.g. url-test history wiped by a hot-reload/restart, but it was measured-
+// good before and restored via poolSet) must be KEPT through the rebuild
+// window — otherwise every hot-reload would drain the pool.
+func TestEligibility_O1_IncumbentNoHistoryKept(t *testing.T) {
+	cfg := eligibilityCfg()
+	nodes := map[string]proxyNode{
+		"sub/inc1": {alive: true, history: []int{}}, // incumbent, history rebuilding
+		"sub/inc2": {alive: true, history: []int{}},
+		"sub/inc3": {alive: true, history: []int{}},
+	}
+	s, _, _ := newDecisionScorer(t, cfg, nodes)
+	s.poolSet = map[string]bool{"sub/inc1": true, "sub/inc2": true, "sub/inc3": true}
+	s.score(context.Background())
+
+	pool := inPoolNames(s.GetSnapshot())
+	for _, n := range []string{"sub/inc1", "sub/inc2", "sub/inc3"} {
+		if !pool[n] {
+			t.Errorf("incumbent %s (ProbeCount==0, rebuild window) was dropped; pool=%v", n, pool)
+		}
+	}
+}
+
+// TestEligibility_O1_ColdStartFillsFloor: genuine first boot — empty poolSet,
+// every node ProbeCount==0. The cold-start last-resort must still bring the
+// pool up to min_pool_size so the data plane has a us-pool.
+func TestEligibility_O1_ColdStartFillsFloor(t *testing.T) {
+	cfg := eligibilityCfg() // min_pool_size=3
+	nodes := map[string]proxyNode{
+		"sub/n1": {alive: true, history: []int{}},
+		"sub/n2": {alive: true, history: []int{}},
+		"sub/n3": {alive: true, history: []int{}},
+		"sub/n4": {alive: true, history: []int{}},
+	}
+	s, _, _ := newDecisionScorer(t, cfg, nodes) // poolSet empty (fresh)
+	s.score(context.Background())
+
+	pool := inPoolNames(s.GetSnapshot())
+	if len(pool) < 3 {
+		t.Fatalf("cold start pool=%d, want >= min_pool 3 (data plane must not be starved); pool=%v", len(pool), pool)
+	}
+}
