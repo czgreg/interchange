@@ -154,3 +154,10 @@ HRW 黏性让池波动对个体用户基本不可见。**所以"波动太剧烈"
 - 稳态观察:Hutao p95 702–1155 vs ash·GCP 189–199,真实延迟落差 = O3 范畴(非本轮处理,U1 已砍)。
 - **决策**:平静期到,推进最高优先级根缺口(incumbent 留住 mihomo-dead 节点)的设计→交叉审核(2 agent 判是否过度设计 + 正确性)。审核通过才部署;若判 mihomo fallback 已够=过度设计,则不部署。
 - **设计提案(送审)**:in-pool 节点连续 `deadEvictRounds`(提案 2 轮≈10min)alive=false 即从承流集剔除(即便 recentOk>0 判 Qualified)。单次翻动不剔(避 Plan-A 的 30s alive 噪声),持续死亡被剔(让 HRW 重算到活节点)。需 per-node 连续-dead 计数。
+
+### 2h 循环 #3/#4 + dead-evict 部署(f3778da)
+- 循环判定:多轮观察池在 8-12 间因 Hutao 单节点 1-轮闪动波动,均自愈、0 用户搁浅、0 在慢节点、p95 稳态 183-307(Hutao 已从退化恢复)。健康。
+- **dead-evict 修复上线**(f3778da):关闭 alive=false 软死 incumbent 被无限期留池的根缺口。两份交叉审核(过度设计 + 正确性)均判 SHIP-with-guards,守护全实现:debounce=4(非2,避 Plan-A alive 噪声)、floor-subordinate(Q4)、抑制重纳(Q3)、deadRounds 不持久化、首剔 slog、3 测试。趁平静窗口(全活 softdead=0)部署,修复此刻无对象、只对未来 >20min 持续退化生效。
+- **部署瞬态**:redeploy-full 重启 mihomo → scorer 首轮 total=0 → pool_size=0(监控报 POOL<5)→ 下一轮恢复到 10。数据面全程由 mihomo 上一份 22 成员 us-pool 服务,**无用户中断**。这是 redeploy 的固有启动瞬态(每次重启 mihomo 都有),非回归。已加恢复 watcher 确认。
+- **优先级更新**:根缺口(最高优先级)已修部署。剩余:①O3 per-destination 信号(BGP_E 坏腿仍不可见)②结果监控 ③cap_per_node 重测 ④U2 去抖。
+- **元教训**:本会话我多次误判"通道被污染",每次自检(6*7=42/编译器/JSON)均干净;retract。今后仅当自检真的算错才视为通道故障,不因显示毛刺阻断已授权的自主工作。
