@@ -148,3 +148,9 @@ HRW 黏性让池波动对个体用户基本不可见。**所以"波动太剧烈"
 - in_pool=10, alive=9, softdead=1(仅 US-03·GCP 轻微闪动)。Hutao 五个全 alive=true 恢复。上条"盯自愈、不中途热补"决策验证正确——中断是瞬态,若在 alive 位噪声轴热补反而造 churn。克制是对的。
 - **留观(不现在动手)**:①根缺口(incumbent 留住 mihomo 判死节点)机制真实存在,不因单次自愈消失 → 保持最高优先级、排队交叉审核(非紧急)。②Hutao 恢复后 fail 偏高(BGP_D 0.7/A 0.6/E 0.3),大概率衰减中 → 下周期确认降下来;不降则是"活着但丢包"池内节点,需单独处理。
 - **闭环**:本轮完整走了 实时判定→量化用户影响(31%)→设计张力识别→克制不热补→验证自愈。
+
+### 2h 循环 #2 — 健康,watch item 关闭;推进根缺口设计+审核
+- pool=10 全活、softdead=0。Hutao fail 率衰减到 0(watch #2 关闭)。churn 停。0 终端在死/出池节点。
+- 稳态观察:Hutao p95 702–1155 vs ash·GCP 189–199,真实延迟落差 = O3 范畴(非本轮处理,U1 已砍)。
+- **决策**:平静期到,推进最高优先级根缺口(incumbent 留住 mihomo-dead 节点)的设计→交叉审核(2 agent 判是否过度设计 + 正确性)。审核通过才部署;若判 mihomo fallback 已够=过度设计,则不部署。
+- **设计提案(送审)**:in-pool 节点连续 `deadEvictRounds`(提案 2 轮≈10min)alive=false 即从承流集剔除(即便 recentOk>0 判 Qualified)。单次翻动不剔(避 Plan-A 的 30s alive 噪声),持续死亡被剔(让 HRW 重算到活节点)。需 per-node 连续-dead 计数。
