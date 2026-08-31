@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sort"
 	"time"
 )
 
@@ -31,6 +32,14 @@ type stateFileV3 struct {
 	Transitions        []PoolTransition          `json:"transitions,omitempty"`
 	RollbackQuarantine map[string]time.Time      `json:"rollback_quarantine,omitempty"`
 	EWMA               map[string]*nodeEWMA      `json:"ewma,omitempty"`
+	// PoolSet is the current us-pool membership. Persisted so the anti-flap
+	// hysteresis state survives a restart: without it, loadState leaves
+	// s.poolSet empty and the next round runs the bootstrap path
+	// (scorer.go), which bypasses the swap gate + readmit throttle and
+	// rebuilds the whole pool through the unguarded fill. Optional field —
+	// a v3 file written before this change lacks the key and unmarshals to
+	// nil, which is handled as "cold start" (recompute from current signal).
+	PoolSet []string `json:"pool_set,omitempty"`
 }
 
 // stateFileV2 is the on-disk format v2 — wraps the per-node map in a
@@ -93,12 +102,25 @@ func (s *Scorer) loadState() {
 			if v3.EWMA != nil {
 				s.ewma = copyEWMA(v3.EWMA)
 			}
+			// Restore pool membership so anti-flap hysteresis survives the
+			// restart. A file predating this field leaves PoolSet nil →
+			// s.poolSet stays empty → the next round cold-starts from the
+			// current signal (same as a genuine first run). We do NOT trust
+			// on-disk strike counts as dwell state on cold start; they are
+			// restored above only for diagnostics/emergency timers.
+			if len(v3.PoolSet) > 0 {
+				s.poolSet = make(map[string]bool, len(v3.PoolSet))
+				for _, tag := range v3.PoolSet {
+					s.poolSet[tag] = true
+				}
+			}
 			slog.Info("nodescorer: restored state v3",
 				"nodes", len(v3.Nodes),
 				"effective_pool", len(s.effectivePool),
 				"events", len(s.emergencyEvents),
 				"transitions", len(s.transitions),
-				"quarantined", len(s.rollbackQuarantine))
+				"quarantined", len(s.rollbackQuarantine),
+				"pool_set", len(s.poolSet))
 			return
 		}
 	}
@@ -229,6 +251,12 @@ func (s *Scorer) saveStateLocked() {
 			HardFailStart: st.hardFailStart,
 		}
 	}
+	poolSet := make([]string, 0, len(s.poolSet))
+	for tag := range s.poolSet {
+		poolSet = append(poolSet, tag)
+	}
+	sort.Strings(poolSet) // stable on-disk order for clean diffs
+
 	v3 := stateFileV3{
 		Version:            3,
 		Nodes:              nodes,
@@ -238,6 +266,7 @@ func (s *Scorer) saveStateLocked() {
 		Transitions:        append([]PoolTransition(nil), s.transitions...),
 		RollbackQuarantine: copyQuarantine(s.rollbackQuarantine),
 		EWMA:               copyEWMA(s.ewma),
+		PoolSet:            poolSet,
 	}
 
 	data, err := json.MarshalIndent(v3, "", "  ")

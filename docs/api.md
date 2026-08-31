@@ -64,7 +64,8 @@ token 为空时不鉴权。
   "last_refresh":    "2026-06-06T12:00:00Z",
   "node_count":      136,
   "subscriptions":   4,
-  "pool_qualified":  19,
+  "pool_size":       19,
+  "pool_eligible":   19,
   "pool_total":      22,
   "pool_last_update":"2026-06-06T11:58:00Z",
   "capacity": {
@@ -79,7 +80,9 @@ token 为空时不鉴权。
 | 字段 | 说明 |
 |---|---|
 | `engine_ok` | mihomo clash-api `/version` 可达 |
-| `pool_qualified/total` | 当前 us-pool 成员数 / NodePattern-匹配的候选总数。post Plan-A：us-pool = 全部候选，所以稳态下两者相等；不等只发生在订阅刚增减节点 + 下一轮 scoring 之间（数秒内）。 |
+| `pool_size` | 实际承载流量的 us-pool 成员数（InPool，即 per-terminal HRW 抽取的集合大小）。 |
+| `pool_eligible` | 通过准入门的节点数（tier1）。eligibility 模式下稳态等于 `pool_size`；legacy K-gating 下 `pool_size` 被 K 截断、`pool_eligible` 可更大。（旧字段 `pool_qualified` 名为"合格数"实为 InPool，已拆成这两个诚实字段。） |
+| `pool_total` | NodePattern-匹配的候选总数。 |
 | `pool_last_update` | us-pool 成员最近一次变更时间。变更频率 ≈ 订阅增减节点频率（小时-天级）。 |
 | `capacity` | 离线压测得出的单机上限，未配置时不返回 |
 

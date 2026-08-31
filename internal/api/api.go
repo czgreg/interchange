@@ -227,12 +227,30 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	// Expose NodeScorer pool summary when active (engine=mihomo).
 	if s.deps.NodeScorer != nil {
 		snap := s.deps.NodeScorer.GetSnapshot()
-		resp["pool_qualified"] = snap.Qualified
+		// Admission/eligibility readout — two honest, distinct numbers:
+		//   pool_size     = nodes actually carrying traffic (InPool).
+		//   pool_eligible = nodes passing the liveness/admission gate
+		//                   (Tier1Count). Under eligibility mode these are
+		//                   normally equal; under legacy K-gating pool_size
+		//                   is capped at K while pool_eligible can be larger.
+		// (The former "pool_qualified" field is dropped: its name said
+		// "qualified" but it counted InPool, conflating the two and
+		// misleading the operator about how many nodes actually pass the
+		// gate. Use pool_eligible for that.)
+		resp["pool_size"] = snap.Qualified
+		resp["pool_eligible"] = snap.PoolSizing.Tier1Count
 		resp["pool_total"] = snap.Total
 		resp["pool_last_update"] = snap.LastPoolUpdate
-		// K-gating diagnostics. KTarget=0 means K-gating disabled (legacy
-		// "every qualified candidate in pool" mode); the block is still
-		// surfaced so operators can confirm config wiring.
+		// sizing_mode tells the consumer how to read pool_sizing below:
+		//   "legacy"      — k_target is a real K-gating TARGET (pool is
+		//                   capped/filled to it); k_current may differ during
+		//                   hysteresis.
+		//   "eligibility" — there is NO target; k_target is set equal to the
+		//                   eligible pool size purely for display, so
+		//                   k_target == k_current always. supply_limited then
+		//                   means "eligible count fell to the min_pool floor".
+		resp["sizing_mode"] = s.deps.Cfg.NodeQualify.SizingMode
+		// pool_sizing: K-gating diagnostics. Interpret per sizing_mode above.
 		resp["pool_sizing"] = snap.PoolSizing
 		// 24h pool churn metric — answers "is the system thrashing?"
 		// without scrolling /api/pool/transitions.

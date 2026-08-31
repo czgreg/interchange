@@ -226,9 +226,9 @@ type Scorer struct {
 	// startup to detect "ops edited yaml" vs "we drifted via emergency"
 	// (yaml edit resets effective to the new baseline). emergencyEvents
 	// is a recent log surfaced via /api/pool/state.
-	effectivePool    []string
-	yamlBaseline     []string
-	emergencyEvents  []EmergencyEvent
+	effectivePool   []string
+	yamlBaseline    []string
+	emergencyEvents []EmergencyEvent
 
 	// transitions is the audit log of pool composition changes (auto K-
 	// gating swaps, manual emergency events, operator API actions). Capped
@@ -320,27 +320,27 @@ func New(
 	// at. Short timeout — a probe that hangs is itself a failure signal.
 	probeProxy, _ := url.Parse("http://127.0.0.1:11081")
 	return &Scorer{
-		cfg:            cfg,
-		pools:          append([]config.PoolConfig(nil), pools...),
-		nodePattern:    nodePattern,
-		apiAddr:        apiAddr,
-		apiSecret:      apiSecret,
-		probeURL:       probeURL,
-		renderer:       r,
-		subscribe:      allOutbounds,
-		state:          map[string]*nodeState{},
-		poolSet:        map[string]bool{},
-		poolMembers:    map[string][]string{},
-		probeResults:   map[string]map[string]ProbeResult{},
-		probeLast:      map[string]map[string]time.Time{},
-		probeOKHistory: map[string]map[string][]bool{},
-		connPrev:       map[string]connBytes{},
-		connSeen:       map[string]connInfo{},
-		closeEvents:    map[string][]closeEvent{},
-		activeConns:    map[string]int{},
+		cfg:                cfg,
+		pools:              append([]config.PoolConfig(nil), pools...),
+		nodePattern:        nodePattern,
+		apiAddr:            apiAddr,
+		apiSecret:          apiSecret,
+		probeURL:           probeURL,
+		renderer:           r,
+		subscribe:          allOutbounds,
+		state:              map[string]*nodeState{},
+		poolSet:            map[string]bool{},
+		poolMembers:        map[string][]string{},
+		probeResults:       map[string]map[string]ProbeResult{},
+		probeLast:          map[string]map[string]time.Time{},
+		probeOKHistory:     map[string]map[string][]bool{},
+		connPrev:           map[string]connBytes{},
+		connSeen:           map[string]connInfo{},
+		closeEvents:        map[string][]closeEvent{},
+		activeConns:        map[string]int{},
 		rollbackQuarantine: map[string]time.Time{},
 		ewma:               map[string]*nodeEWMA{},
-		httpc:          &http.Client{Timeout: 5 * time.Second},
+		httpc:              &http.Client{Timeout: 5 * time.Second},
 		probeHTTPc: &http.Client{
 			Timeout:   12 * time.Second,
 			Transport: &http.Transport{Proxy: http.ProxyURL(probeProxy)},
@@ -556,6 +556,7 @@ func (s *Scorer) score(ctx context.Context) {
 	if minPool <= 0 {
 		minPool = 3
 	}
+	now := time.Now()
 
 	switch s.cfg.PoolMode {
 	case "manual":
@@ -629,8 +630,23 @@ func (s *Scorer) score(ctx context.Context) {
 		_ = emergencyMutated // surface via /api/pool/state; reload comes from poolChanged below
 
 	case "auto", "":
-		{
-			// K-gated mode. Two-window EWMA decisions:
+		if s.cfg.SizingMode == "eligibility" {
+			// Eligibility-set selection (docs/design-eligibility-set-selection.md).
+			// No fixed-K target, no ranking cut, no fast-evict, no swap
+			// threshold, no fill post-pass. The routing set is simply every
+			// node that passes the existing liveness gate (Qualified) and the
+			// two admission filters, fed whole to per-terminal HRW. K survives
+			// only as a redundancy floor (minPool) with a stable fill. This
+			// eliminates the marginal-slot ping-pong by construction: there is
+			// no slot to contest.
+			s.eligibilityPoolLocked(nodes, newPoolSet, minPool, now)
+			// kTarget/supplyLimited are display-only under eligibility mode;
+			// recompute supplyLimited against the floor, and surface the
+			// eligible count as kTarget so /api/status reads sensibly.
+			kTarget = len(newPoolSet)
+			supplyLimited = len(newPoolSet) < minPool
+		} else {
+			// K-gated mode (legacy). Two-window EWMA decisions:
 			//   - Sort qualified by LONG EWMA (24h half-life) → drives the
 			//     promote ranking. Conservative: a recently-recovered node
 			//     stays out until the long window forgets the bad period.
@@ -650,7 +666,6 @@ func (s *Scorer) score(ctx context.Context) {
 			sort.SliceStable(qualifiedNodes, func(i, j int) bool {
 				return s.nodeLongEWMA(qualifiedNodes[i].Name) < s.nodeLongEWMA(qualifiedNodes[j].Name)
 			})
-			now := time.Now()
 			preferredSet := make(map[string]bool, kTarget)
 			for i := 0; i < len(qualifiedNodes) && len(preferredSet) < kTarget; i++ {
 				name := qualifiedNodes[i].Name
@@ -908,6 +923,26 @@ func (s *Scorer) score(ctx context.Context) {
 	}
 	_ = supplyLimited // surfaced via /api/status, not gating logic
 
+	// Shadow mode: while legacy is live, compute what eligibility-set
+	// selection WOULD pick this round and log the diff, changing nothing.
+	// Pre-cutover validation — run ≥24h, read the diffs, then flip
+	// sizing_mode. Pure (computeEligibleSetLocked mutates nothing), so it
+	// cannot perturb the live legacy decision above.
+	if s.cfg.SizingShadow && s.cfg.SizingMode != "eligibility" && s.cfg.PoolMode != "manual" {
+		shadow := s.computeEligibleSetLocked(nodes, minPool, now)
+		// diffPools(a,b) → (added=b\a, removed=a\b). With a=live, b=shadow:
+		// added = shadowOnly (eligibility would add), removed = liveOnly
+		// (legacy keeps, eligibility would drop).
+		shadowOnly, liveOnly := diffPools(setToSortedSlice(newPoolSet), setToSortedSlice(shadow))
+		slog.Info("nodescorer: shadow eligibility diff",
+			"live_pool", len(newPoolSet),
+			"shadow_pool", len(shadow),
+			"only_in_live", liveOnly,      // legacy keeps, eligibility would drop
+			"only_in_shadow", shadowOnly,  // eligibility would add, legacy excludes
+			"identical", len(liveOnly) == 0 && len(shadowOnly) == 0,
+		)
+	}
+
 	// Sort: qualified first, then by RTT.
 	sort.Slice(nodes, func(i, j int) bool {
 		if nodes[i].Qualified != nodes[j].Qualified {
@@ -923,7 +958,7 @@ func (s *Scorer) score(ctx context.Context) {
 		}
 	}
 
-	now := time.Now().UTC()
+	now = time.Now().UTC()
 	poolChanged := !poolSetsEqual(s.poolSet, newPoolSet)
 
 	// Compute named-pool memberships: us-pool ∩ {nodes passing the pool's
@@ -1084,6 +1119,99 @@ func (s *Scorer) score(ctx context.Context) {
 		s.lastHotReload = now
 		go s.hotReload(context.Background(), usPoolAll, routingMembers, members)
 	}
+}
+
+// eligibilityPoolLocked builds newPoolSet under sizing_mode=eligibility:
+// the routing set is every node that passes the existing liveness gate
+// (Qualified) plus the two admission filters (not quarantined; not a fresh
+// trial node unless already in the pool). No fixed-K target, no ranking cut,
+// no fast-evict, no swap threshold, no fill-to-K post-pass — so there is no
+// marginal slot for nodes to ping-pong over. See
+// docs/design-eligibility-set-selection.md.
+//
+// min_pool_size is the only size number: if fewer than minPool nodes pass,
+// admit the best available Qualified non-members up to the floor, preferring
+// nodes ALREADY in the pool (incumbency) so a floor-bound pool does not
+// re-pick its filler on EWMA noise every round (the one anti-flap piece the
+// simplification kept). Below the floor, per-terminal HRW top-2 silently
+// disables and one terminal's traffic splits across nodes by destination —
+// so the floor protects the single-egress invariant, and a slow node beats
+// no node.
+//
+// CALLER MUST HOLD s.mu.
+func (s *Scorer) eligibilityPoolLocked(nodes []NodeHealth, newPoolSet map[string]bool, minPool int, now time.Time) {
+	eligible := s.computeEligibleSetLocked(nodes, minPool, now)
+	for i := range nodes {
+		name := nodes[i].Name
+		st := s.state[name]
+		if eligible[name] {
+			st.strikes = 0
+			st.okRuns++
+			newPoolSet[name] = true
+			nodes[i].InPool = true
+		} else {
+			// Diagnostic counters only; eligibility does not gate on them.
+			st.okRuns = 0
+			st.strikes++
+		}
+		nodes[i].Strikes = st.strikes
+		nodes[i].OkRounds = st.okRuns
+		st.health = nodes[i]
+	}
+}
+
+// computeEligibleSetLocked is the PURE, side-effect-free membership function
+// shared by the live eligibility path and the shadow-mode logger. It reads
+// node health + s.poolSet/inTrial/inQuarantine/nodeLongEWMA and returns the
+// set of nodes that should carry traffic; it mutates NOTHING (no newPoolSet,
+// no nodes[].InPool, no st counters). Keeping it pure is what lets shadow
+// mode run it in parallel with the live legacy decision without perturbing
+// anything. CALLER MUST HOLD s.mu.
+func (s *Scorer) computeEligibleSetLocked(nodes []NodeHealth, minPool int, now time.Time) map[string]bool {
+	eligible := make(map[string]bool, len(nodes))
+	for i := range nodes {
+		name := nodes[i].Name
+		if nodes[i].Qualified &&
+			!s.inQuarantine(name, now) &&
+			(!s.inTrial(name, now) || s.poolSet[name]) {
+			eligible[name] = true
+		}
+	}
+
+	// Redundancy floor with incumbency. Admit best-available Qualified
+	// non-members up to minPool, sticking with the incumbent filler first so
+	// the fill does not rotate on EWMA noise while floor-bound.
+	if len(eligible) < minPool {
+		type cand struct {
+			name      string
+			incumbent bool
+			ewma      float64
+		}
+		candidates := make([]cand, 0, len(nodes))
+		for i := range nodes {
+			name := nodes[i].Name
+			if nodes[i].Qualified && nodes[i].ProbeCount > 0 && !eligible[name] {
+				candidates = append(candidates, cand{
+					name:      name,
+					incumbent: s.poolSet[name],
+					ewma:      s.nodeLongEWMA(name),
+				})
+			}
+		}
+		sort.Slice(candidates, func(i, j int) bool {
+			if candidates[i].incumbent != candidates[j].incumbent {
+				return candidates[i].incumbent // keep the incumbent filler
+			}
+			return candidates[i].ewma < candidates[j].ewma
+		})
+		for _, c := range candidates {
+			if len(eligible) >= minPool {
+				break
+			}
+			eligible[c.name] = true
+		}
+	}
+	return eligible
 }
 
 // computePoolMembers maps each configured pool → the subset of the given

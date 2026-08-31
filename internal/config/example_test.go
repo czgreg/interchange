@@ -47,3 +47,24 @@ func TestExampleConfigLoads(t *testing.T) {
 			c.DataPlane.DNS.NodeResolverSuffixes)
 	}
 }
+
+// TestSizingModeDefaultAndValidation pins the fail-closed behavior of the
+// new node_qualify.sizing_mode field: empty → "legacy", a valid value is
+// preserved, and an unrecognized value falls back to "legacy" rather than
+// silently running an unintended sizer.
+func TestSizingModeDefaultAndValidation(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"", "legacy"},
+		{"legacy", "legacy"},
+		{"eligibility", "eligibility"},
+		{"elegibility", "legacy"}, // typo → fail-closed
+		{"garbage", "legacy"},
+	}
+	for _, tc := range cases {
+		c := &NodeQualifyConfig{SizingMode: tc.in}
+		c.applyDefaults()
+		if c.SizingMode != tc.want {
+			t.Errorf("sizing_mode %q → %q, want %q", tc.in, c.SizingMode, tc.want)
+		}
+	}
+}

@@ -12,6 +12,7 @@ package config
 
 import (
 	"fmt"
+	"log/slog"
 	"os"
 	"time"
 
@@ -588,6 +589,35 @@ type NodeQualifyConfig struct {
 	// migrated. Operator should set "manual" + populate PoolMembers.
 	PoolMode string `yaml:"pool_mode"`
 
+	// SizingMode selects the pool-composition algorithm WITHIN auto mode.
+	// Orthogonal to PoolMode: it only takes effect when PoolMode=auto and
+	// is ignored under manual.
+	//
+	//	"legacy"      — K-gating: computeK forces a fixed target size and
+	//	                the fill post-pass refills to it every round. This is
+	//	                the source of the chronic ~50 swaps/day (a slower node
+	//	                is forced into the marginal slot, then ping-pongs).
+	//	"eligibility" — no fixed K. The routing set = every node that passes
+	//	                the quality gate (with hysteresis); per-terminal HRW
+	//	                draws from that variable-size set. K survives only as
+	//	                a redundancy floor (min_pool_size) and a safety ceiling
+	//	                (k_max). See docs/design-eligibility-set-selection.md.
+	//
+	// Default "legacy" so existing deployments are unchanged until the
+	// operator opts in after shadow-mode validation. An unrecognized value
+	// falls back to "legacy" with a warning (fail-closed) — a typo must not
+	// silently run an unintended sizer.
+	SizingMode string `yaml:"sizing_mode"`
+
+	// SizingShadow, when true and SizingMode=legacy, runs the eligibility
+	// selection IN PARALLEL each scoring round and logs how it WOULD differ
+	// from the live legacy decision — without changing any actual pool
+	// membership. This is the pre-cutover validation path: run it in
+	// production for ≥24h, read the diff logs, and only then flip
+	// sizing_mode to "eligibility". No effect when SizingMode=eligibility
+	// (the eligibility path is already live) — the diff would be empty.
+	SizingShadow bool `yaml:"sizing_shadow"`
+
 	// PoolMembers is the operator-owned list of node tags that carry
 	// production traffic when PoolMode=manual. Members must reference
 	// node tags that exist in the active subscription set; missing tags
@@ -927,6 +957,16 @@ func (c *NodeQualifyConfig) applyDefaults() {
 	}
 	if c.PoolMode == "" {
 		c.PoolMode = "auto"
+	}
+	switch c.SizingMode {
+	case "":
+		c.SizingMode = "legacy"
+	case "legacy", "eligibility":
+		// valid
+	default:
+		slog.Warn("nodescorer: unrecognized sizing_mode, falling back to legacy",
+			"got", c.SizingMode)
+		c.SizingMode = "legacy"
 	}
 	c.PoolSizing.applyDefaults()
 	for i := range c.Probes {

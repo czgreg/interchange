@@ -17,9 +17,11 @@ package nodescorer
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"math"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -580,3 +582,182 @@ func TestSanitizeEWMA_ScrubsPoisonedPointsOnLoad(t *testing.T) {
 
 
 
+
+// TestPoolSetSurvivesSaveLoad verifies the pool membership persists across a
+// restart (save → new Scorer → load), so anti-flap hysteresis state is not
+// lost. Without this the reloaded scorer starts with an empty poolSet and the
+// next round runs the unguarded bootstrap path.
+func TestPoolSetSurvivesSaveLoad(t *testing.T) {
+	dir := t.TempDir()
+	s := newTestScorer(defaultCfg())
+	s.state = map[string]*nodeState{}
+	s.renderer = &emergencyTestRenderer{path: dir + "/cfg.yaml"}
+	s.poolSet = map[string]bool{"nodeA": true, "nodeB": true, "nodeC": true}
+
+	s.mu.Lock()
+	s.saveStateLocked()
+	s.mu.Unlock()
+
+	// Fresh scorer pointed at the same state file (same renderer path).
+	s2 := newTestScorer(defaultCfg())
+	s2.state = map[string]*nodeState{}
+	s2.renderer = &emergencyTestRenderer{path: dir + "/cfg.yaml"}
+	s2.loadState()
+
+	if len(s2.poolSet) != 3 {
+		t.Fatalf("poolSet size after reload = %d, want 3 (%v)", len(s2.poolSet), s2.poolSet)
+	}
+	for _, tag := range []string{"nodeA", "nodeB", "nodeC"} {
+		if !s2.poolSet[tag] {
+			t.Errorf("poolSet missing %q after reload", tag)
+		}
+	}
+}
+
+// TestPoolSetColdStartWhenAbsent verifies a state file with no pool_set key
+// (written before the field existed) reloads to an empty poolSet — the
+// cold-start path — rather than crashing or inventing membership.
+func TestPoolSetColdStartWhenAbsent(t *testing.T) {
+	dir := t.TempDir()
+	// Hand-write a v3 file lacking the pool_set key.
+	legacy := `{"version":3,"nodes":{"nodeA":{"strikes":5,"ok_rounds":2}},"effective_pool":["nodeA"]}`
+	if err := os.WriteFile(dir+"/nodescorer-state.json", []byte(legacy), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s := newTestScorer(defaultCfg())
+	s.state = map[string]*nodeState{}
+	s.renderer = &emergencyTestRenderer{path: dir + "/cfg.yaml"}
+	s.loadState()
+
+	if len(s.poolSet) != 0 {
+		t.Fatalf("poolSet after loading pool_set-less file = %d, want 0 (cold start)", len(s.poolSet))
+	}
+	// Sanity: the rest of v3 still loaded.
+	if s.state["nodeA"] == nil || s.state["nodeA"].strikes != 5 {
+		t.Errorf("v3 node state not restored alongside cold-start poolSet")
+	}
+}
+
+// eligibilityCfg returns an auto-mode config in sizing_mode=eligibility.
+// K-gating params are set so that legacy mode WOULD cut to 8 (kDemand=8),
+// proving the eligibility path ignores the target and keeps all qualified.
+func eligibilityCfg() config.NodeQualifyConfig {
+	cfg := kGatingCfg(8) // legacy would target 8
+	cfg.SizingMode = "eligibility"
+	cfg.PoolSizing.MinPoolSize = 3
+	return cfg
+}
+
+// TestEligibility_KeepsAllQualifiedNoCut: 9 qualified nodes must ALL be in
+// the pool. Legacy K-gating (kDemand=8) would cut one; eligibility must not
+// — there is no fixed target, so the marginal-slot contest cannot occur.
+func TestEligibility_KeepsAllQualifiedNoCut(t *testing.T) {
+	cfg := eligibilityCfg()
+	nodes := map[string]proxyNode{}
+	for i, rtt := range []int{100, 110, 120, 130, 140, 150, 160, 170, 180} {
+		nodes[fmt.Sprintf("sub/n%d", i+1)] = proxyNode{alive: true, history: goodHistory(rtt)}
+	}
+	s, _, _ := newDecisionScorer(t, cfg, nodes)
+	// Simulate an established running pool (as T0 poolSet-restore provides
+	// after a restart): all 9 are currently in-pool, so the trial filter —
+	// which correctly keeps a brand-new node out until it proves 24h of
+	// stability — does not apply to them. This isolates the property under
+	// test: eligibility does NOT cut an established qualified set to a K.
+	s.poolSet = map[string]bool{}
+	for name := range nodes {
+		s.poolSet[name] = true
+	}
+	s.score(context.Background())
+
+	pool := inPoolNames(s.GetSnapshot())
+	if len(pool) != 9 {
+		t.Fatalf("eligibility pool = %d, want all 9 qualified (legacy would cut to 8); pool=%v", len(pool), pool)
+	}
+}
+
+// TestEligibility_FloorFillWhenBelowMin: only 2 nodes qualify; the pool must
+// be filled to min_pool_size=3 from the best available, so per-terminal HRW
+// top-2 never degrades to a single-egress-violating bare MATCH,us-pool.
+func TestEligibility_FloorFillWhenBelowMin(t *testing.T) {
+	cfg := eligibilityCfg()
+	// 2 clearly-good nodes + 1 mediocre-but-alive node available to fill.
+	nodes := map[string]proxyNode{
+		"sub/good1": {alive: true, history: goodHistory(100)},
+		"sub/good2": {alive: true, history: goodHistory(120)},
+		"sub/fill":  {alive: true, history: goodHistory(400)},
+	}
+	s, _, _ := newDecisionScorer(t, cfg, nodes)
+	s.score(context.Background())
+
+	pool := inPoolNames(s.GetSnapshot())
+	if len(pool) < 3 {
+		t.Fatalf("pool = %d, want >= min_pool_size 3 (floor fill); pool=%v", len(pool), pool)
+	}
+}
+
+// TestEligibility_FloorFillPrefersIncumbent locks in T3 fill-stability: when
+// the pool is floor-bound and must admit a filler, an incumbent filler (one
+// already in poolSet) is kept even if a non-incumbent candidate has a better
+// EWMA. Without incumbency the fill re-sorts on EWMA noise every round and
+// the floor-filler ping-pongs — the exact mini-flap the guard review flagged.
+func TestEligibility_FloorFillPrefersIncumbent(t *testing.T) {
+	cfg := eligibilityCfg() // min_pool_size = 3
+	// 2 good qualified nodes + 2 fill candidates. "incumbent" has a WORSE
+	// (higher) latency than "challenger", so a pure EWMA sort would pick the
+	// challenger. Incumbency must override and keep the incumbent.
+	nodes := map[string]proxyNode{
+		"sub/good1":      {alive: true, history: goodHistory(100)},
+		"sub/good2":      {alive: true, history: goodHistory(120)},
+		"sub/incumbent":  {alive: true, history: goodHistory(500)},
+		"sub/challenger": {alive: true, history: goodHistory(300)},
+	}
+	s, _, _ := newDecisionScorer(t, cfg, nodes)
+	// good1/good2 established in-pool; incumbent is the current floor-filler.
+	// All three must be past trial (in poolSet) so eligibility keeps them;
+	// challenger is fresh/out so it can only enter via the fill sort.
+	s.poolSet = map[string]bool{"sub/good1": true, "sub/good2": true, "sub/incumbent": true}
+	s.score(context.Background())
+
+	pool := inPoolNames(s.GetSnapshot())
+	if len(pool) != 3 {
+		t.Fatalf("pool = %d, want exactly min_pool 3; pool=%v", len(pool), pool)
+	}
+	if !pool["sub/incumbent"] {
+		t.Errorf("incumbent filler dropped despite incumbency; pool=%v", pool)
+	}
+	if pool["sub/challenger"] {
+		t.Errorf("challenger admitted over incumbent (EWMA sort won, incumbency lost); pool=%v", pool)
+	}
+}
+
+// TestShadowMode_DoesNotChangeLivePool verifies sizing_shadow logs what
+// eligibility WOULD do but leaves the live legacy decision untouched. With
+// 9 qualified and legacy kDemand=8, the live pool must still be 8 (legacy),
+// even though eligibility would keep 9 — the diff is logged, not applied.
+func TestShadowMode_DoesNotChangeLivePool(t *testing.T) {
+	cfg := kGatingCfg(8) // legacy target 8
+	cfg.SizingMode = "legacy"
+	cfg.SizingShadow = true
+	cfg.PoolSizing.MinPoolSize = 3
+	nodes := map[string]proxyNode{}
+	for i, rtt := range []int{100, 110, 120, 130, 140, 150, 160, 170, 180} {
+		nodes[fmt.Sprintf("sub/n%d", i+1)] = proxyNode{alive: true, history: goodHistory(rtt)}
+	}
+	s, _, _ := newDecisionScorer(t, cfg, nodes)
+	// Establish all 9 in-pool so neither path is throttled by trial/bootstrap.
+	s.poolSet = map[string]bool{}
+	for name := range nodes {
+		s.poolSet[name] = true
+	}
+	s.score(context.Background())
+
+	pool := inPoolNames(s.GetSnapshot())
+	k := s.GetSnapshot().PoolSizing.KTarget
+	// Live pool must follow LEGACY (K-gated), not eligibility.
+	if len(pool) != k {
+		t.Fatalf("shadow perturbed live pool: size=%d, legacy K=%d; pool=%v", len(pool), k, pool)
+	}
+	if len(pool) == 9 {
+		t.Errorf("live pool = 9 → shadow leaked into the live decision (should be legacy K=%d)", k)
+	}
+}
