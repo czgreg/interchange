@@ -831,3 +831,25 @@ func TestEligibility_O1_ColdStartFillsFloor(t *testing.T) {
 		t.Fatalf("cold start pool=%d, want >= min_pool 3 (data plane must not be starved); pool=%v", len(pool), pool)
 	}
 }
+
+// TestEligibility_O1_ColdStartRespectsQuarantine: the cold-start availability
+// fill bypasses TRIAL but must NOT bypass QUARANTINE. A node the operator
+// rolled back (rollbackQuarantine) must never be re-admitted by a
+// restart-into-low-pool, even if that leaves the pool below min_pool_size —
+// a banned node routing traffic is worse than a degraded pool.
+func TestEligibility_O1_ColdStartRespectsQuarantine(t *testing.T) {
+	cfg := eligibilityCfg() // min_pool_size=3
+	nodes := map[string]proxyNode{
+		"sub/banned": {alive: true, history: []int{}}, // quarantined, pc=0
+		"sub/g1":     {alive: true, history: []int{}}, // cold, pc=0
+		"sub/g2":     {alive: true, history: []int{}},
+	}
+	s, _, _ := newDecisionScorer(t, cfg, nodes) // empty poolSet (cold)
+	s.rollbackQuarantine = map[string]time.Time{"sub/banned": time.Now().Add(1 * time.Hour)}
+	s.score(context.Background())
+
+	pool := inPoolNames(s.GetSnapshot())
+	if pool["sub/banned"] {
+		t.Errorf("quarantined node re-admitted by cold-start fill — rollback defeated; pool=%v", pool)
+	}
+}

@@ -1236,12 +1236,19 @@ func (s *Scorer) computeEligibleSetLocked(nodes []NodeHealth, minPool int, now t
 			cold := make([]string, 0, len(nodes))
 			for i := range nodes {
 				name := nodes[i].Name
-				// Availability floor: bypass trial AND quarantine here, same
-				// as the legacy MinPoolSize safety net — on cold start every
-				// node is in-trial (no history), so respecting trial would
-				// starve the pool for 24h. Only Qualified (alive, non-
-				// catastrophic) nodes are eligible.
-				if nodes[i].Qualified && !eligible[name] {
+				// Availability floor: bypass TRIAL here (on cold start every
+				// node is in-trial with no history, so respecting trial would
+				// starve the pool for 24h) — but NEVER bypass QUARANTINE. A
+				// node under rollback quarantine is an explicit operator "this
+				// is bad" signal; a below-floor degraded pool is strictly
+				// better than routing to a banned node. (Unlike the legacy
+				// MinPool net, which was reached only with ProbeCount>0 nodes
+				// and via a separate bootstrap path, this last-resort admits
+				// ProbeCount==0 benefit-of-doubt nodes, so a freshly-restarted
+				// quarantined node WOULD slip in without this guard — a
+				// capability neither legacy nor pre-fix prod had.)
+				if nodes[i].Qualified && !eligible[name] &&
+					!s.inQuarantine(name, now) {
 					cold = append(cold, name)
 				}
 			}
