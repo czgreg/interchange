@@ -1,7 +1,6 @@
 # 运行观察 + 活优化方案 — 92 eligibility 切换
 
-**这是一份活文档**,随监控观察实时更新。部署:`07c1b75`,2026-08-31 ~11:07Z
-切 `sizing_mode: eligibility`。二进制备份 `leap-gateway.bak-preship-*`,yaml
+**这是一份活文档**,随监控观察实时更新。当前生产:`4732227`(eligibility + O1 + item-3 隔离修复 + min_pool=4)。部署史:`07c1b75`@11:07Z(eligibility 切换)→ `d4e5d75`@11:55Z(O1)→ `4732227`(item-3 隔离修复 + min_pool 3→4)。二进制备份 `leap-gateway.bak-preship-*`,yaml
 备份 `gateway.yaml.bak-preship-*`(秒回滚)。监控任务 `bpbguvpyz`(变化即报)。
 
 ---
@@ -98,3 +97,24 @@ HRW 黏性让池波动对个体用户基本不可见。**所以"波动太剧烈"
 - **单终端出口波动**:实测 13/14 稳定,1 条在跳(U2)。**当前不剧烈。**
 - **真正影响体验的不是波动,是"被钉在慢节点"(U1)**——这是稳态问题,
   减少波动帮不到它。
+
+
+---
+
+## 更新记录(续)+ 重大纠正
+
+### 2026-08-31 ~12:xxZ — 部署状态纠正 + 交叉审核后的方案调整
+- **纠正**:我一度误判 O1 未部署(把 `redeploy_o1` 本地脚本收尾被打断,误读成"整个部署被拒绝")。实际 d4e5d75 于 11:55 已干净上线。监控里"pool=12 稳、tier1 摆动"正是 O1 在挡闪动节点,不是"未修的振荡"。带着错误前提汇报了几轮,已更正。
+- **交叉审核(2 agent)结论落地**:
+  - O1 代码经审确认核心 sound,但**发现我引入的 ship-blocker**:冷启兜底绕过 quarantine → 废 `POST /api/pool/rollback`。已修(item-3,commit 4732227)+ 测试 + 部署。
+  - **U1(gstatic 加权 HRW)砍除**:耦合已证不可信的 gstatic(ρ=−0.26),且修不了唯一真实坏体验——`.144` 钉在 BGP_E,而 BGP_E 坏在 accounts.google 那条腿(per-destination,gstatic 看不见)。加权 HRW 白付重映射代价还不解决问题。
+  - **O1 定性**:churn 洁癖 + 真实正确性缺口,**非用户体验胜利**(无用户落在闪动节点,fallback 兜底硬死)。上了没错,不当用户胜利卖。
+  - `min_pool_size` 3→4 对齐运维决策(已部署)。
+
+### 重排后的优化优先级(用户体验座)
+1. **O3 / per-destination 成功率信号**(design §5-1)——唯一能解 `.144`→BGP_E 这类真实坏体验的杠杆。shadow-first。
+2. **用户结果监控**(每终端连接失败率 / >Ns 占比)——在任何 HRW 改动前先有这个,否则无法验证。
+3. **O2 相关退化告警**(在池 not-alive ≥N)——针对本 fleet 主故障模式。
+4. **重测 cap_per_node / 峰值行为**(eligibility 拓宽了承流集,旧基线过时)。
+5. U2 fallback 去抖——仅当扩散超 1 终端。
+- **已砍**:U1(gstatic 加权 HRW),意图并入 #1。
