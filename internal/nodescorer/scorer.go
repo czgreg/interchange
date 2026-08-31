@@ -294,6 +294,13 @@ type nodeState struct {
 	// fires when a pool member has been hard-failing for >=
 	// EmergencyEvictAfter wall-clock time.
 	hardFailStart time.Time
+	// deadRounds: consecutive scoring rounds observed alive=false (mihomo
+	// cannot connect). Incremented each alive=false round, reset to 0 when
+	// alive. Drives dead-eviction of soft-dead incumbents at
+	// cfg.DeadEvictRounds. NOT persisted (not in persistedState) — resets
+	// to 0 on restart, so a restored incumbent gets a fresh grace window
+	// rather than being instant-evicted on one post-restart dead round.
+	deadRounds int
 }
 
 // connBytes is one connection's last-observed cumulative counters, plus
@@ -1140,6 +1147,30 @@ func (s *Scorer) score(ctx context.Context) {
 //
 // CALLER MUST HOLD s.mu.
 func (s *Scorer) eligibilityPoolLocked(nodes []NodeHealth, newPoolSet map[string]bool, minPool int, now time.Time) {
+	// Maintain the consecutive-alive-false counter BEFORE computing the
+	// eligible set (computeEligibleSetLocked reads it via deadEvicted).
+	// Done here in the mutating live path, not in the pure fn, so shadow
+	// mode never perturbs it. A node newly crossing the DeadEvictRounds
+	// threshold while in-pool is logged once (visible audit of the first
+	// real dead-eviction, in lieu of a separate shadow round).
+	for i := range nodes {
+		name := nodes[i].Name
+		st := s.state[name]
+		if st == nil {
+			continue
+		}
+		if nodes[i].Alive {
+			st.deadRounds = 0
+		} else {
+			st.deadRounds++
+			if s.cfg.DeadEvictRounds > 0 && st.deadRounds == s.cfg.DeadEvictRounds && s.poolSet[name] {
+				slog.Warn("nodescorer: dead-evicting sustained-unreachable in-pool node",
+					"node", name, "dead_rounds", st.deadRounds,
+					"threshold", s.cfg.DeadEvictRounds, "fail_rate", nodes[i].FailRate,
+					"note", "floor-subordinate: retained only if eviction would breach min_pool")
+			}
+		}
+	}
 	eligible := s.computeEligibleSetLocked(nodes, minPool, now)
 	for i := range nodes {
 		name := nodes[i].Name
@@ -1167,12 +1198,29 @@ func (s *Scorer) eligibilityPoolLocked(nodes []NodeHealth, newPoolSet map[string
 // no nodes[].InPool, no st counters). Keeping it pure is what lets shadow
 // mode run it in parallel with the live legacy decision without perturbing
 // anything. CALLER MUST HOLD s.mu.
+// deadEvicted reports whether a node has been alive=false for at least
+// cfg.DeadEvictRounds consecutive scoring rounds — i.e. mihomo has been
+// unable to connect to it, sustained, not a single flap. Such a node is
+// excluded from the normal routing set even if still Qualified via gstatic
+// recentOk>0 (the soft-dead incumbent gap). It remains available to the
+// redundancy-floor fill as a LAST resort (floor-subordinate), so a
+// correlated outage falls to min_pool with dead nodes rather than below it.
+// CALLER MUST HOLD s.mu.
+func (s *Scorer) deadEvicted(name string) bool {
+	if s.cfg.DeadEvictRounds <= 0 {
+		return false // disabled
+	}
+	st := s.state[name]
+	return st != nil && st.deadRounds >= s.cfg.DeadEvictRounds
+}
+
 func (s *Scorer) computeEligibleSetLocked(nodes []NodeHealth, minPool int, now time.Time) map[string]bool {
 	eligible := make(map[string]bool, len(nodes))
 	for i := range nodes {
 		name := nodes[i].Name
 		if nodes[i].Qualified &&
 			!s.inQuarantine(name, now) &&
+			!s.deadEvicted(name) &&
 			(!s.inTrial(name, now) || s.poolSet[name]) &&
 			// Measured-history gate (O1): a node with no probe history yet
 			// is only admitted if it is already an INCUMBENT (in the current
@@ -1197,6 +1245,7 @@ func (s *Scorer) computeEligibleSetLocked(nodes []NodeHealth, minPool int, now t
 		type cand struct {
 			name      string
 			incumbent bool
+			dead      bool // deadEvicted: floor-subordinate, only to hold the floor
 			ewma      float64
 		}
 		candidates := make([]cand, 0, len(nodes))
@@ -1206,11 +1255,22 @@ func (s *Scorer) computeEligibleSetLocked(nodes []NodeHealth, minPool int, now t
 				candidates = append(candidates, cand{
 					name:      name,
 					incumbent: s.poolSet[name],
+					dead:      s.deadEvicted(name),
 					ewma:      s.nodeLongEWMA(name),
 				})
 			}
 		}
+		// Order: non-dead before dead (dead-evicted nodes are LAST resort —
+		// Q4 floor-subordinate: a sustained-unreachable node is admitted only
+		// if the pool would otherwise breach min_pool, and even then after
+		// every live candidate). Within each dead/non-dead tier: incumbent
+		// first (fill stability), then best EWMA. This also fixes Q3 thrash:
+		// a dead-evicted node the main gate excluded is NOT pulled straight
+		// back while any live candidate exists.
 		sort.Slice(candidates, func(i, j int) bool {
+			if candidates[i].dead != candidates[j].dead {
+				return !candidates[i].dead // non-dead first
+			}
 			if candidates[i].incumbent != candidates[j].incumbent {
 				return candidates[i].incumbent // keep the incumbent filler
 			}

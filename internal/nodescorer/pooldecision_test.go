@@ -853,3 +853,86 @@ func TestEligibility_O1_ColdStartRespectsQuarantine(t *testing.T) {
 		t.Errorf("quarantined node re-admitted by cold-start fill — rollback defeated; pool=%v", pool)
 	}
 }
+
+// softDeadHistory: alive=false but history has successes → ProbeCount>0,
+// recentOk>0 → Qualified=true. The soft-dead-incumbent case.
+func softDeadNode() proxyNode { return proxyNode{alive: false, history: goodHistory(300)} }
+
+// TestDeadEvict_EvictedAfterThresholdWhenAboveFloor: a soft-dead in-pool
+// node (alive=false, still Qualified) is evicted after DeadEvictRounds
+// consecutive rounds, since enough alive nodes remain above min_pool.
+func TestDeadEvict_EvictedAfterThresholdWhenAboveFloor(t *testing.T) {
+	cfg := eligibilityCfg() // min_pool=3
+	cfg.DeadEvictRounds = 2
+	nodes := map[string]proxyNode{
+		"sub/g1": {alive: true, history: goodHistory(100)},
+		"sub/g2": {alive: true, history: goodHistory(110)},
+		"sub/g3": {alive: true, history: goodHistory(120)},
+		"sub/g4": {alive: true, history: goodHistory(130)},
+		"sub/softdead": softDeadNode(),
+	}
+	s, _, _ := newDecisionScorer(t, cfg, nodes)
+	s.poolSet = map[string]bool{"sub/g1": true, "sub/g2": true, "sub/g3": true, "sub/g4": true, "sub/softdead": true}
+	ctx := context.Background()
+	s.score(ctx) // round 1: deadRounds=1, still in
+	if !inPoolNames(s.GetSnapshot())["sub/softdead"] {
+		t.Fatal("soft-dead should still be in pool at round 1 (debounce not reached)")
+	}
+	s.score(ctx) // round 2: deadRounds=2 >= threshold → evicted
+	pool := inPoolNames(s.GetSnapshot())
+	if pool["sub/softdead"] {
+		t.Errorf("soft-dead not evicted after DeadEvictRounds=2; pool=%v", pool)
+	}
+	if len(pool) != 4 {
+		t.Errorf("pool=%d want 4 alive (soft-dead gone, above floor); pool=%v", len(pool), pool)
+	}
+}
+
+// TestDeadEvict_RetainedToHoldFloor: when evicting soft-dead nodes would
+// drop the pool below min_pool_size, they are retained (floor-subordinate).
+func TestDeadEvict_RetainedToHoldFloor(t *testing.T) {
+	cfg := eligibilityCfg() // min_pool=3
+	cfg.DeadEvictRounds = 2
+	nodes := map[string]proxyNode{
+		"sub/g1":  {alive: true, history: goodHistory(100)},
+		"sub/g2":  {alive: true, history: goodHistory(110)},
+		"sub/sd1": softDeadNode(),
+		"sub/sd2": softDeadNode(),
+	}
+	s, _, _ := newDecisionScorer(t, cfg, nodes)
+	s.poolSet = map[string]bool{"sub/g1": true, "sub/g2": true, "sub/sd1": true, "sub/sd2": true}
+	ctx := context.Background()
+	s.score(ctx); s.score(ctx) // reach threshold
+	pool := inPoolNames(s.GetSnapshot())
+	if len(pool) < 3 {
+		t.Fatalf("pool=%d below min_pool 3 — floor not held with dead nodes; pool=%v", len(pool), pool)
+	}
+	// exactly 1 soft-dead retained to reach floor of 3 (2 alive + 1 dead)
+	sd := (pool["sub/sd1"]) != (pool["sub/sd2"]) || pool["sub/sd1"] && pool["sub/sd2"]
+	if !sd {
+		t.Errorf("expected soft-dead retained to hold floor; pool=%v", pool)
+	}
+}
+
+// TestDeadEvict_CounterResetsOnAlive: a node that goes alive again before
+// the threshold resets its deadRounds and is never evicted.
+func TestDeadEvict_CounterResetsOnAlive(t *testing.T) {
+	cfg := eligibilityCfg()
+	cfg.DeadEvictRounds = 3
+	nodes := map[string]proxyNode{
+		"sub/g1":   {alive: true, history: goodHistory(100)},
+		"sub/g2":   {alive: true, history: goodHistory(110)},
+		"sub/g3":   {alive: true, history: goodHistory(120)},
+		"sub/flap": softDeadNode(),
+	}
+	s, _, mutate := newDecisionScorer(t, cfg, nodes)
+	s.poolSet = map[string]bool{"sub/g1": true, "sub/g2": true, "sub/g3": true, "sub/flap": true}
+	ctx := context.Background()
+	s.score(ctx); s.score(ctx) // deadRounds=2 (below threshold 3)
+	mutate("sub/flap", goodHistory(150)) // now alive=true → should reset
+	s.score(ctx) // deadRounds resets to 0
+	s.score(ctx) // stays 0
+	if !inPoolNames(s.GetSnapshot())["sub/flap"] {
+		t.Errorf("recovered node evicted despite alive reset before threshold")
+	}
+}

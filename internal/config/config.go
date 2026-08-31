@@ -510,6 +510,23 @@ type NodeQualifyConfig struct {
 	// of stability — that's enough to trust readmission without
 	// flapping (which the 60-second scoring cycle could not provide).
 	ReadmitStrikes int `yaml:"readmit_strikes"`
+	// DeadEvictRounds: consecutive scoring rounds a node must be
+	// alive=false (mihomo cannot connect) before it is evicted from the
+	// eligibility routing set, EVEN IF still Qualified via gstatic
+	// recentOk>0. Closes the "soft-dead incumbent" gap: an alive=false
+	// node that keeps passing gstatic (fail<0.9) is otherwise retained by
+	// the incumbent exception indefinitely, stranding the ~13% of
+	// terminals whose per-terminal HRW top-2 both land on such nodes
+	// (mihomo fallback cannot rescue them — both targets dead).
+	// Default 4 (~20min at 5m ScoringInterval): observed correlated Hutao
+	// flaps self-heal in 1-2 rounds, so 4 evicts only SUSTAINED deadness,
+	// never a recoverable blip (which would re-introduce the Plan-A
+	// alive-bit churn). Eviction is floor-subordinate: dead nodes are
+	// retained if evicting them would drop the routing set below
+	// MinPoolSize (a dead node in HRW is still a fallback target; an
+	// below-floor pool breaks the single-egress invariant). NOT persisted
+	// as dwell state (resets to 0 on restart, like strikes). 0 disables.
+	DeadEvictRounds int `yaml:"dead_evict_rounds"`
 	// HotReloadMinInterval throttles how often pool changes can trigger
 	// a clash-api PUT /configs?force=true. When a pool change is
 	// detected within this window, the change is held off until the
@@ -937,6 +954,9 @@ func (c *NodeQualifyConfig) applyDefaults() {
 	}
 	if c.EvictStrikes == 0 {
 		c.EvictStrikes = 2
+	}
+	if c.DeadEvictRounds == 0 {
+		c.DeadEvictRounds = 4
 	}
 	if c.ReadmitStrikes == 0 {
 		c.ReadmitStrikes = 1
