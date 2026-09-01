@@ -199,3 +199,27 @@ HRW 黏性让池波动对个体用户基本不可见。**所以"波动太剧烈"
 - **通用校准**:被动小包(<2048B)失败率在承载真实浏览器流量的节点上有 **~10% 误报底噪**。⇒ 原始 passive_fail 不能直接当剔除门(阈值需远高于 10%,或需更好失败分类,非单纯 <2048B)。
 - **影响延后项 #2(用户结果监控作门)**:与 O3 同类——需先做信号提炼(区分真失败 vs 预连接)才能用,不是可直接建的门。#2 降为"需先解信号"。
 - 本轮:健康跳过,无用户实质问题,无值得部署的改进。
+
+---
+
+## 交接 / 收尾(运维选择"收尾",会话循环停止)
+
+**会话级督导已停**:监控任务 bqdf2bvbm + 2h cron 26b66dae 已取消(它们本就是会话内、随会话消亡)。密集优化阶段完成,系统进入自持稳态。
+
+**生产终态**:92 运行 `f3778da` = eligibility + O1(measured-history 门)+ item-3(冷启尊重 quarantine)+ dead-evict(软死 incumbent debounce=4 剔除)+ min_pool=4 + Lark 告警接通 + API 诚实字段。三服务 active,用户连接成功率高,慢性 ~50 次/天抖动根治到稳态近零。
+
+**自持运维通路(不依赖任何 Claude 会话)**:
+- 节点自身 Lark 告警自主运转(池增减/emergency/探针失败 → 飞书)。
+- 按需查:`curl localhost:18080/api/status`(看 pool_size/supply_limited)、`/api/nodes/health`、`/api/pool/transitions`。
+- 回滚物:二进制备份 `/usr/local/bin/leap-gateway.bak-preship-*`;yaml 备份 `/etc/leap/gateway.yaml.bak.*`。
+
+**待运维决策(软件侧无可做)**:
+- **Hutao 订阅** = 74% 池抖动源。scorer 每次正确扛过、用户无害,但池频繁贴下限、Lark 较吵。根治需订阅侧加稳定冗余美国源或换 Hutao。**不紧急**(用户没被伤)。
+
+**延后优化(均需先解信号,数据显示当前无用户痛点在等)**:
+- O3 per-destination 成功率信号(BGP_E accounts.google 坏腿 gstatic 不可见;需相对全队归一避 anthropic 全队噪声)。
+- #2 用户结果门:passive 小包失败有 ~10% 误报底噪(浏览器预连接),不能直接当门,需更好失败分类。
+- cap_per_node 重测(stress EGRESS= 单出口,中风险 prod 操作);U2 fallback 去抖(单终端窄问题)。
+- 节点 Lark per-flap 降噪(纯配置 dedup/rate-limit 可调,但降噪反面是可能压真告警——需运维点头)。
+
+**元记录**:本轮长会话犯过并纠正的:误判一次部署状态、多次过度警觉"通道污染"(每次自检 6*7=42/编译器均干净、均 retract)、把 O3 当紧迫却未先量。地面真值线(编译器/自检/真实数据)+ 交叉审核每次纠回。
