@@ -1,0 +1,222 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Interchange · 立交网关</title>
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">
+    <span class="logo" aria-hidden="true"></span>
+    <div>
+      <h1>Interchange <span class="cn">立交网关</span></h1>
+      <p class="sub" id="nodeLine">正在连接节点…</p>
+    </div>
+  </div>
+  <div class="topactions">
+    <span id="healthPill" class="pill pill-idle" title="/healthz 数据通路断言">healthz</span>
+    <label class="autolabel">
+      <input type="checkbox" id="autoRefresh" checked>
+      自动刷新
+    </label>
+    <button id="refreshBtn" class="btn btn-ghost" type="button">立即刷新</button>
+  </div>
+</header>
+
+<nav class="tabs" role="tablist">
+  <button class="tab tab-active" role="tab" data-view="overview" type="button">总览</button>
+  <button class="tab" role="tab" data-view="nodes" type="button">节点状态</button>
+  <button class="tab" role="tab" data-view="subs" type="button">订阅管理</button>
+  <button class="tab" role="tab" data-view="terminal" type="button">终端查询</button>
+  <button class="tab" role="tab" data-view="transitions" type="button">池变更审计</button>
+</nav>
+
+<main id="main">
+  <!-- ============ 总览 ============ -->
+  <section class="view view-active" data-view="overview">
+    <div class="cards" id="statusCards"></div>
+    <div class="panel">
+      <div class="panel-head">
+        <h2>数据面</h2>
+        <span class="hint" id="dpHint"></span>
+      </div>
+      <div id="dataplane" class="kv-grid"></div>
+    </div>
+    <div class="panel">
+      <div class="panel-head"><h2>容量</h2>
+        <span class="hint">离线压测得出的上限，非实时测量</span>
+      </div>
+      <div id="capacity" class="kv-grid"></div>
+    </div>
+  </section>
+
+  <!-- ============ 节点状态 ============ -->
+  <section class="view" data-view="nodes">
+    <div class="panel">
+      <div class="panel-head">
+        <h2>节点评分</h2>
+        <div class="panel-tools">
+          <input type="search" id="nodeFilter" placeholder="按节点名 / 订阅筛选" aria-label="筛选节点">
+          <label class="autolabel"><input type="checkbox" id="poolOnly"> 只看在池</label>
+        </div>
+      </div>
+      <div class="tablewrap">
+        <table id="nodesTable">
+          <thead>
+            <tr>
+              <th>节点</th><th>订阅</th><th>存活</th>
+              <th class="num">p50</th><th class="num">p95</th><th class="num">抖动</th>
+              <th class="num">失败率</th><th class="num">探针数</th>
+              <th>在池</th><th>合格</th><th>站点探针</th><th>备注</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+      <p class="hint" id="nodesHint"></p>
+    </div>
+  </section>
+
+  <!-- ============ 订阅管理 ============ -->
+  <section class="view" data-view="subs">
+    <div class="panel">
+      <div class="panel-head">
+        <h2>订阅</h2>
+        <div class="panel-tools">
+          <button id="addSubBtn" class="btn btn-primary" type="button">新增订阅</button>
+          <button id="refreshSubsBtn" class="btn" type="button">立即拉取全部</button>
+        </div>
+      </div>
+      <div class="warnbox">
+        <strong>注意</strong>：新增 / 修改 / 删除订阅，以及「立即拉取」都会触发
+        mihomo 重新加载，造成约 3–5 秒的连接中断。
+        每个节点的订阅列表是各自独立的，不要拿另一台节点的列表覆盖过来。
+      </div>
+      <div class="tablewrap">
+        <table id="subsTable">
+          <thead>
+            <tr><th>名称</th><th>URL（token 已脱敏）</th><th>格式</th><th>User-Agent</th>
+                <th class="num">节点数</th><th>启用</th><th>操作</th></tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="panel">
+      <div class="panel-head"><h2>周期刷新</h2>
+        <span class="hint">0 = 关闭。阅后即焚类订阅二刷会失效，默认关闭</span>
+      </div>
+      <form id="intervalForm" class="inline-form">
+        <label>间隔（秒）
+          <input type="number" id="intervalInput" min="0" step="60" required>
+        </label>
+        <button class="btn" type="submit">保存</button>
+        <span class="hint" id="intervalHint"></span>
+      </form>
+    </div>
+  </section>
+
+  <!-- ============ 终端查询 ============ -->
+  <section class="view" data-view="terminal">
+    <div class="panel">
+      <div class="panel-head"><h2>按终端 IP 查出口</h2>
+        <span class="hint">员工报「慢 / 打不开」时的第一入口</span>
+      </div>
+      <form id="terminalForm" class="inline-form">
+        <label>终端 IP
+          <input type="text" id="terminalIp" placeholder="10.8.13.42"
+                 pattern="^\d{1,3}(\.\d{1,3}){3}$" required>
+        </label>
+        <button class="btn btn-primary" type="submit">查询</button>
+      </form>
+      <div id="terminalResult"></div>
+    </div>
+  </section>
+
+  <!-- ============ 池变更审计 ============ -->
+  <section class="view" data-view="transitions">
+    <div class="panel">
+      <div class="panel-head"><h2>池组成变更</h2>
+        <span class="hint">频繁变更说明打分在抖动</span>
+      </div>
+      <div id="quarantineBox"></div>
+      <div class="tablewrap">
+        <table id="transTable">
+          <thead><tr><th>时间</th><th>类型</th><th>来源</th><th>加入</th><th>移出</th><th>原因</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+</main>
+
+<!-- ============ 登录 ============ -->
+<div id="authModal" class="modal modal-open" role="dialog" aria-modal="true" aria-labelledby="authTitle">
+  <form class="modal-card" id="authForm">
+    <h2 id="authTitle">连接到节点</h2>
+    <p class="hint">
+      控制面地址默认取当前页面同源。若 <code>api.token</code> 为空可留空 token。
+      token 只保存在当前标签页内存里，不写入 localStorage、不落磁盘。
+    </p>
+    <label>控制面地址
+      <input type="text" id="baseInput" placeholder="http://&lt;node-ip&gt;:18080">
+    </label>
+    <label>API Token（可选）
+      <input type="password" id="tokenInput" autocomplete="current-password" placeholder="api.token">
+    </label>
+    <div class="modal-actions">
+      <button class="btn btn-primary" type="submit">连接</button>
+    </div>
+    <p class="err" id="authErr" hidden></p>
+  </form>
+</div>
+
+<!-- ============ 订阅编辑 ============ -->
+<div id="subModal" class="modal" role="dialog" aria-modal="true" aria-labelledby="subTitle">
+  <form class="modal-card" id="subForm">
+    <h2 id="subTitle">新增订阅</h2>
+    <label>名称
+      <input type="text" id="subName" required placeholder="main">
+    </label>
+    <label>订阅 URL
+      <input type="url" id="subUrl" required placeholder="https://provider/subscribe?token=...">
+    </label>
+    <p class="hint" id="subUrlHint" hidden>
+      当前 URL 的 token 在接口里是脱敏的，无法回填。要改 URL 请粘贴完整的新 URL；
+      本次提交会把这里的内容作为新 URL 写入。
+    </p>
+    <label>格式
+      <select id="subFormat">
+        <option value="auto">auto（推荐）</option>
+        <option value="clash">clash</option>
+        <option value="singbox">singbox</option>
+        <option value="uri">uri</option>
+        <option value="sip008">sip008</option>
+      </select>
+    </label>
+    <label>User-Agent（可选）
+      <input type="text" id="subUA" list="uaList" placeholder="留空使用全局默认">
+      <datalist id="uaList">
+        <option value="mihomo/1.18.4"></option>
+        <option value="clash.meta"></option>
+        <option value="ClashforWindows/0.20.39"></option>
+        <option value="sing-box/1.10.7"></option>
+        <option value="clash-verge/1.7.7"></option>
+      </datalist>
+    </label>
+    <p class="warnbox">提交后会立即重新拉取并重载 mihomo（约 3–5 秒中断）。</p>
+    <div class="modal-actions">
+      <button class="btn" type="button" id="subCancel">取消</button>
+      <button class="btn btn-primary" type="submit" id="subSubmit">保存</button>
+    </div>
+    <p class="err" id="subErr" hidden></p>
+  </form>
+</div>
+
+<div id="toasts" class="toasts" aria-live="polite"></div>
+<script src="app.js"></script>
+</body>
+</html>

@@ -130,6 +130,11 @@ func NewServer(deps Deps) *Server {
 	mux.HandleFunc("POST /api/notifications/test", s.auth(s.handleNotificationsTest))
 	mux.HandleFunc("GET /api/notifications/recent", s.auth(s.handleNotificationsRecent))
 
+	// Web UI at /ui/ — static assets only; all data flows through the
+	// authenticated /api/* routes above. See ui.go for why these are not
+	// wrapped in s.auth.
+	s.registerUI(mux)
+
 	s.srv = &http.Server{
 		Addr:              deps.Cfg.API.Listen,
 		Handler:           mux,
