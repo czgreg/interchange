@@ -1,4 +1,4 @@
-# Leap Gateway API
+# Interchange · 立交网关 API
 
 控制面 HTTP API。base URL：`http://<node-ip>:18080`（端口由 `api.listen` 控制）。
 
@@ -21,6 +21,7 @@ token 为空时不鉴权。
 | 方法 | 路径 | 功能 | 认证 |
 |---|---|---|---|
 | GET | `/healthz` | 可达性探测 | 无 |
+| GET | `/ui/` | Web 控制台（静态页面） | 无 |
 | GET | `/api/status` | 节点总体状态 + 容量 | ✓ |
 | GET | `/api/nodes` | 全量节点列表 | ✓ |
 | GET | `/api/nodes/health` | NodeScorer 评分 + probe + passive stats | ✓ |
@@ -53,6 +54,25 @@ token 为空时不鉴权。
 ```json
 {"ok": true}
 ```
+
+---
+
+## GET /ui/
+
+内置 Web 控制台（`internal/api/ui/`，用 `go:embed` 编进二进制）。
+订阅管理 + 节点状态 + 终端查询 + 池变更审计。`/ui` 会 301 到 `/ui/`。
+
+**不鉴权，但只返回静态文件**（html / css / js）——页面本身不含节点数据或
+凭据，所有真实数据由浏览器带 `Authorization: Bearer` 去请下面的 `/api/*`。
+浏览器导航无法携带自定义请求头，给 HTML 本身鉴权只会把 token 逃到 query
+或 cookie（即日志与浏览历史），所以这里不包 `s.auth`。可达范围仍由
+`api.listen` 与节点 nft 规则控制（飞连终端网段固定拒绕）。
+
+前端对接注意：
+- `GET /api/subscriptions` 的 `url` 是脱敏值，**不能**回填给 `PUT`（会把
+  `token=c85b***0f02` 写进生产）。UI 编辑时清空 URL 输入框，并在提交前拦
+  含 `***` 的值。
+- 订阅增删改与 `POST /api/subscribe/refresh` 会重载 mihomo（约 3–5s 中断）。
 
 ---
 
@@ -160,7 +180,7 @@ post Plan-A 语义注意：
 
 ```json
 {
-  "node": {"hostname": "dianwei", "kernel": "...", "os": "Ubuntu 22.04", "uptime_seconds": 86400},
+  "node": {"hostname": "leap-node-a", "kernel": "...", "os": "Ubuntu 22.04", "uptime_seconds": 86400},
   "feilian": {"tun0_active": true, "vpn_active": true},
   "leap": {
     "gateway_version": "0d7432d",
@@ -374,7 +394,7 @@ curl -s http://127.0.0.1:18080/api/whitelist \
 
 ```bash
 curl -H "Authorization: Bearer ..." \
-  "http://leap-89:18080/api/pool/terminal?ip=10.8.13.42"
+  "http://<node-ip>:18080/api/pool/terminal?ip=10.8.13.42"
 ```
 
 ```json
@@ -692,7 +712,7 @@ curl -H "Authorization: Bearer ..." \
 ## 常用速查
 
 ```bash
-BASE=http://192.168.70.89:18080
+BASE=http://<node-ip>:18080
 
 # 状态
 curl -s $BASE/api/status | jq .

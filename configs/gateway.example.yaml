@@ -1,9 +1,10 @@
-# Leap Gateway example config (FeiLian forwarding-node sidecar, mihomo-only).
+# Interchange · 立交网关 — example config (FeiLian forwarding-node sidecar, mihomo-only).
 #
 # Copy to gateway.yaml and edit. Mounted on the FeiLian forwarding node at
-# /etc/leap/gateway.yaml. Schema: 2026-06 cleanup — top-level `data_plane`
-# (was `singbox`), top-level `node_qualify` and `pools` (were buried under
-# singbox.url_test).
+# /etc/leap/gateway.yaml (the on-disk identifiers stay `leap-*` — see the
+# "About the name" section in README). Schema: 2026-06 cleanup — top-level
+# `data_plane` (was `singbox`), top-level `node_qualify` and `pools` (were
+# buried under singbox.url_test).
 
 api:
   # 18080 (not 8080) — feilian-sentry on the forwarding node already binds
@@ -21,7 +22,7 @@ api:
   #
   # token 是应用层防护；即使网络层默认放行，也建议配置 token。
   # allow_from:
-  #   - "192.168.70.0/24"   # 跑 make deploy-* / redeploy-* 的运维网段
+  #   - "10.0.0.0/24"   # 跑 make deploy-* / redeploy-* 的运维网段
 
 subscribe:
   # 0 = 关闭周期刷新；只接受 POST /api/subscribe/refresh 手动触发。
