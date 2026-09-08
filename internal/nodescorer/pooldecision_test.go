@@ -1168,3 +1168,277 @@ func TestAdmission_UnmeasuredNewNodeRefused(t *testing.T) {
 		t.Errorf("node with no probe history admitted (O1 regression)")
 	}
 }
+
+// --- Candidate discovery (docs/ops-candidate-discovery-loop.md) -------------
+//
+// Before discovery, score() built its candidate set only from us-pool.all ∪
+// (state ∩ /proxies), while us-pool's membership was written by the renderer
+// from the scorer's own output — a closed loop with no entry point for a node
+// the scorer had never seen. A newly-added subscription was therefore invisible
+// forever, restart included. These tests pin the entry point open.
+
+// mockClashAPIPartialPool is mockClashAPI with control over which nodes appear
+// in us-pool.all. The default helper puts EVERY node in us-pool, which is
+// exactly the state the discovery bug cannot occur in — so the loop was
+// untestable with it. inPool lists the us-pool.all members; every node in
+// `nodes` is still present in /proxies, mirroring production (the renderer had
+// written all 179 proxies while us-pool held only 13).
+func mockClashAPIPartialPool(t *testing.T, probeURL string, nodes map[string]proxyNode, inPool []string) (addr string, mutate func(tag string, history []int)) {
+	t.Helper()
+	var mu sync.Mutex
+	proxies := map[string]map[string]interface{}{}
+	for tag, n := range nodes {
+		proxies[tag] = buildProxyEntry(n.alive, probeURL, n.history)
+	}
+	all := make([]interface{}, 0, len(inPool))
+	for _, tag := range inPool {
+		all = append(all, tag)
+	}
+	proxies["us-pool"] = map[string]interface{}{
+		"type": "LoadBalance", "all": all, "now": "",
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/proxies":
+			writeTestJSON(w, map[string]interface{}{"proxies": proxies})
+		case r.Method == http.MethodGet && r.URL.Path == "/connections":
+			writeTestJSON(w, map[string]interface{}{"connections": []interface{}{}})
+		default:
+			w.WriteHeader(http.StatusNoContent)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	mutate = func(tag string, history []int) {
+		mu.Lock()
+		defer mu.Unlock()
+		proxies[tag] = buildProxyEntry(true, probeURL, history)
+	}
+	return strings.TrimPrefix(srv.URL, "http://"), mutate
+}
+
+// outbound builds a minimal subscription outbound carrying just a tag, which
+// is all filterCandidates reads.
+func outbound(tag string) subscribe.Outbound {
+	return subscribe.Outbound{"tag": tag, "type": "vless"}
+}
+
+// newDiscoveryScorer wires a scorer whose /proxies contains every node but
+// whose us-pool contains only `inPool`, with `subs` as the subscription
+// outbounds and a real node pattern.
+func newDiscoveryScorer(t *testing.T, cfg config.NodeQualifyConfig, nodes map[string]proxyNode,
+	inPool []string, subs []string, pattern string) (*Scorer, *fakeRenderer) {
+	t.Helper()
+	const probeURL = "http://probe.test/generate_204"
+	apiAddr, _ := mockClashAPIPartialPool(t, probeURL, nodes, inPool)
+	fr := &fakeRenderer{path: t.TempDir() + "/config.yaml"}
+	obs := make([]subscribe.Outbound, 0, len(subs))
+	for _, tag := range subs {
+		obs = append(obs, outbound(tag))
+	}
+	s := New(cfg, nil, apiAddr, "", probeURL, pattern, fr,
+		func() []subscribe.Outbound { return obs })
+	t.Cleanup(func() { time.Sleep(50 * time.Millisecond) })
+	return s, fr
+}
+
+// TestDiscovery_NewSubscriptionNodeBecomesCandidate: the headline bug. A node
+// present in /proxies and in AllOutbounds, matching node_pattern, but absent
+// from us-pool.all and from state, must still be scored.
+func TestDiscovery_NewSubscriptionNodeBecomesCandidate(t *testing.T) {
+	cfg := eligibilityCfg()
+	nodes := map[string]proxyNode{
+		"ash/US-01":      {alive: true, history: goodHistory(100)},
+		"ash/US-02":      {alive: true, history: goodHistory(110)},
+		"ash/US-03":      {alive: true, history: goodHistory(120)},
+		"ash/US-04":      {alive: true, history: goodHistory(130)},
+		"soonlink/US-新": {alive: true, history: goodHistory(250)},
+		"soonlink/HK-01": {alive: true, history: goodHistory(80)}, // must NOT match
+	}
+	inPool := []string{"ash/US-01", "ash/US-02", "ash/US-03", "ash/US-04"}
+	subs := []string{"ash/US-01", "ash/US-02", "ash/US-03", "ash/US-04",
+		"soonlink/US-新", "soonlink/HK-01"}
+	s, _ := newDiscoveryScorer(t, cfg, nodes, inPool, subs, `US`)
+	s.poolSet = map[string]bool{
+		"ash/US-01": true, "ash/US-02": true, "ash/US-03": true, "ash/US-04": true,
+	}
+	s.score(context.Background())
+
+	seen := map[string]bool{}
+	for _, n := range s.GetSnapshot().Nodes {
+		seen[n.Name] = true
+	}
+	if !seen["soonlink/US-新"] {
+		t.Errorf("discovery failed: new subscription node never scored; seen=%v", seen)
+	}
+	if seen["soonlink/HK-01"] {
+		t.Errorf("node_pattern ignored: non-matching node became a candidate; seen=%v", seen)
+	}
+}
+
+// TestDiscovery_TriggersRenderEvenWhenRoutingSetUnchanged is BLOCKER 1. The
+// discovered node cannot enter the ROUTING set yet (ProbeCount==0 → refused by
+// the admission gate), so poolChanged is false. If the reload trigger only
+// watched the routing set, no render would fire, the node would never reach
+// mihomo's us-pool, would never be url-tested, and would be refused forever
+// while the logs looked healthy. The probing set changing must itself trigger.
+func TestDiscovery_TriggersRenderEvenWhenRoutingSetUnchanged(t *testing.T) {
+	cfg := eligibilityCfg()
+	cfg.HotReloadMinInterval = 0 // don't let the throttle mask the trigger
+	nodes := map[string]proxyNode{
+		"ash/US-01":     {alive: true, history: goodHistory(100)},
+		"ash/US-02":     {alive: true, history: goodHistory(110)},
+		"ash/US-03":     {alive: true, history: goodHistory(120)},
+		"ash/US-04":     {alive: true, history: goodHistory(130)},
+		"soonlink/US-新": {alive: true, history: nil}, // unmeasured: cannot route yet
+	}
+	inPool := []string{"ash/US-01", "ash/US-02", "ash/US-03", "ash/US-04"}
+	subs := append(append([]string{}, inPool...), "soonlink/US-新")
+	s, fr := newDiscoveryScorer(t, cfg, nodes, inPool, subs, `US`)
+	s.poolSet = map[string]bool{
+		"ash/US-01": true, "ash/US-02": true, "ash/US-03": true, "ash/US-04": true,
+	}
+	s.score(context.Background())
+	fr.waitRenders(t, 1)
+
+	usPool, routing, _ := fr.snapshot()
+	if !contains(usPool, "soonlink/US-新") {
+		t.Errorf("BLOCKER 1: discovered node absent from rendered us-pool, so mihomo "+
+			"would never probe it; us_pool=%v", usPool)
+	}
+	if contains(routing, "soonlink/US-新") {
+		t.Errorf("unmeasured node placed in routing set; routing=%v", routing)
+	}
+}
+
+// TestDiscovery_IdempotentNoRenderStorm: once the discovered node is in the
+// rendered us-pool, an unchanged candidate set must NOT keep re-rendering.
+// Comparing against our own last intent (rather than against mihomo's current
+// us-pool, which is intersected with AllOutbounds) is what makes this hold.
+func TestDiscovery_IdempotentNoRenderStorm(t *testing.T) {
+	cfg := eligibilityCfg()
+	cfg.HotReloadMinInterval = 0
+	nodes := map[string]proxyNode{
+		"ash/US-01":     {alive: true, history: goodHistory(100)},
+		"ash/US-02":     {alive: true, history: goodHistory(110)},
+		"ash/US-03":     {alive: true, history: goodHistory(120)},
+		"ash/US-04":     {alive: true, history: goodHistory(130)},
+		"soonlink/US-新": {alive: true, history: goodHistory(250)},
+	}
+	inPool := []string{"ash/US-01", "ash/US-02", "ash/US-03", "ash/US-04"}
+	subs := append(append([]string{}, inPool...), "soonlink/US-新")
+	s, fr := newDiscoveryScorer(t, cfg, nodes, inPool, subs, `US`)
+	s.poolSet = map[string]bool{
+		"ash/US-01": true, "ash/US-02": true, "ash/US-03": true, "ash/US-04": true,
+	}
+	ctx := context.Background()
+	s.score(ctx)
+	fr.waitRenders(t, 1)
+	_, _, after1 := fr.snapshot()
+	// /proxies still reports the old us-pool (mihomo would have been reloaded
+	// in production; the mock does not update). The candidate set is therefore
+	// identical next round, so nothing new should be rendered.
+	s.score(ctx)
+	time.Sleep(150 * time.Millisecond)
+	_, _, after2 := fr.snapshot()
+	if after2 > after1 {
+		t.Errorf("render storm: candidate set unchanged but rendered again (%d → %d)",
+			after1, after2)
+	}
+}
+
+// TestDiscovery_ColdStartPickIsDeterministic is BLOCKER 2, part 1. Below
+// min_pool the cold-start last resort admits unmeasured nodes; they all have
+// +Inf EWMA, so the comparator never reports "less".
+//
+// Empirically Go's pdqsort leaves an all-equal slice untouched, so the result
+// is whatever order built `cold` — which is name-sorted `candidates`, i.e.
+// already deterministic. This test therefore does NOT fail if the explicit
+// tiebreak is removed; it guards against a future change to sort choice or to
+// how `cold` is built silently making admission order-dependent. Keeping it is
+// cheap; treating it as proof that the tiebreak is load-bearing would be wrong.
+func TestDiscovery_ColdStartPickIsDeterministic(t *testing.T) {
+	cfg := eligibilityCfg() // min_pool_size = 3
+	nodes := map[string]proxyNode{
+		"sub/good": {alive: true, history: goodHistory(100)},
+	}
+	subs := []string{"sub/good"}
+	// 8 unmeasured candidates, all Qualified via benefit-of-doubt, all +Inf EWMA.
+	for _, n := range []string{"a", "b", "c", "d", "e", "f", "g", "h"} {
+		tag := "sub/US-" + n
+		nodes[tag] = proxyNode{alive: true, history: nil}
+		subs = append(subs, tag)
+	}
+	pick := func() []string {
+		s, _ := newDiscoveryScorer(t, cfg, nodes, []string{"sub/good"}, subs, ``)
+		s.score(context.Background())
+		return setToSortedSlice(inPoolNames(s.GetSnapshot()))
+	}
+	first := pick()
+	if len(first) < 3 {
+		t.Fatalf("floor not met: pool=%v", first)
+	}
+	for i := 0; i < 4; i++ {
+		if got := pick(); strings.Join(got, ",") != strings.Join(first, ",") {
+			t.Fatalf("cold-start pick not deterministic:\n  run0=%v\n  run%d=%v", first, i+1, got)
+		}
+	}
+}
+
+// TestDiscovery_ColdStartPickReleasedOnceMeasured is BLOCKER 2, part 2 — the
+// consequence that actually matters. The cold-start path admits unmeasured
+// nodes by an arbitrary-but-stable order. If that pick then measures BADLY
+// while its siblings measure well, incumbency must not pin it forever: the
+// measured floor-fill sorts (dead, incumbent, ewma) with incumbency ahead of
+// EWMA, so a bad early pick could keep carrying traffic while better nodes wait.
+//
+// Guard: once real measurements exist and enough good nodes are available to
+// meet the floor on merit, the badly-measuring cold-start pick must be out of
+// the routing set. This is what makes discovery safe to ship at pool<floor.
+func TestDiscovery_ColdStartPickReleasedOnceMeasured(t *testing.T) {
+	cfg := eligibilityCfg() // min_pool_size = 3
+	cfg.HotReloadMinInterval = 0
+	// Round 1: only one measured node, three unmeasured → cold start fills.
+	nodes := map[string]proxyNode{
+		"sub/US-good":  {alive: true, history: goodHistory(100)},
+		"sub/US-bad":   {alive: true, history: nil},
+		"sub/US-alt-1": {alive: true, history: nil},
+		"sub/US-alt-2": {alive: true, history: nil},
+	}
+	subs := []string{"sub/US-good", "sub/US-bad", "sub/US-alt-1", "sub/US-alt-2"}
+	const probeURL = "http://probe.test/generate_204"
+	apiAddr, mutate := mockClashAPIPartialPool(t, probeURL, nodes,
+		[]string{"sub/US-good"})
+	fr := &fakeRenderer{path: t.TempDir() + "/config.yaml"}
+	obs := make([]subscribe.Outbound, 0, len(subs))
+	for _, tag := range subs {
+		obs = append(obs, outbound(tag))
+	}
+	s := New(cfg, nil, apiAddr, "", probeURL, `US`, fr,
+		func() []subscribe.Outbound { return obs })
+	t.Cleanup(func() { time.Sleep(50 * time.Millisecond) })
+
+	ctx := context.Background()
+	s.score(ctx)
+	if got := inPoolNames(s.GetSnapshot()); len(got) < 3 {
+		t.Fatalf("cold start did not meet floor: %v", got)
+	}
+
+	// Measurements arrive: the cold-start pick is terrible, siblings are good.
+	mutate("sub/US-bad", goodHistory(5000))   // p95 5000 > max_rtt_p95_ms 800
+	mutate("sub/US-alt-1", goodHistory(150))
+	mutate("sub/US-alt-2", goodHistory(160))
+	// Two rounds: one to record measurements, one to act on them.
+	s.score(ctx)
+	s.score(ctx)
+
+	pool := inPoolNames(s.GetSnapshot())
+	if len(pool) < 3 {
+		t.Errorf("floor breached after measurement: %v", pool)
+	}
+	if pool["sub/US-bad"] {
+		t.Errorf("badly-measuring cold-start pick still routing while good "+
+			"alternatives exist (incumbency pinned it); pool=%v", pool)
+	}
+}

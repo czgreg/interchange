@@ -1,6 +1,7 @@
 # 候选集闭环 — 新订阅节点永远不被评分
 
-**状态**：已定位，**未修复**。收益经实测仅 +1 节点，需与准入质量门一并上线。
+**状态**：**已修复**（未部署，等 Hutao 冷却期）。收益经实测仅 +1 节点，
+与准入质量门同批上线（互为前置条件）。
 **发现日**：2026-09-08（92 生产）
 
 ---
@@ -209,10 +210,37 @@ measured floor-fill 层允许显著更优的 EWMA 击败 incumbency
 
 ---
 
-## 6. 为什么暂不修
+## 6. 实现记录（原「为什么暂不修」）
 
-1. **收益 1 节点，代价三处协同改动**，且 BLOCKER 2 恰在"池低于 floor"时最危险
-   —— 而那正是当前状态（曾跌到 2，floor=4）。
+三处协同改动已全部落地，5 个新测试（4 个来自评审要求 + 1 个补充）：
+
+- **发现**：`score()` 第三个候选来源 `filterCandidates(s.subscribe(), …)`，
+  union 语义。同时 `us-pool` 缺失不再 fatal（改为 warn 后继续）。
+- **BLOCKER 1**：新增 `lastUsPoolRendered` 字段，`reloadNeeded = poolChanged
+  || usPoolChanged`，与自己上次**意图**比较（非与 mihomo 现状比较）保证幂等。
+- **BLOCKER 2**：cold-start 排序改为 `(incumbent, ewma, name)` 全序。
+- 拒绝日志改为**原因变化时**才打（新增 `nodeState.lastRefusal`）。
+- 修正 `filterCandidates` 的过期文档注释（它并不过滤 node-bearing）。
+- 修正 `usPoolAll` 注释，明确 us-pool **同时承载 fallback 流量**
+  （`out` 首项 + `MATCH,us-pool`），扩大它会让未测量节点接触 fallback 流量约一轮。
+
+**变异测试验证**（逐个回退修复看测试是否失败）：
+
+| 变异 | 结果 |
+|---|---|
+| 去掉 discovery 源 | 3 个测试失败 ✅ |
+| `reloadNeeded` 只看 `poolChanged` | BLOCKER 1 测试失败 ✅ |
+| cold-start 退回裸 EWMA 排序 | **测试仍通过** ⚠️ |
+
+第三项的诚实结论：实测 Go pdqsort 对"比较器恒为 false"的全等切片**不改动
+顺序**（n=8/13/20/40 均验证），故 `cold` 的顺序就是构建它的顺序 ——
+即 name-sorted `candidates`，本来就是确定的。所以 BLOCKER 2 的"不确定排序"
+表述**不准确**，显式 tiebreak 是防御未来改动，不是修一个当下可复现的 bug。
+
+BLOCKER 2 真正的风险是评审提的**第二点**：任意但稳定的 cold-start 选择被
+incumbency 钉死。已补 `TestDiscovery_ColdStartPickReleasedOnceMeasured`
+验证：一个 cold-start 选中后测出 p95=5000 的节点，在兄弟节点测出 150/160
+后**会被释放**出路由集，floor 仍满足。这条此前只是推断，现在有测试。
 2. **验证会假阳性**：池低于 floor 时 floor 路径每轮都动，`poolChanged` 恰好为真，
    生产观察会显示"修好了"，而稳态缺陷（BLOCKER 1）被掩盖。必须等池稳定在
    floor 之上才能真正验证。
