@@ -701,20 +701,32 @@ func TestEligibility_FloorFillWhenBelowMin(t *testing.T) {
 // EWMA. Without incumbency the fill re-sorts on EWMA noise every round and
 // the floor-filler ping-pongs — the exact mini-flap the guard review flagged.
 func TestEligibility_FloorFillPrefersIncumbent(t *testing.T) {
-	cfg := eligibilityCfg() // min_pool_size = 3
-	// 2 good qualified nodes + 2 fill candidates. "incumbent" has a WORSE
-	// (higher) latency than "challenger", so a pure EWMA sort would pick the
-	// challenger. Incumbency must override and keep the incumbent.
+	cfg := eligibilityCfg() // min_pool_size = 3, max_rtt_p95_ms = 800
+	// 2 good qualified nodes (admitted on merit) + 2 fill-only candidates.
+	//
+	// Both fillers sit ABOVE max_rtt_p95_ms so the admission quality gate
+	// refuses them, leaving the pool at 2 < min_pool 3 and forcing the floor
+	// fill to choose between them. They are still Qualified (no failed probes,
+	// recentOk=10), so they remain eligible for the floor fill, which applies
+	// no quality ceiling by design: below the floor a slow node beats no node.
+	//
+	// "incumbent" is SLOWER than "challenger", so a pure EWMA sort would pick
+	// the challenger. Incumbency must override and keep the incumbent.
+	//
+	// Before the admission gate replaced the trial window, this fixture used
+	// 500/300ms fillers held out by inTrial. Both now pass the quality gate on
+	// merit, which would make the pool 4 and never reach the floor path this
+	// test exists to cover — hence the above-threshold latencies.
 	nodes := map[string]proxyNode{
 		"sub/good1":      {alive: true, history: goodHistory(100)},
 		"sub/good2":      {alive: true, history: goodHistory(120)},
-		"sub/incumbent":  {alive: true, history: goodHistory(500)},
-		"sub/challenger": {alive: true, history: goodHistory(300)},
+		"sub/incumbent":  {alive: true, history: goodHistory(900)},
+		"sub/challenger": {alive: true, history: goodHistory(850)},
 	}
 	s, _, _ := newDecisionScorer(t, cfg, nodes)
-	// good1/good2 established in-pool; incumbent is the current floor-filler.
-	// All three must be past trial (in poolSet) so eligibility keeps them;
-	// challenger is fresh/out so it can only enter via the fill sort.
+	// good1/good2/incumbent established in-pool (as poolSet-restore provides
+	// after a restart); incumbent is the current floor-filler. Challenger is
+	// out, so it can only enter via the fill sort.
 	s.poolSet = map[string]bool{"sub/good1": true, "sub/good2": true, "sub/incumbent": true}
 	s.score(context.Background())
 
@@ -934,5 +946,225 @@ func TestDeadEvict_CounterResetsOnAlive(t *testing.T) {
 	s.score(ctx) // stays 0
 	if !inPoolNames(s.GetSnapshot())["sub/flap"] {
 		t.Errorf("recovered node evicted despite alive reset before threshold")
+	}
+}
+
+// --- Admission quality gate (docs/design-admission-quality-gate.md) ---------
+//
+// These lock in the replacement of the 24h trial window with a one-time
+// absolute quality bar for NEW admissions. The core promise is asymmetric:
+// a good new node is usable within a scoring round or two, a mid-grade bad
+// node is refused indefinitely, and incumbents are never re-judged on quality
+// (re-judging them is the Plan-A churn eligibility mode exists to remove).
+
+// jitteryHistory returns a 10-probe history alternating lo/hi so p95-p50
+// produces a large jitter while every probe still succeeds (fail_rate=0).
+// Used to exercise the MaxJitterMs axis in isolation.
+//
+// With 5 lo + 5 hi entries, percentile() interpolates p50 to (lo+hi)/2 and
+// p95 to hi, so jitter = (hi-lo)/2. To exceed max_jitter_ms=300 while staying
+// under max_rtt_p95_ms=800 the spread must be > 600 with hi <= 800.
+func jitteryHistory(lo, hi int) []int {
+	h := make([]int, 10)
+	for i := range h {
+		if i%2 == 0 {
+			h[i] = lo
+		} else {
+			h[i] = hi
+		}
+	}
+	return h
+}
+
+// partialFailHistory returns a history with `failures` zero-entries out of 10
+// (fail_rate = failures/10), the rest at rttMs. Stays under the catastrophic
+// 0.9 gate so the node is still Qualified — which is exactly the hole the
+// admission gate closes.
+func partialFailHistory(failures, rttMs int) []int {
+	h := make([]int, 10)
+	for i := range h {
+		if i < failures {
+			h[i] = 0
+		} else {
+			h[i] = rttMs
+		}
+	}
+	return h
+}
+
+// TestAdmission_GoodNewNodeAdmittedImmediately: the headline behavior. A brand
+// new node (no EWMA history, so inTrial would have held it out for 24h) that
+// measures well is admitted on the first scored round. No poolSet seeding —
+// this is a genuine newcomer.
+func TestAdmission_GoodNewNodeAdmittedImmediately(t *testing.T) {
+	cfg := eligibilityCfg()
+	nodes := map[string]proxyNode{
+		"sub/inc1":     {alive: true, history: goodHistory(100)},
+		"sub/inc2":     {alive: true, history: goodHistory(110)},
+		"sub/inc3":     {alive: true, history: goodHistory(120)},
+		"sub/newcomer": {alive: true, history: goodHistory(250)}, // well under 800
+	}
+	s, _, _ := newDecisionScorer(t, cfg, nodes)
+	s.poolSet = map[string]bool{"sub/inc1": true, "sub/inc2": true, "sub/inc3": true}
+	s.score(context.Background())
+
+	pool := inPoolNames(s.GetSnapshot())
+	if !pool["sub/newcomer"] {
+		t.Errorf("good new node NOT admitted on first round (the 24h-trial regression); pool=%v", pool)
+	}
+	if s.inTrial("sub/newcomer", time.Now()) != true {
+		t.Errorf("fixture invalid: newcomer should still be inTrial, "+
+			"otherwise this test would pass even with the old gate")
+	}
+}
+
+// TestAdmission_RefusesSlowNewNode: a node that is alive and Qualified but
+// exceeds max_rtt_p95_ms must NOT be admitted. Under the old trial gate this
+// node was admitted 24h later; it must now be refused while the pool is
+// healthy (above the floor, so the floor bypass does not rescue it).
+func TestAdmission_RefusesSlowNewNode(t *testing.T) {
+	cfg := eligibilityCfg()
+	nodes := map[string]proxyNode{
+		"sub/inc1": {alive: true, history: goodHistory(100)},
+		"sub/inc2": {alive: true, history: goodHistory(110)},
+		"sub/inc3": {alive: true, history: goodHistory(120)},
+		"sub/slow": {alive: true, history: goodHistory(3000)}, // p95 3000 > 800
+	}
+	s, _, _ := newDecisionScorer(t, cfg, nodes)
+	s.poolSet = map[string]bool{"sub/inc1": true, "sub/inc2": true, "sub/inc3": true}
+	s.score(context.Background())
+
+	pool := inPoolNames(s.GetSnapshot())
+	if pool["sub/slow"] {
+		t.Errorf("slow node admitted despite p95 3000 > max_rtt_p95_ms 800; pool=%v", pool)
+	}
+	if len(pool) != 3 {
+		t.Errorf("pool = %d, want 3 (the 3 incumbents only); pool=%v", len(pool), pool)
+	}
+}
+
+// TestAdmission_RefusesMidGradeFailingNode: fail_rate 0.5 is BELOW the
+// catastrophic 0.9 gate, so scoreNode still marks it Qualified. This is the
+// exact hole the 24h trial was accidentally covering: previously admitted a
+// day later, now refused outright.
+func TestAdmission_RefusesMidGradeFailingNode(t *testing.T) {
+	cfg := eligibilityCfg()
+	nodes := map[string]proxyNode{
+		"sub/inc1": {alive: true, history: goodHistory(100)},
+		"sub/inc2": {alive: true, history: goodHistory(110)},
+		"sub/inc3": {alive: true, history: goodHistory(120)},
+		"sub/mid":  {alive: true, history: partialFailHistory(5, 200)}, // fail 0.5 > 0.25
+	}
+	s, _, _ := newDecisionScorer(t, cfg, nodes)
+	s.poolSet = map[string]bool{"sub/inc1": true, "sub/inc2": true, "sub/inc3": true}
+	s.score(context.Background())
+
+	var mid *NodeHealth
+	for _, n := range s.GetSnapshot().Nodes {
+		if n.Name == "sub/mid" {
+			h := n
+			mid = &h
+		}
+	}
+	if mid == nil {
+		t.Fatal("sub/mid missing from snapshot")
+	}
+	if !mid.Qualified {
+		t.Fatalf("fixture invalid: fail=0.5 must stay Qualified (below the 0.9 "+
+			"catastrophic gate) or this test proves nothing; reason=%q", mid.Reason)
+	}
+	if inPoolNames(s.GetSnapshot())["sub/mid"] {
+		t.Errorf("fail_rate 0.5 node admitted despite max_fail_rate 0.25")
+	}
+}
+
+// TestAdmission_RefusesJitteryNewNode covers the MaxJitterMs axis on its own:
+// every probe succeeds and p95 stays under the ceiling, but the spread does
+// not. A high-jitter egress is felt as intermittent stalls by whichever
+// terminal HRW pins to it.
+func TestAdmission_RefusesJitteryNewNode(t *testing.T) {
+	cfg := eligibilityCfg()
+	nodes := map[string]proxyNode{
+		"sub/inc1":    {alive: true, history: goodHistory(100)},
+		"sub/inc2":    {alive: true, history: goodHistory(110)},
+		"sub/inc3":    {alive: true, history: goodHistory(120)},
+		"sub/jittery": {alive: true, history: jitteryHistory(50, 750)}, // jitter 350 > 300, p95 750 < 800
+	}
+	s, _, _ := newDecisionScorer(t, cfg, nodes)
+	s.poolSet = map[string]bool{"sub/inc1": true, "sub/inc2": true, "sub/inc3": true}
+	s.score(context.Background())
+
+	if inPoolNames(s.GetSnapshot())["sub/jittery"] {
+		t.Errorf("jittery node admitted despite jitter > max_jitter_ms 300")
+	}
+}
+
+// TestAdmission_IncumbentExemptFromQualityGate: the one-way door. An incumbent
+// that degrades past every threshold must STAY in the pool — gating incumbents
+// on quality re-introduces per-round membership flipping. This is also the
+// honest statement of the gate's limitation (ops doc U1 is not solved here).
+func TestAdmission_IncumbentExemptFromQualityGate(t *testing.T) {
+	cfg := eligibilityCfg()
+	nodes := map[string]proxyNode{
+		"sub/inc1":     {alive: true, history: goodHistory(100)},
+		"sub/inc2":     {alive: true, history: goodHistory(110)},
+		"sub/inc3":     {alive: true, history: goodHistory(120)},
+		"sub/degraded": {alive: true, history: goodHistory(4000)}, // way over 800
+	}
+	s, _, _ := newDecisionScorer(t, cfg, nodes)
+	// degraded is ALREADY carrying traffic.
+	s.poolSet = map[string]bool{
+		"sub/inc1": true, "sub/inc2": true, "sub/inc3": true, "sub/degraded": true,
+	}
+	s.score(context.Background())
+
+	if !inPoolNames(s.GetSnapshot())["sub/degraded"] {
+		t.Errorf("incumbent evicted by the admission gate — the gate must be " +
+			"one-way (entry only), or it re-introduces Plan-A churn")
+	}
+}
+
+// TestAdmission_FloorBypassIgnoresQualityGate: availability outranks quality
+// below min_pool_size. With only 1 good node and min_pool 3, the floor fill
+// must still admit refused-on-quality nodes — below the floor per-terminal HRW
+// top-2 degrades and breaks the single-egress invariant, so a slow node beats
+// no node.
+func TestAdmission_FloorBypassIgnoresQualityGate(t *testing.T) {
+	cfg := eligibilityCfg() // min_pool_size = 3
+	nodes := map[string]proxyNode{
+		"sub/good":  {alive: true, history: goodHistory(100)},
+		"sub/slow1": {alive: true, history: goodHistory(2000)}, // refused on quality
+		"sub/slow2": {alive: true, history: goodHistory(2500)}, // refused on quality
+	}
+	s, _, _ := newDecisionScorer(t, cfg, nodes)
+	s.score(context.Background())
+
+	pool := inPoolNames(s.GetSnapshot())
+	if len(pool) < 3 {
+		t.Errorf("pool = %d, want >= min_pool_size 3: the floor bypass must "+
+			"override the quality gate (availability > quality below floor); pool=%v",
+			len(pool), pool)
+	}
+}
+
+// TestAdmission_UnmeasuredNewNodeRefused: preserves the O1 measured-history
+// rule through the rewrite. A node whose alive bit just flickered on has
+// ProbeCount 0 and Qualified=true ("benefit of doubt"); it must not carry
+// users before a single real measurement. MinProbes subsumes the former
+// ProbeCount>0 condition.
+func TestAdmission_UnmeasuredNewNodeRefused(t *testing.T) {
+	cfg := eligibilityCfg()
+	nodes := map[string]proxyNode{
+		"sub/inc1":  {alive: true, history: goodHistory(100)},
+		"sub/inc2":  {alive: true, history: goodHistory(110)},
+		"sub/inc3":  {alive: true, history: goodHistory(120)},
+		"sub/fresh": {alive: true, history: nil}, // ProbeCount 0
+	}
+	s, _, _ := newDecisionScorer(t, cfg, nodes)
+	s.poolSet = map[string]bool{"sub/inc1": true, "sub/inc2": true, "sub/inc3": true}
+	s.score(context.Background())
+
+	if inPoolNames(s.GetSnapshot())["sub/fresh"] {
+		t.Errorf("node with no probe history admitted (O1 regression)")
 	}
 }

@@ -53,6 +53,15 @@ const (
 	// Forces new nodes to "earn" their slot via observation, prevents
 	// a fresh subscription of unknown nodes from sweeping the top by
 	// luck of initial probe.
+	//
+	// LEGACY K-GATED PATH ONLY. sizing_mode=eligibility (what production
+	// runs) no longer consults this: there is no ranking and no top-K there,
+	// so the "sweep the top by luck" failure mode this guards against cannot
+	// occur, and using elapsed time as a proxy for quality delayed good new
+	// supply by 24h while still admitting bad supply a day later. Eligibility
+	// admission now applies the operator's absolute quality thresholds once,
+	// at the door — see Scorer.admissionRefusal and
+	// docs/design-admission-quality-gate.md.
 	trialDuration = 24 * time.Hour
 
 	// evictShortEWMAFactor is how much worse than the pool's own median
@@ -150,7 +159,13 @@ func (s *Scorer) updateNodeEWMA(name string, observed float64, now time.Time) *n
 // inTrial reports whether the named node is still inside its 24h trial
 // window (history shorter than trialDuration). Trial nodes are excluded
 // from EWMA-based promote — they need to be observed for a full day
-// before the system trusts their long EWMA. CALLER MUST HOLD s.mu.
+// before the system trusts their long EWMA.
+//
+// Only the legacy K-gated path calls this; the eligibility path uses
+// Scorer.admissionRefusal instead (see trialDuration above). Note the clock
+// starts at the node's first MEASURED round, not when it first appeared in a
+// subscription: FirstSeenAt is set by updateNodeEWMA, which score() only
+// calls for nodes with ProbeCount>0. CALLER MUST HOLD s.mu.
 func (s *Scorer) inTrial(name string, now time.Time) bool {
 	e, ok := s.ewma[name]
 	if !ok {

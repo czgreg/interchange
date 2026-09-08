@@ -1172,6 +1172,25 @@ func (s *Scorer) eligibilityPoolLocked(nodes []NodeHealth, newPoolSet map[string
 		}
 	}
 	eligible := s.computeEligibleSetLocked(nodes, minPool, now)
+	// Log REFUSALS only, and only for nodes that would otherwise be admissible
+	// (Qualified, not quarantined, not dead-evicted, not already in pool).
+	// Logging every candidate every round would be ~18 lines / 5min of noise;
+	// a refusal is the actionable event — it is the line an operator reads when
+	// asking "why is my new node not carrying traffic yet?". Done here in the
+	// mutating path so computeEligibleSetLocked stays pure for shadow mode.
+	for i := range nodes {
+		name := nodes[i].Name
+		if eligible[name] || s.poolSet[name] || !nodes[i].Qualified {
+			continue
+		}
+		if s.inQuarantine(name, now) || s.deadEvicted(name) {
+			continue // refused for a reason other than quality; logged elsewhere
+		}
+		if why := s.admissionRefusal(nodes[i]); why != "" {
+			slog.Info("nodescorer: admission refused on quality",
+				"node", name, "reason", why)
+		}
+	}
 	for i := range nodes {
 		name := nodes[i].Name
 		st := s.state[name]
@@ -1193,11 +1212,12 @@ func (s *Scorer) eligibilityPoolLocked(nodes []NodeHealth, newPoolSet map[string
 
 // computeEligibleSetLocked is the PURE, side-effect-free membership function
 // shared by the live eligibility path and the shadow-mode logger. It reads
-// node health + s.poolSet/inTrial/inQuarantine/nodeLongEWMA and returns the
-// set of nodes that should carry traffic; it mutates NOTHING (no newPoolSet,
-// no nodes[].InPool, no st counters). Keeping it pure is what lets shadow
-// mode run it in parallel with the live legacy decision without perturbing
-// anything. CALLER MUST HOLD s.mu.
+// node health + s.poolSet/inQuarantine/deadEvicted/nodeLongEWMA and returns
+// the set of nodes that should carry traffic; it mutates NOTHING (no
+// newPoolSet, no nodes[].InPool, no st counters). Keeping it pure is what lets
+// shadow mode run it in parallel with the live legacy decision without
+// perturbing anything. Refusal LOGGING therefore lives in the mutating caller
+// (eligibilityPoolLocked), not here. CALLER MUST HOLD s.mu.
 // deadEvicted reports whether a node has been alive=false for at least
 // cfg.DeadEvictRounds consecutive scoring rounds — i.e. mihomo has been
 // unable to connect to it, sustained, not a single flap. Such a node is
@@ -1214,26 +1234,76 @@ func (s *Scorer) deadEvicted(name string) bool {
 	return st != nil && st.deadRounds >= s.cfg.DeadEvictRounds
 }
 
+// admissionRefusal reports why a NON-INCUMBENT node may not be admitted to
+// the routing set, or "" when it passes. Incumbents never reach here — see
+// computeEligibleSetLocked for why the gate is one-way.
+//
+// The three thresholds are the operator's EXISTING MaxRTTP95Ms / MaxJitterMs
+// / MaxFailRate. They were configured, exposed via /api/status, and logged at
+// startup, but until now no code read them: Plan-A disabled them because at
+// 30s health-check granularity they churned pool membership every cycle
+// (see scoreNode). That objection is about CONTINUOUS membership judgement.
+// This is a ONE-TIME admission decision, judged once per node, so it cannot
+// churn — and it is what makes it safe to admit a new node in ~5 minutes
+// instead of after a 24h trial window. See
+// docs/design-admission-quality-gate.md.
+//
+// A threshold of 0 means "not configured" and is skipped, so a deployment
+// that never set one keeps the previous (unbounded) behavior for it rather
+// than refusing everything.
+//
+// PURE: reads only the passed health + s.cfg. Callers may hold s.mu.
+func (s *Scorer) admissionRefusal(h NodeHealth) string {
+	// Measured-history gate (O1): never route users to a node before a real
+	// measurement exists. scoreNode gives an alive node with no history
+	// Qualified=true "benefit of doubt", which is what let the flapping-dead
+	// ash nodes (US-01..05) get admitted, carry traffic for a round, reveal
+	// fail=1.0 and drop — ~3 flaps/15min of pure churn. Such a node is still
+	// probed via usPoolAll, so it can EARN admission; it just does not carry
+	// users first. MinProbes (default 2) subsumes the older ProbeCount>0
+	// condition this replaces.
+	if min := s.cfg.MinProbes; min > 0 && h.ProbeCount < min {
+		return fmt.Sprintf("probe_count %d < min_probes %d", h.ProbeCount, min)
+	}
+	if lim := s.cfg.MaxRTTP95Ms; lim > 0 && h.RTTP95Ms > lim {
+		return fmt.Sprintf("p95 %dms > max_rtt_p95_ms %d", h.RTTP95Ms, lim)
+	}
+	if lim := s.cfg.MaxJitterMs; lim > 0 && h.JitterMs > lim {
+		return fmt.Sprintf("jitter %dms > max_jitter_ms %d", h.JitterMs, lim)
+	}
+	if lim := s.cfg.MaxFailRate; lim > 0 && h.FailRate > lim {
+		return fmt.Sprintf("fail_rate %.2f > max_fail_rate %.2f", h.FailRate, lim)
+	}
+	return ""
+}
+
 func (s *Scorer) computeEligibleSetLocked(nodes []NodeHealth, minPool int, now time.Time) map[string]bool {
 	eligible := make(map[string]bool, len(nodes))
 	for i := range nodes {
 		name := nodes[i].Name
-		if nodes[i].Qualified &&
-			!s.inQuarantine(name, now) &&
-			!s.deadEvicted(name) &&
-			(!s.inTrial(name, now) || s.poolSet[name]) &&
-			// Measured-history gate (O1): a node with no probe history yet
-			// is only admitted if it is already an INCUMBENT (in the current
-			// pool — e.g. restored by poolSet across a restart, still in its
-			// url-test-history-rebuild window). A NON-incumbent with
-			// ProbeCount==0 is a node whose alive bit just flickered on
-			// (scoreNode gives it Qualified=true "benefit of doubt"); routing
-			// traffic to it before a single real measurement is what let the
-			// flapping-dead ash nodes (US-01..05) get admitted, carry traffic
-			// for a round, reveal fail=1.0, and drop — ~3 flaps/15min of pure
-			// churn. It is still probed via usPoolAll, so it can EARN
-			// admission once ProbeCount>0; it just does not carry users first.
-			(nodes[i].ProbeCount > 0 || s.poolSet[name]) {
+		// One-way door. An INCUMBENT (already carrying traffic) is judged only
+		// on liveness — Qualified, not quarantined, not sustained-dead. A NEW
+		// admission additionally has to clear the measured quality bar.
+		//
+		// The asymmetry IS the design: re-judging incumbents on quality every
+		// round is exactly the Plan-A churn that eligibility mode exists to
+		// remove. It also means this gate does NOT solve the "incumbent
+		// degrades after admission" problem (ops doc U1) — that needs an exit
+		// path, which is deliberately out of scope here.
+		//
+		// Replaces the former (!inTrial || poolSet) condition. trialDuration
+		// asked "has this node existed long enough to trust?" as a proxy for
+		// quality; this asks about quality directly, so a good node is usable
+		// in ~5min instead of 24h AND a mid-grade bad node is refused for good
+		// instead of admitted a day later. inTrial is still used by the legacy
+		// K-gated path, where it guards RANKING competition that does not
+		// exist here. See docs/design-admission-quality-gate.md.
+		if !nodes[i].Qualified ||
+			s.inQuarantine(name, now) ||
+			s.deadEvicted(name) {
+			continue
+		}
+		if s.poolSet[name] || s.admissionRefusal(nodes[i]) == "" {
 			eligible[name] = true
 		}
 	}

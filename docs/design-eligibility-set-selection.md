@@ -104,6 +104,13 @@
   preferredSet top-K 排序切(`:650-667`)、fast-evict(`:704-722`)、
   swap_threshold 门(`:728-744`)、poolFillCeiling、computeK 的"目标"语义。
 - 合格集 `E = Qualified(node) ∩ !inQuarantine ∩ (!inTrial || 已在池内)`。
+  - **2026-09-07 修订**:`(!inTrial || 已在池内)` 这一项已被**准入质量门**
+    替换 —— 新纳入需同时满足 `ProbeCount>=min_probes` 且 p95/jitter/fail
+    不超过运维既有的 `max_rtt_p95_ms`/`max_jitter_ms`/`max_fail_rate`;
+    在池成员只判 liveness(单向门)。`inTrial` 仅 legacy K-gated 路径仍在用。
+    理由、被否决的相对门方案、以及与 §3.2「不做相对质量门」的调和见
+    `docs/design-admission-quality-gate.md`。**不要因为本节旧文而删除
+    `Scorer.admissionRefusal`。**
   - `Qualified` = **现有 `scoreNode` 门原样不动**:5-探针成功平滑
     (`recentOk`,`scorer.go:1234`)+ catastrophic `fail_rate≥0.9`
     (`:1262`)。即"活着且可达,自带 ~2.5min 抗噪"。
@@ -124,6 +131,12 @@
 - 资格 = 现有 liveness 门,抗噪已由"5 探针要全失败才掉"提供(黏,非刀刃)。
 - **不做相对质量门**——正是 v1(相对带掩盖相关退化)和 v2(绝对 composite
   门误杀健康节点)的死因;liveness 绝对门 + 不排序,天然规避两者。
+  - **2026-09-07 补充**:本结论仍然成立且已被遵守。后续新增的**准入门**
+    (`docs/design-admission-quality-gate.md`)既不是相对门(不用池中位数,
+    曾提议复用 `poolFillCeiling` 已被两份评审否决),也不是 composite 单值门
+    (用三个分量各自的既有阈值),且**只在准入时判一次、不参与持续成员判定、
+    不排序**。v1/v2 的死因都在「持续判定 + 相对/合成单值」,准入门两者都不沾。
+    本节这句针对的是**资格门(持续)**,与**准入门(一次性)**是不同决策点。
 - **incumbency 主决策层 CUT**:纯门谓词天然位置无关,在位/挑战者同信号
   同待遇,无"重排"要抑制。
 - **差分共模算法 CUT**:见 §3.3——"不塌空、不掩盖"的结果由 liveness门 +
