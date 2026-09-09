@@ -101,7 +101,7 @@ token 为空时不鉴权。
 |---|---|
 | `engine_ok` | mihomo clash-api `/version` 可达 |
 | `pool_size` | 实际承载流量的 us-pool 成员数（InPool，即 per-terminal HRW 抽取的集合大小）。 |
-| `pool_eligible` | 通过准入门的节点数（tier1）。eligibility 模式下稳态等于 `pool_size`；legacy K-gating 下 `pool_size` 被 K 截断、`pool_eligible` 可更大。（旧字段 `pool_qualified` 名为"合格数"实为 InPool，已拆成这两个诚实字段。） |
+| `pool_eligible` | **仅**通过 liveness 门的节点数（`tier1_count` = `len(qualifiedNodes)`，含无历史节点的 benefit-of-doubt）。**不扣除准入质量门** —— 质量门在 `computeEligibleSetLocked` 里另算。所以 `pool_eligible >= pool_size` 是常态，且与 K 无关：92 在 2026-09-09 读到 12 vs 7，多出的 5 个全部因 `fail_rate` 被拒。读作"活着且可达"，不是"够格入池"；被拒原因看日志 `admission refused on quality`。（旧字段 `pool_qualified` 名为"合格数"实为 InPool，已拆开。） |
 | `pool_total` | NodePattern-匹配的候选总数。 |
 | `pool_last_update` | us-pool 成员最近一次变更时间。变更频率 ≈ 订阅增减节点频率（小时-天级）。 |
 | `capacity` | 离线压测得出的单机上限，未配置时不返回 |

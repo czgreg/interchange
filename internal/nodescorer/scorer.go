@@ -113,9 +113,17 @@ type Snapshot struct {
 
 // PoolSizingSnapshot is the runtime view of the K-gating decision.
 type PoolSizingSnapshot struct {
-	KTarget       int  `json:"k_target"`
-	KCurrent      int  `json:"k_current"`
-	TActive       int  `json:"t_active"`
+	KTarget  int `json:"k_target"`
+	KCurrent int `json:"k_current"`
+	TActive  int `json:"t_active"`
+	// Tier1Count = len(qualifiedNodes) = nodes passing the LIVENESS gate
+	// (scoreNode's Qualified bit, which includes the no-history "benefit of
+	// doubt"). It does NOT apply the admission quality gate, so it is an
+	// upper bound on admissible nodes, not a count of them — on 92 it read
+	// 12 while 7 were in-pool and 5 were refused on fail_rate. The name is
+	// historical ("tier 1" predates the admission gate); under
+	// sizing_mode=eligibility it is display-only and gates nothing (kTarget
+	// is overwritten with len(newPoolSet) right after computeK).
 	Tier1Count    int  `json:"tier1_count"`
 	SupplyLimited bool `json:"supply_limited"`
 }
@@ -308,6 +316,14 @@ type nodeState struct {
 	health  NodeHealth
 	strikes int
 	okRuns  int
+	// admitRuns: consecutive scoring rounds this NON-MEMBER has passed the
+	// admission quality gate (admissionRefusal == ""). Reset to 0 while the
+	// node is in the pool, so a node that exits must re-earn entry from
+	// scratch. Drives the ReadmitStrikes entry gate under sizing_mode=
+	// eligibility — see computeEligibleSetLocked. NOT persisted: it is a
+	// short-horizon anti-flap counter, and starting at 0 after a restart is
+	// the conservative direction (bootstrap is exempt anyway).
+	admitRuns int
 	// hardFailStart is the wall-clock time the scorer first observed
 	// fail_rate >= hardFailThreshold for this node in an unbroken streak.
 	// Zero when the node is healthy. Cleared (zero again) the moment a
@@ -1152,7 +1168,15 @@ func (s *Scorer) score(ctx context.Context) {
 				// transparency but main.go's notify formatter skips it
 				// to avoid Lark spam on every redeploy.
 				txType := "auto_swap"
+				// Name the mechanism that ACTUALLY produced this change.
+				// Hardcoding the K-gating string sent an operator (and me,
+				// 2026-09-09) chasing composite-score swaps in a deployment
+				// where sizing_mode=eligibility has no K, no ranking cut and
+				// no swap threshold — every prod transition was mislabeled.
 				reason := "K-gating composite-score swap"
+				if s.cfg.SizingMode == "eligibility" {
+					reason = "eligibility-set membership change"
+				}
 				if len(before) == 0 {
 					txType = "bootstrap"
 					reason = "first scoring round after restart — initial pool fill"
@@ -1280,6 +1304,28 @@ func (s *Scorer) eligibilityPoolLocked(nodes []NodeHealth, newPoolSet map[string
 					"threshold", s.cfg.DeadEvictRounds, "fail_rate", nodes[i].FailRate,
 					"note", "floor-subordinate: retained only if eviction would breach min_pool")
 			}
+		}
+	}
+	// Maintain the entry-hysteresis counter BEFORE computing the eligible set
+	// (computeEligibleSetLocked reads it). A NON-MEMBER accumulates a run only
+	// while it passes the admission quality gate; an in-pool node's counter is
+	// held at 0 so that if it later exits it must re-earn entry from scratch
+	// rather than being readmitted on the strength of a stale run.
+	//
+	// Live path only, so shadow mode never perturbs it — same reason
+	// deadRounds is maintained here rather than in the pure function.
+	for i := range nodes {
+		st := s.state[nodes[i].Name]
+		if st == nil {
+			continue
+		}
+		switch {
+		case s.poolSet[nodes[i].Name]:
+			st.admitRuns = 0
+		case nodes[i].Qualified && s.admissionRefusal(nodes[i]) == "":
+			st.admitRuns++
+		default:
+			st.admitRuns = 0
 		}
 	}
 	eligible := s.computeEligibleSetLocked(nodes, minPool, now)
@@ -1410,6 +1456,10 @@ func (s *Scorer) admissionRefusal(h NodeHealth) string {
 
 func (s *Scorer) computeEligibleSetLocked(nodes []NodeHealth, minPool int, now time.Time) map[string]bool {
 	eligible := make(map[string]bool, len(nodes))
+	// Bootstrap: empty pool (first round after a restart). Entry hysteresis is
+	// skipped so the data plane gets a us-pool immediately rather than after
+	// ReadmitStrikes rounds of no egress.
+	bootstrap := len(s.poolSet) == 0
 	for i := range nodes {
 		name := nodes[i].Name
 		// One-way door. An INCUMBENT (already carrying traffic) is judged only
@@ -1434,9 +1484,42 @@ func (s *Scorer) computeEligibleSetLocked(nodes []NodeHealth, minPool int, now t
 			s.deadEvicted(name) {
 			continue
 		}
-		if s.poolSet[name] || s.admissionRefusal(nodes[i]) == "" {
+		if s.poolSet[name] {
 			eligible[name] = true
+			continue
 		}
+		if s.admissionRefusal(nodes[i]) != "" {
+			continue
+		}
+		// Entry hysteresis. A one-round quality sample is NOT evidence of
+		// stability: mihomo keeps at most 10 url-test entries at a 30s
+		// interval, so each 5-minute scoring round reads a FRESH, essentially
+		// independent 10-probe window. A node with sustained ~30-40% loss
+		// therefore clears fail_rate<=0.25 on a minority of rounds purely by
+		// sampling luck, gets admitted, then trips the liveness gate
+		// (recentOk==0) and exits — one hot-reload per crossing, indefinitely.
+		//
+		// This is the "新节点一轮幸运扫入" failure that
+		// docs/design-eligibility-set-selection.md:120 lists as a MUST-KEEP
+		// guard. That guard used to be `!inTrial` (a 24h window, hence
+		// inherently multi-round); the 2026-09-07 admission-quality-gate
+		// revision replaced it with a gate judged on ONE round and left
+		// nothing spanning rounds. docs/design-eligibility-set-selection.md:222
+		// budgeted for exactly this ("调 readmit_strikes 2–3") but the
+		// eligibility path never read the knob — only the legacy K-gated path
+		// does (see the okRuns check in the "auto" branch above).
+		//
+		// Incumbents are exempt (checked above), so this does NOT re-introduce
+		// the per-round churn eligibility mode exists to remove: it is an
+		// ENTRY condition only. Bootstrap is exempt so a cold start still
+		// fills the pool in one round instead of stalling for ReadmitStrikes
+		// rounds with no egress.
+		if readmit := s.cfg.ReadmitStrikes; readmit > 1 && !bootstrap {
+			if st := s.state[name]; st == nil || st.admitRuns < readmit {
+				continue
+			}
+		}
+		eligible[name] = true
 	}
 
 	// Redundancy floor with incumbency. Admit best-available Qualified

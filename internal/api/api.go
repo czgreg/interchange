@@ -234,14 +234,23 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		snap := s.deps.NodeScorer.GetSnapshot()
 		// Admission/eligibility readout — two honest, distinct numbers:
 		//   pool_size     = nodes actually carrying traffic (InPool).
-		//   pool_eligible = nodes passing the liveness/admission gate
-		//                   (Tier1Count). Under eligibility mode these are
-		//                   normally equal; under legacy K-gating pool_size
-		//                   is capped at K while pool_eligible can be larger.
+		//   pool_eligible = nodes passing the LIVENESS gate only
+		//                   (Tier1Count = len(qualifiedNodes)). It does NOT
+		//                   subtract the admission quality gate, which is
+		//                   applied separately in computeEligibleSetLocked.
+		//
+		// So pool_eligible >= pool_size routinely, and NOT because of K: on 92
+		// 2026-09-09 it read 12 vs 7 with the 5 extra nodes all refused on
+		// fail_rate. An earlier version of this comment claimed the two are
+		// "normally equal under eligibility mode" and that the gap comes from
+		// legacy K-capping — both wrong, and it cost a diagnosis: the gap is
+		// the admission gate, and it is normal. Read pool_eligible as "alive
+		// and reachable", not "would be admitted"; the refusals themselves are
+		// in the log ("admission refused on quality").
 		// (The former "pool_qualified" field is dropped: its name said
 		// "qualified" but it counted InPool, conflating the two and
 		// misleading the operator about how many nodes actually pass the
-		// gate. Use pool_eligible for that.)
+		// gate.)
 		resp["pool_size"] = snap.Qualified
 		resp["pool_eligible"] = snap.PoolSizing.Tier1Count
 		resp["pool_total"] = snap.Total

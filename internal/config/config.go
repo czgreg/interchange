@@ -504,11 +504,21 @@ type NodeQualifyConfig struct {
 	// mihomo's 30s health-check is already filtering at the routing
 	// layer).
 	EvictStrikes int `yaml:"evict_strikes"`
-	// ReadmitStrikes: consecutive passing rounds before an evicted node
-	// is added back. Default 1. At 5-minute ScoringInterval, a single
-	// passing round already represents 10 mihomo health-check cycles
-	// of stability — that's enough to trust readmission without
-	// flapping (which the 60-second scoring cycle could not provide).
+	// ReadmitStrikes: consecutive passing rounds before a non-member node
+	// is added back. Default 1 (no hysteresis). Read by BOTH the legacy
+	// K-gated path and, since 2026-09-09, the sizing_mode=eligibility
+	// admission gate.
+	//
+	// Set this to 2-3 under eligibility mode. The earlier reasoning here —
+	// "one passing round already represents 10 mihomo health-check cycles,
+	// so it is enough to trust readmission" — is wrong, and 92 flapped for
+	// it: mihomo keeps at most 10 url-test entries at a 30s interval, so
+	// those 10 cycles are ONE fresh ~independent sample per 5-minute round,
+	// not 10 confirmations. A node with sustained ~30-40% loss clears
+	// fail_rate<=0.25 on a minority of rounds by sampling luck alone, so at
+	// ReadmitStrikes=1 it is admitted, trips the liveness gate, exits, and
+	// repeats — one hot-reload per crossing. N consecutive rounds is the
+	// part that actually spans independent samples.
 	ReadmitStrikes int `yaml:"readmit_strikes"`
 	// DeadEvictRounds: consecutive scoring rounds a node must be
 	// alive=false (mihomo cannot connect) before it is evicted from the
