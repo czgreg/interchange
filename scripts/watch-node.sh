@@ -84,15 +84,30 @@ BEGIN { lo = 6; hi = 8; flaps = 0; seen = 0 }
   }
 }'
 
-SSH="ssh -o ConnectTimeout=10 -o ServerAliveInterval=30 -o StrictHostKeyChecking=no"
+SSH="ssh -o ConnectTimeout=10 -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -o StrictHostKeyChecking=no"
 
 if [ -n "$SINCE" ]; then
   $SSH "dianwei@$HOST" \
     "sudo journalctl -u leap-gateway --since '$SINCE' --no-pager 2>/dev/null" \
     | awk "$AWK_PROG"
-else
-  # -n0 so we start at "now" rather than replaying the tail.
+  exit 0
+fi
+
+# Follow mode reconnects. A single dropped ssh session used to kill the watch
+# outright ("Timeout, server not responding", exit 255, 2026-09-09 08:46Z) —
+# and a dead monitor is indistinguishable from a quiet one, which is the worst
+# failure mode for something whose whole job is to notice. ServerAliveInterval
+# alone did NOT prevent it: keepalives detect a dead peer, they don't re-dial.
+#
+# Each reconnect restarts journalctl with -n0, so the gap's events are missed
+# rather than replayed as live. That is deliberate: replaying would re-fire
+# stale supply/flap events and corrupt the band. The RECONNECT line marks the
+# gap so a hole in coverage is visible instead of silent.
+while :; do
   $SSH "dianwei@$HOST" \
     "sudo journalctl -u leap-gateway -f -n0 --no-pager 2>/dev/null" \
     | awk "$AWK_PROG"
-fi
+  rc=$?
+  echo "[RECONNECT] stream ended (rc=$rc) at $(date -u +%H:%M:%SZ) — re-dialing in 15s; events during the gap are NOT replayed"
+  sleep 15
+done
