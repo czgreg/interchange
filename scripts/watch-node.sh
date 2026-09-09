@@ -12,11 +12,16 @@
 # per-occurrence reporting of a flap that fires every scoring round drowns
 # the events that matter.
 #
-# Baseline recorded at 557ba03 (2026-09-09 06:26Z), pre-obfs-fix: qualified
-# oscillated 2<->3 with excursions to 4, supply_limited flipped with it,
-# pool_stability_24h.swap_count=86. The band self-widens as it observes, so
-# a genuine improvement (>=4 sustained) or regression (<=1) reports as
-# OUTSIDE-band once and then becomes the new normal.
+# Baseline reseeded at b1c0a0d (2026-09-09 07:40Z), post-obfs-fix AND
+# post-entry-hysteresis (readmit_strikes 1->2 on the node): qualified sits
+# at 6 with pool_eligible 8, node_count 180, 5 subscriptions. The band
+# self-widens as it observes, so a genuine improvement (>=9 sustained) or
+# regression (<=5) reports as OUTSIDE-band once and then becomes the new
+# normal.
+#
+# Prior seed was 2-3 from the pre-obfs baseline (557ba03, swap_count=86);
+# it fired three OUTSIDE-band events just tracking the pool's recovery to
+# 6-8, which is noise now that the recovery is the steady state.
 set -uo pipefail
 
 HOST="192.168.70.92"
@@ -30,7 +35,7 @@ while [ $# -gt 0 ]; do
 done
 
 AWK_PROG='
-BEGIN { lo = 2; hi = 3; flaps = 0; seen = 0 }
+BEGIN { lo = 6; hi = 8; flaps = 0; seen = 0 }
 {
   line = $0
   if (line ~ /level=(WARN|ERROR|FATAL)/ ||
