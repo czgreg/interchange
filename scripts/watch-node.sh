@@ -109,14 +109,75 @@ fi
 # alone did NOT prevent it: keepalives detect a dead peer, they don't re-dial.
 #
 # Each reconnect restarts journalctl with -n0, so the gap's events are missed
-# rather than replayed as live. That is deliberate: replaying would re-fire
-# stale supply/flap events and corrupt the band. The RECONNECT line marks the
-# gap so a hole in coverage is visible instead of silent.
+# rather than replayed as live. Replaying would re-emit events already judged,
+# and the 30-minute inspection reads the journal in full anyway.
+#
+# An ISOLATED redial is not news and must not interrupt. Measured 2026-09-09
+# 11:36/12:03/12:47/13:21Z: 4 drops in 105min, every one self-healed in 15s,
+# zero real faults in the same span — the watch was reporting only its own
+# plumbing. Root cause is the network path, not the node: 92's sshd runs
+# clientaliveinterval=0 so it never probes the client, the path crosses at
+# least one router (Mac gw 192.168.100.1, seen at the node as 192.168.102.117,
+# node on 192.168.70.0/24), and `journalctl -f` is silent between 5-minute
+# scoring rounds, so an intermediate NAT/firewall reaps the idle flow. sshd
+# logs `session opened` for each redial with no matching `session closed` for
+# the dead one, which is the signature of a network-layer drop rather than a
+# clean teardown. Raising ServerAliveCountMax would only slow DETECTION (now
+# 90s); it cannot stop a middlebox from reaping the flow.
+#
+# So: stay silent for a redial that restores the stream, and speak up for the
+# two states that actually mean lost coverage —
+#   1. the redial itself fails (stream ends again in under RAPID_SECS), or
+#   2. RAPID_MAX drops inside RAPID_WINDOW, i.e. a flapping path rather than
+#      a one-off blip.
+# The gap is still recorded to the output file either way, so a hole in
+# coverage stays inspectable; only the interrupt is suppressed.
+RAPID_SECS="${RAPID_SECS:-45}"      # a stream dying this fast did not come back
+RAPID_WINDOW="${RAPID_WINDOW:-900}" # 15min
+RAPID_MAX="${RAPID_MAX:-3}"         # drops in the window before it is worth reporting
+
+# drop_verdict LIVED RC NOW DROPS... -> prints the line to emit, or nothing.
+# Kept as a pure function of its arguments (no clock, no globals) so
+# scripts/watch-node-test.sh can drive every branch without waiting on a real
+# ssh drop. Sets DROPS_OUT to the pruned drop list the caller should keep.
+drop_verdict() {
+  local lived="$1" rc="$2" now="$3"; shift 3
+  local t pruned="" n=0
+  for t in "$@"; do
+    [ $(( now - t )) -lt "$RAPID_WINDOW" ] && { pruned="$pruned $t"; n=$(( n + 1 )); }
+  done
+  pruned="$pruned $now"; n=$(( n + 1 ))
+  DROPS_OUT="$pruned"
+  if [ "$lived" -lt "$RAPID_SECS" ]; then
+    echo "[!] STREAM WILL NOT HOLD — died after ${lived}s (rc=$rc); coverage is NOT continuous"
+  elif [ "$n" -ge "$RAPID_MAX" ]; then
+    echo "[!] PATH FLAPPING — $n drops in the last $(( RAPID_WINDOW / 60 ))min (latest rc=$rc, held ${lived}s)"
+    DROPS_OUT=""   # reported; start a fresh window rather than re-firing per drop
+  fi
+  # else: isolated blip — deliberately silent on stdout.
+}
+
+# Sourced by the test harness, which wants the functions but not the stream.
+[ -n "${WATCH_NODE_LIB:-}" ] && return 0
+
+drops=""             # space-separated epoch seconds of recent drops
 while :; do
+  started=$(date +%s)
   $SSH "dianwei@$HOST" \
     "sudo journalctl -u leap-gateway -f -n0 --no-pager 2>/dev/null" \
     | awk -v MIN_POOL="$MIN_POOL" "$AWK_PROG"
   rc=$?
-  echo "[RECONNECT] stream ended (rc=$rc) at $(date -u +%H:%M:%SZ) — re-dialing in 15s; events during the gap are NOT replayed"
+  now=$(date +%s)
+  lived=$(( now - started ))
+
+  verdict="$(drop_verdict "$lived" "$rc" "$now" $drops)"
+  drops="$DROPS_OUT"
+  if [ -n "$verdict" ]; then
+    echo "$verdict"
+  else
+    # Isolated blip. Recorded for the coverage trail, deliberately not an alert:
+    # stderr lands in the output file without raising a notification.
+    echo "[gap] redial at $(date -u +%H:%M:%SZ) after ${lived}s (rc=$rc) — 15s hole, not replayed" >&2
+  fi
   sleep 15
 done

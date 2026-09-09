@@ -88,5 +88,58 @@ expect_match "render_fail_fires" \
 expect_match "panic_fires" \
   'panic: runtime error: invalid memory address' '^\[!\]'
 
+
+# ---------------------------------------------------------------------------
+# Reconnect policy. An isolated redial must NOT alert (4 of them in 105min on
+# 2026-09-09 produced 4 interrupts and 0 real faults); lost coverage must.
+# drop_verdict is a pure function of its args so no real ssh drop is needed.
+# ---------------------------------------------------------------------------
+echo
+echo "reconnect policy:"
+# Refuse to source a script without the lib guard: without it the source
+# falls through into the real ssh follow loop and the test hangs forever
+# (hit on 2026-09-09 while reverse-verifying against the pre-guard version,
+# which also orphaned an ssh child that had to be killed by hand).
+grep -q 'WATCH_NODE_LIB' scripts/watch-node.sh || {
+  echo "  SKIP reconnect policy — scripts/watch-node.sh has no WATCH_NODE_LIB guard;"
+  echo "       sourcing it would start the real follow loop. Not sourcing."
+  printf '\n%d passed, %d failed\n' "$pass" "$fail"
+  [ "$fail" -eq 0 ]; exit $?
+}
+WATCH_NODE_LIB=1 source scripts/watch-node.sh
+NOW=1000000
+
+v_silent() { # name, lived, rc, drops...
+  local name="$1" lived="$2" rc="$3"; shift 3
+  local out; out="$(drop_verdict "$lived" "$rc" "$NOW" "$@")"
+  [ -z "$out" ] && ok "$name" || bad "$name" "expected silence, got: $out"
+}
+v_match() { # name, regex, lived, rc, drops...
+  local name="$1" re="$2" lived="$3" rc="$4"; shift 4
+  local out; out="$(drop_verdict "$lived" "$rc" "$NOW" "$@")"
+  printf '%s' "$out" | grep -qE "$re" && ok "$name" || bad "$name" "expected /$re/, got: ${out:-<silence>}"
+}
+
+# 1. The measured production case: one drop after ~27min of healthy stream.
+v_silent "isolated_redial_is_silent (held 1620s)" 1620 255
+
+# 2. Two drops in the window is still not worth an interrupt (RAPID_MAX=3).
+v_silent "two_drops_in_window_silent" 1620 255 $(( NOW - 600 ))
+
+# 3. Three in the window IS a flapping path.
+v_match "three_drops_fires" "PATH FLAPPING" 1620 255 $(( NOW - 600 )) $(( NOW - 300 ))
+
+# 4. Drops older than the window must not accumulate toward the threshold.
+v_silent "stale_drops_pruned (2 outside 900s)" 1620 255 $(( NOW - 5000 )) $(( NOW - 4000 ))
+
+# 5. A stream that dies immediately means the redial did not really work.
+v_match "stream_will_not_hold_fires (died in 3s)" "STREAM WILL NOT HOLD" 3 255
+
+# 6. After reporting a flap the window resets, so the next isolated drop is
+#    quiet again instead of re-firing on every subsequent drop.
+drop_verdict 1620 255 "$NOW" $(( NOW - 600 )) $(( NOW - 300 )) >/dev/null
+[ -z "$DROPS_OUT" ] && ok "flap_report_resets_window" \
+  || bad "flap_report_resets_window" "expected empty DROPS_OUT, got: $DROPS_OUT"
+
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]
