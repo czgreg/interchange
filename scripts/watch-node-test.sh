@@ -109,15 +109,21 @@ grep -q 'WATCH_NODE_LIB' scripts/watch-node.sh || {
 WATCH_NODE_LIB=1 source scripts/watch-node.sh
 NOW=1000000
 
+# Call drop_verdict the way the follow loop does: directly in this shell, then
+# read the out-variables. NOT inside $( ) — the earlier harness captured stdout
+# instead, which is why it passed while production died on line 174.
 v_silent() { # name, lived, rc, drops...
   local name="$1" lived="$2" rc="$3"; shift 3
-  local out; out="$(drop_verdict "$lived" "$rc" "$NOW" "$@")"
-  [ -z "$out" ] && ok "$name" || bad "$name" "expected silence, got: $out"
+  VERDICT_OUT="<unset>"
+  drop_verdict "$lived" "$rc" "$NOW" "$@"
+  [ -z "$VERDICT_OUT" ] && ok "$name" || bad "$name" "expected silence, got: $VERDICT_OUT"
 }
 v_match() { # name, regex, lived, rc, drops...
   local name="$1" re="$2" lived="$3" rc="$4"; shift 4
-  local out; out="$(drop_verdict "$lived" "$rc" "$NOW" "$@")"
-  printf '%s' "$out" | grep -qE "$re" && ok "$name" || bad "$name" "expected /$re/, got: ${out:-<silence>}"
+  VERDICT_OUT="<unset>"
+  drop_verdict "$lived" "$rc" "$NOW" "$@"
+  printf '%s' "$VERDICT_OUT" | grep -qE "$re" && ok "$name" \
+    || bad "$name" "expected /$re/, got: ${VERDICT_OUT:-<silence>}"
 }
 
 # 1. The measured production case: one drop after ~27min of healthy stream.
@@ -137,9 +143,33 @@ v_match "stream_will_not_hold_fires (died in 3s)" "STREAM WILL NOT HOLD" 3 255
 
 # 6. After reporting a flap the window resets, so the next isolated drop is
 #    quiet again instead of re-firing on every subsequent drop.
-drop_verdict 1620 255 "$NOW" $(( NOW - 600 )) $(( NOW - 300 )) >/dev/null
+drop_verdict 1620 255 "$NOW" $(( NOW - 600 )) $(( NOW - 300 ))
 [ -z "$DROPS_OUT" ] && ok "flap_report_resets_window" \
   || bad "flap_report_resets_window" "expected empty DROPS_OUT, got: $DROPS_OUT"
+
+# 7. The regression that took the monitor down on 2026-09-09: the follow loop
+#    calls drop_verdict and then reads BOTH out-variables in the same shell. The
+#    first version returned the verdict on stdout, so the caller had to wrap it
+#    in $( ) — a subshell — and the DROPS_OUT read that followed aborted under
+#    `set -u` with "line 174: DROPS_OUT: unbound variable", killing the monitor
+#    on its first real ssh drop. Every test above happened to sidestep the
+#    combination: v_silent/v_match captured stdout without reading DROPS_OUT,
+#    and case 6 read DROPS_OUT without capturing. This asserts the real pairing.
+unset VERDICT_OUT DROPS_OUT
+loop_drops=""
+drop_verdict 3 255 "$NOW" $loop_drops
+loop_verdict="${VERDICT_OUT-<unset: still returns via stdout>}"
+loop_drops="${DROPS_OUT-<unset: lost in a subshell>}"
+case "$loop_verdict$loop_drops" in
+  *unset*) bad "caller_pattern_propagates_both" \
+             "verdict=[$loop_verdict] drops=[$loop_drops]" ;;
+  *) case "$loop_verdict" in
+       *"STREAM WILL NOT HOLD"*)
+         [ -n "$loop_drops" ] && ok "caller_pattern_propagates_both" \
+           || bad "caller_pattern_propagates_both" "DROPS_OUT empty, drop not recorded" ;;
+       *) bad "caller_pattern_propagates_both" "wrong verdict: [$loop_verdict]" ;;
+     esac ;;
+esac
 
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

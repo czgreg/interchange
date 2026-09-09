@@ -136,10 +136,20 @@ RAPID_SECS="${RAPID_SECS:-45}"      # a stream dying this fast did not come back
 RAPID_WINDOW="${RAPID_WINDOW:-900}" # 15min
 RAPID_MAX="${RAPID_MAX:-3}"         # drops in the window before it is worth reporting
 
-# drop_verdict LIVED RC NOW DROPS... -> prints the line to emit, or nothing.
-# Kept as a pure function of its arguments (no clock, no globals) so
+# drop_verdict LIVED RC NOW DROPS... -> sets VERDICT_OUT and DROPS_OUT.
+# A function of its arguments only (no clock, no reads of prior state) so
 # scripts/watch-node-test.sh can drive every branch without waiting on a real
-# ssh drop. Sets DROPS_OUT to the pruned drop list the caller should keep.
+# ssh drop.
+#
+#   VERDICT_OUT — the line to emit, or empty for "stay quiet".
+#   DROPS_OUT   — the pruned drop list the caller should keep.
+#
+# MUST NOT be called inside $( ) — that runs it in a subshell and neither
+# out-variable reaches the caller. The first version returned the verdict on
+# stdout, which forced the caller into command substitution and made
+# DROPS_OUT unreadable; under `set -u` the read aborted the whole monitor on
+# the first real ssh drop. Both results are out-variables now precisely so
+# there is nothing to capture and no subshell to lose them in.
 drop_verdict() {
   local lived="$1" rc="$2" now="$3"; shift 3
   local t pruned="" n=0
@@ -148,19 +158,22 @@ drop_verdict() {
   done
   pruned="$pruned $now"; n=$(( n + 1 ))
   DROPS_OUT="$pruned"
+  VERDICT_OUT=""
   if [ "$lived" -lt "$RAPID_SECS" ]; then
-    echo "[!] STREAM WILL NOT HOLD — died after ${lived}s (rc=$rc); coverage is NOT continuous"
+    VERDICT_OUT="[!] STREAM WILL NOT HOLD — died after ${lived}s (rc=$rc); coverage is NOT continuous"
   elif [ "$n" -ge "$RAPID_MAX" ]; then
-    echo "[!] PATH FLAPPING — $n drops in the last $(( RAPID_WINDOW / 60 ))min (latest rc=$rc, held ${lived}s)"
+    VERDICT_OUT="[!] PATH FLAPPING — $n drops in the last $(( RAPID_WINDOW / 60 ))min (latest rc=$rc, held ${lived}s)"
     DROPS_OUT=""   # reported; start a fresh window rather than re-firing per drop
   fi
-  # else: isolated blip — deliberately silent on stdout.
+  # else: isolated blip — VERDICT_OUT stays empty, deliberately.
 }
 
 # Sourced by the test harness, which wants the functions but not the stream.
 [ -n "${WATCH_NODE_LIB:-}" ] && return 0
 
 drops=""             # space-separated epoch seconds of recent drops
+DROPS_OUT=""         # set by drop_verdict; defined here so `set -u` holds
+VERDICT_OUT=""
 while :; do
   started=$(date +%s)
   $SSH "dianwei@$HOST" \
@@ -170,10 +183,10 @@ while :; do
   now=$(date +%s)
   lived=$(( now - started ))
 
-  verdict="$(drop_verdict "$lived" "$rc" "$now" $drops)"
+  drop_verdict "$lived" "$rc" "$now" $drops   # no $( ) — see the note above
   drops="$DROPS_OUT"
-  if [ -n "$verdict" ]; then
-    echo "$verdict"
+  if [ -n "$VERDICT_OUT" ]; then
+    echo "$VERDICT_OUT"
   else
     # Isolated blip. Recorded for the coverage trail, deliberately not an alert:
     # stderr lands in the output file without raising a notification.
