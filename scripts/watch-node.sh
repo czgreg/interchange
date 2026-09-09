@@ -12,20 +12,36 @@
 # per-occurrence reporting of a flap that fires every scoring round drowns
 # the events that matter.
 #
-# Baseline reseeded at b1c0a0d (2026-09-09 07:40Z), post-obfs-fix AND
-# post-entry-hysteresis (readmit_strikes 1->2 on the node): qualified sits
-# at 6 with pool_eligible 8, node_count 180, 5 subscriptions. The band
-# self-widens as it observes, so a genuine improvement (>=9 sustained) or
-# regression (<=5) reports as OUTSIDE-band once and then becomes the new
-# normal.
+# Supply alerting is a FLOOR ONLY: qualified < MIN_POOL fires, growth never
+# does. Two earlier shapes were both wrong and both cost real inspection
+# rounds:
 #
-# Prior seed was 2-3 from the pre-obfs baseline (557ba03, swap_count=86);
-# it fired three OUTSIDE-band events just tracking the pool's recovery to
-# 6-8, which is noise now that the recovery is the steady state.
+#   - A self-widening band (seed 6-8, then 2-3 before that) reported the
+#     pool GROWING as OUTSIDE-band. Pool growth is good news and must never
+#     interrupt. Worse, the band lived in awk's BEGIN, which re-runs on every
+#     reconnect (the awk is inside the while loop below) — so every reconnect
+#     reset the band to its seed and re-fired alerts on values already judged
+#     normal before the drop. Observed 2026-09-09 12:03Z: qualified=9 was
+#     accepted at 10:35Z, then re-fired as OUTSIDE after the 12:03Z redial.
+#
+#   - A cumulative flap counter printing every 12th in-band swap. It was not
+#     a rate, so "12" carried no time base (12 swaps over 3.5h ≈ 0.29/round,
+#     i.e. the pool was CALM) yet read as an alarm. It also counted changes
+#     in the qualified COUNT, so an equal one-in-one-out swap — the exact
+#     thing it existed to catch — was invisible to it. Deleted rather than
+#     fixed: the 30-minute inspection reads `pool updated + hot-reloaded`
+#     straight from the journal, which is the authoritative churn measure.
+#
+# MIN_POOL mirrors node_qualify.pool_sizing.min_pool_size on the node. Below
+# it the redundancy floor is breached, which is a real incident.
 set -uo pipefail
 
 HOST="192.168.70.92"
 SINCE=""
+# Mirrors node_qualify.pool_sizing.min_pool_size on the node. Kept as a plain
+# constant rather than read from the API: the watch must alert on the floor
+# even when the API is the thing that is down.
+MIN_POOL="${MIN_POOL:-4}"
 while [ $# -gt 0 ]; do
   case "$1" in
     --since) SINCE="${2:-}"; shift 2 ;;
@@ -35,7 +51,7 @@ while [ $# -gt 0 ]; do
 done
 
 AWK_PROG='
-BEGIN { lo = 6; hi = 8; flaps = 0; seen = 0 }
+BEGIN { seen = 0 }
 {
   line = $0
   if (line ~ /level=(WARN|ERROR|FATAL)/ ||
@@ -55,16 +71,9 @@ BEGIN { lo = 6; hi = 8; flaps = 0; seen = 0 }
     if (seen && sl != lastsl) {
       print "[SUPPLY] supply_limited " lastsl " -> " sl "  (qualified=" q " total=" tot ")"; fflush()
     }
-    if (q > hi || q < lo) {
-      print "[SUPPLY] qualified=" q " total=" tot " supply_limited=" sl "  << OUTSIDE band " lo "-" hi
+    if (q < MIN_POOL) {
+      print "[SUPPLY] qualified=" q " < min_pool_size " MIN_POOL " — REDUNDANCY FLOOR BREACHED (total=" tot " supply_limited=" sl ")"
       fflush()
-      if (q > hi) hi = q
-      if (q < lo) lo = q
-    } else if (seen && q != lastq) {
-      flaps++
-      if (flaps % 12 == 0) {
-        print "[flap] " flaps " in-band swaps (band " lo "-" hi ", now qualified=" q " total=" tot ")"; fflush()
-      }
     }
     if (seen && tot != lasttot) {
       print "[SUPPLY] scorer-visible total " lasttot " -> " tot "  (qualified=" q ")"; fflush()
@@ -89,7 +98,7 @@ SSH="ssh -o ConnectTimeout=10 -o ServerAliveInterval=30 -o ServerAliveCountMax=3
 if [ -n "$SINCE" ]; then
   $SSH "dianwei@$HOST" \
     "sudo journalctl -u leap-gateway --since '$SINCE' --no-pager 2>/dev/null" \
-    | awk "$AWK_PROG"
+    | awk -v MIN_POOL="$MIN_POOL" "$AWK_PROG"
   exit 0
 fi
 
@@ -106,7 +115,7 @@ fi
 while :; do
   $SSH "dianwei@$HOST" \
     "sudo journalctl -u leap-gateway -f -n0 --no-pager 2>/dev/null" \
-    | awk "$AWK_PROG"
+    | awk -v MIN_POOL="$MIN_POOL" "$AWK_PROG"
   rc=$?
   echo "[RECONNECT] stream ended (rc=$rc) at $(date -u +%H:%M:%SZ) — re-dialing in 15s; events during the gap are NOT replayed"
   sleep 15
