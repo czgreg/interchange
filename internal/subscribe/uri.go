@@ -165,6 +165,19 @@ func parseGenericURI(raw, kind string) (Outbound, error) {
 		} else {
 			o["password"] = u.User.Username()
 		}
+		// hysteria2 URIs carry the salamander obfuscation layer as
+		// ?obfs=salamander&obfs-password=X. Same nested shape as the
+		// clash and sing-box paths so all three round-trip identically
+		// through internal/mihomo.applyObfsToClash.
+		if kind == "hysteria2" {
+			if ot := q.Get("obfs"); ot != "" {
+				obfs := map[string]any{"type": ot}
+				if pw := q.Get("obfs-password"); pw != "" {
+					obfs["password"] = pw
+				}
+				o["obfs"] = obfs
+			}
+		}
 	case "tuic":
 		o["uuid"] = u.User.Username()
 		if pwd, ok := u.User.Password(); ok {

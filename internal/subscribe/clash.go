@@ -72,6 +72,7 @@ func clashProxyToOutbound(p map[string]any) (Outbound, error) {
 	case "hysteria2":
 		o["type"] = "hysteria2"
 		o["password"], _ = p["password"].(string)
+		applyClashObfs(o, p)
 		applyClashTLS(o, p)
 	case "tuic":
 		o["type"] = "tuic"
@@ -89,6 +90,27 @@ func clashProxyToOutbound(p map[string]any) (Outbound, error) {
 		return nil, fmt.Errorf("unsupported clash type %q", typ)
 	}
 	return o, nil
+}
+
+// applyClashObfs is the inverse of internal/mihomo.applyObfsToClash: it
+// lifts mihomo's two flat hysteria2 obfs keys into the nested sing-box
+// block the internal Outbound shape uses.
+//
+//	mihomo:   obfs: salamander        sing-box: obfs: {type: salamander,
+//	          obfs-password: X                          password: X}
+//
+// obfs-password without obfs is meaningless (nothing selects the
+// obfuscator), so the type is the gate.
+func applyClashObfs(o Outbound, p map[string]any) {
+	typ, _ := p["obfs"].(string)
+	if typ == "" {
+		return
+	}
+	obfs := map[string]any{"type": typ}
+	if pw, ok := p["obfs-password"].(string); ok && pw != "" {
+		obfs["password"] = pw
+	}
+	o["obfs"] = obfs
 }
 
 func applyClashTLS(o Outbound, p map[string]any) {

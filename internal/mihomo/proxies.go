@@ -13,6 +13,7 @@ package mihomo
 
 import (
 	"fmt"
+	"log/slog"
 
 	"github.com/leap-gateway/leap-gateway/internal/subscribe"
 )
@@ -90,6 +91,7 @@ func outboundToProxy(o subscribe.Outbound) map[string]any {
 		if v, ok := o["password"].(string); ok && v != "" {
 			p["password"] = v
 		}
+		applyObfsToClash(p, o)
 		applyTLSToClash(p, o)
 	case "tuic":
 		p["type"] = "tuic"
@@ -112,6 +114,49 @@ func outboundToProxy(o subscribe.Outbound) map[string]any {
 	}
 
 	return p
+}
+
+// applyObfsToClash maps sing-box's nested hysteria2 obfs block to mihomo's
+// two flat sibling keys:
+//
+//	sing-box: obfs: {type: salamander, password: X}
+//	mihomo:   obfs: salamander
+//	          obfs-password: X
+//
+// Why this is load-bearing: salamander is an obfuscation layer wrapping the
+// QUIC initial packet. A server with obfs enabled cannot decrypt a client
+// packet that lacks it, so the handshake fails and mihomo reports "An error
+// occurred in the delay test" — NOT "Timeout", which is what a genuinely
+// dead node looks like. Dropping the field therefore makes a healthy node
+// indistinguishable from a dead one, and the scorer evicts it on schedule.
+//
+// Verified 2026-09-09 on 92: 4 沃迪加速 p20.wdiggera.xyz 专线 nodes went
+// from "An error" to 500-934ms in a same-binary A/B whose only variable
+// was the presence of these two keys.
+func applyObfsToClash(p map[string]any, o subscribe.Outbound) {
+	raw, present := o["obfs"]
+	if !present {
+		return
+	}
+	obfs, ok := raw.(map[string]any)
+	if !ok {
+		// Unknown shape: log rather than drop in silence. This function
+		// exists precisely because a silently-dropped obfs field cost 4
+		// nodes for an unknown number of weeks.
+		slog.Warn("mihomo: hysteria2 obfs has unexpected shape — not rendered",
+			"node", o.Tag(), "got", fmt.Sprintf("%T", raw))
+		return
+	}
+	typ, _ := obfs["type"].(string)
+	if typ == "" {
+		slog.Warn("mihomo: hysteria2 obfs block has no type — not rendered",
+			"node", o.Tag())
+		return
+	}
+	p["obfs"] = typ
+	if pw, ok := obfs["password"].(string); ok && pw != "" {
+		p["obfs-password"] = pw
+	}
 }
 
 // applyTLSToClash maps a sing-box tls block back to clash sibling keys.

@@ -299,7 +299,7 @@ func (s *Server) handleNodes(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (s *Server) handleRefresh(w http.ResponseWriter, r *http.Request) {
-	if err := RunRefresh(r.Context(), s.deps.Subscribe, s.deps.Renderer, s.deps.Controller); err != nil {
+	if err := RunRefresh(r.Context(), s.deps.Subscribe, s.deps.Renderer, s.deps.Controller, s.deps.Notifier); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 		return
 	}
@@ -325,11 +325,12 @@ func (s *Server) handleRefresh(w http.ResponseWriter, r *http.Request) {
 //
 // Hard errors (returned to caller) are reserved for problems caused by THIS
 // refresh that the caller can act on: render failure, mihomo reload failure.
-func RunRefresh(ctx context.Context, mgr *subscribe.Manager, r Renderer, c *dataplane.Controller) error {
+func RunRefresh(ctx context.Context, mgr *subscribe.Manager, r Renderer, c *dataplane.Controller, n *notify.Notifier) error {
 	results, err := mgr.Refresh(ctx)
 	if err != nil {
 		slog.Warn("subscribe refresh had errors", "err", err)
 	}
+	emitSubscriptionHealth(mgr.LastHealth(), n)
 	all := mgr.AllOutbounds()
 	if len(results) == 0 {
 		slog.Warn("subscribe: no subscription produced nodes — rendering DIRECT-only fallback",
@@ -343,6 +344,54 @@ func RunRefresh(ctx context.Context, mgr *subscribe.Manager, r Renderer, c *data
 		return fmt.Errorf("reload: %w", err)
 	}
 	return nil
+}
+
+// emitSubscriptionHealth turns per-subscription Refresh outcomes into one
+// operator event per unhealthy subscription, and a log line for every
+// subscription regardless of outcome.
+//
+// Why per-subscription rather than the pre-existing all-subs-zero check:
+// RunRefresh used to warn only when len(results)==0, i.e. when EVERY
+// subscription produced nothing. One subscription 403ing out of five was
+// invisible at the alerting layer — the entire signal was a single generic
+// "subscribe refresh had errors" line carrying only the first error. That is
+// how Hutao sat at 0 nodes for 17.5h on 2026-09-08.
+//
+// Severity is info, not urgent: a subscription failing does not by itself
+// break the data plane (the pool keeps serving whatever else qualified), and
+// urgent bypasses dedup + rate limiting, which would page on every round of
+// a multi-hour outage. The scorer's own supply-collapse events stay the
+// urgent channel.
+func emitSubscriptionHealth(health []subscribe.SubscriptionHealth, n *notify.Notifier) {
+	for _, h := range health {
+		if h.Outcome == "ok" {
+			slog.Info("subscribe: subscription ok", "name", h.Name, "nodes", h.NodeCount)
+			continue
+		}
+		slog.Warn("subscribe: subscription unhealthy",
+			"name", h.Name, "outcome", h.Outcome, "err", h.Err)
+		if n == nil {
+			continue
+		}
+		n.Emit(notify.Event{
+			Severity: notify.SeverityInfo,
+			Type:     "subscription_unhealthy",
+			Node:     h.Name,
+			Subject:  fmt.Sprintf("订阅 %s 异常：%s", h.Name, h.Outcome),
+			Body: fmt.Sprintf(
+				"订阅 %s 本轮刷新未产出节点。\noutcome: %s\nerr: %s\n\n"+
+					"该订阅的节点已从渲染出的 mihomo config 中消失（lastResults 为整体覆盖，"+
+					"失败的订阅不进结果集）。refresh_interval 为 0 时不会自动重试，"+
+					"需要 POST /api/subscribe/refresh 或修正 gateway.yaml。",
+				h.Name, h.Outcome, h.Err),
+			Metadata: map[string]any{
+				"subscription": h.Name,
+				"outcome":      h.Outcome,
+				"err":          h.Err,
+				"node_count":   h.NodeCount,
+			},
+		})
+	}
 }
 
 func writeJSON(w http.ResponseWriter, status int, body any) {

@@ -165,7 +165,7 @@ func (s *Server) handleSubscriptionsDelete(w http.ResponseWriter, r *http.Reques
 func (s *Server) refreshAfterEdit(r *http.Request) error {
 	s.deps.Subscribe.SetEntries(s.deps.Cfg.Subscriptions)
 	s.deps.Renderer.SetSubscriptions(s.deps.Cfg.Subscriptions)
-	return RunRefresh(r.Context(), s.deps.Subscribe, s.deps.Renderer, s.deps.Controller)
+	return RunRefresh(r.Context(), s.deps.Subscribe, s.deps.Renderer, s.deps.Controller, s.deps.Notifier)
 }
 
 func validateSubscriptionURL(s string) error {

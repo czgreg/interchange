@@ -26,6 +26,7 @@ type Manager struct {
 	mu            sync.RWMutex
 	lastResults   []SubscriptionResult
 	lastRefreshed time.Time
+	lastHealth    []SubscriptionHealth
 
 	// onUADiscovered is called (synchronously, off the refresh goroutine)
 	// when Refresh's auto-fallback discovered a per-subscription UA that
@@ -68,6 +69,37 @@ func (m *Manager) WithUADiscoveryCallback(cb func(name, ua string)) *Manager {
 	return m
 }
 
+// SubscriptionHealth is the per-subscription outcome of one Refresh round.
+// Recorded for EVERY enabled entry, including the ones that failed — unlike
+// lastResults, which only carries the successes.
+//
+// Why this exists: before it, a single subscription's transient fetch error
+// was observable only as one generic "subscribe refresh had errors" warn
+// line, and RunRefresh alerted only when EVERY subscription produced zero
+// nodes. A 403 on one of five subscriptions was therefore indistinguishable
+// from a clean round at the alerting layer. On 2026-09-08 that let Hutao sit
+// at 0 nodes for 17.5 hours: the 403 landed 11s after a process restart, the
+// operator had no signal, and refresh_interval: 0s meant nothing retried.
+type SubscriptionHealth struct {
+	Name string
+	// Outcome is one of: "ok", "fetch_error", "parse_error", "zero_nodes".
+	Outcome string
+	// NodeCount is the parsed node count (0 for every non-ok outcome).
+	NodeCount int
+	// Err is the failure detail, empty when Outcome == "ok".
+	Err string
+}
+
+// LastHealth returns the per-subscription outcome of the most recent Refresh.
+// Empty before the first Refresh completes.
+func (m *Manager) LastHealth() []SubscriptionHealth {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	out := make([]SubscriptionHealth, len(m.lastHealth))
+	copy(out, m.lastHealth)
+	return out
+}
+
 // Refresh fetches every enabled subscription and parses it. Errors per
 // subscription are logged but do not abort the whole refresh.
 //
@@ -77,12 +109,14 @@ func (m *Manager) WithUADiscoveryCallback(cb func(name, ua string)) *Manager {
 //     of a clean 4xx — ash class), or
 //   - succeeds with 0 parsed nodes (some airports return 200 + empty
 //     proxies list for the wrong UA — yuyun class),
+//
 // Refresh retries once with the alternate UA family (Clash↔sing-box). If
 // the retry yields nodes, the discovered UA is fired through the
 // onUADiscovered callback so the caller can persist it to yaml; the
 // happy-path fetch the next refresh round goes straight to the right UA.
 func (m *Manager) Refresh(ctx context.Context) ([]SubscriptionResult, error) {
 	results := make([]SubscriptionResult, 0, len(m.entries))
+	health := make([]SubscriptionHealth, 0, len(m.entries))
 	var firstErr error
 	for _, e := range m.entries {
 		if !e.Enabled {
@@ -131,19 +165,34 @@ func (m *Manager) Refresh(ctx context.Context) ([]SubscriptionResult, error) {
 			if firstErr == nil {
 				firstErr = fmt.Errorf("fetch %s: %w", e.Name, fetchErr)
 			}
+			health = append(health, SubscriptionHealth{
+				Name: e.Name, Outcome: "fetch_error", Err: fetchErr.Error()})
 			continue
 		}
 		if parseErr != nil {
 			if firstErr == nil {
 				firstErr = parseErr
 			}
+			health = append(health, SubscriptionHealth{
+				Name: e.Name, Outcome: "parse_error", Err: parseErr.Error()})
 			continue
 		}
+		outcome := "ok"
+		if len(parsed.Outbounds) == 0 {
+			// Fetched and parsed cleanly but yielded nothing. Distinct from
+			// fetch_error: the upstream answered, so this is UA gating, an
+			// emptied subscription, or a revoked token — all of which need
+			// an operator, none of which retry themselves.
+			outcome = "zero_nodes"
+		}
+		health = append(health, SubscriptionHealth{
+			Name: e.Name, Outcome: outcome, NodeCount: len(parsed.Outbounds)})
 		results = append(results, parsed)
 	}
 	m.mu.Lock()
 	m.lastResults = results
 	m.lastRefreshed = time.Now()
+	m.lastHealth = health
 	m.mu.Unlock()
 	return results, firstErr
 }

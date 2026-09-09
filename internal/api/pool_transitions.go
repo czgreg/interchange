@@ -72,7 +72,7 @@ func (s *Server) handlePoolRollback(w http.ResponseWriter, r *http.Request) {
 	// without waiting for next 5min scoring round. Background since we
 	// already have the response ready.
 	go func() {
-		_ = RunRefresh(r.Context(), s.deps.Subscribe, s.deps.Renderer, s.deps.Controller)
+		_ = RunRefresh(r.Context(), s.deps.Subscribe, s.deps.Renderer, s.deps.Controller, s.deps.Notifier)
 	}()
 	writeJSON(w, http.StatusOK, res)
 }

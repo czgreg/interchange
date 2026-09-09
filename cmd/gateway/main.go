@@ -178,7 +178,7 @@ func main() {
 	}
 
 	sched := subscribe.NewScheduler(cfg.Subscribe.RefreshInterval, func(ctx context.Context) error {
-		return api.RunRefresh(ctx, mgr, renderer, dpCtl)
+		return api.RunRefresh(ctx, mgr, renderer, dpCtl, notifier)
 	})
 
 	// --validate must run BEFORE any write to the production config so it
@@ -278,7 +278,7 @@ func main() {
 	if cfg.Subscribe.RefreshOnStartup {
 		go func() {
 			waitFor(ctx, 5*time.Second)
-			if err := api.RunRefresh(ctx, mgr, renderer, dpCtl); err != nil {
+			if err := api.RunRefresh(ctx, mgr, renderer, dpCtl, notifier); err != nil {
 				slog.Warn("initial refresh failed", "err", err)
 			}
 		}()
