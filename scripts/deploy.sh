@@ -127,10 +127,23 @@ for HOST in "${HOSTS[@]}"; do
   sleep 3
   # LEAP_TOKEN, when exported, authenticates against api.token. Unset →
   # no header, correct for nodes that leave api.token empty.
-  AUTH=()
-  [ -n "${LEAP_TOKEN:-}" ] && AUTH=(-H "Authorization: Bearer $LEAP_TOKEN")
-  DEPLOYED_VER=$(curl -s -m6 "${AUTH[@]}" "http://$HOST:18080/api/proxies/active" \
-    | python3 -c "import sys,json;print(json.load(sys.stdin)['leap']['gateway_version'])" 2>/dev/null || echo "API_UNREACHABLE")
+  #
+  # Auth header as a single optional arg rather than an array: under `set -u`,
+  # bash <4.4 (macOS's system /bin/bash is 3.2) treats "${AUTH[@]}" on an
+  # EMPTY array as an unbound-variable error, not "expands to nothing". That
+  # aborted verification after an install had already succeeded — the deploy
+  # looked failed while production was actually fine. Same bug and same fix
+  # as scripts/redeploy-full.sh:88-92; this copy was missed then, and bit on
+  # 2026-09-09 deploying 557ba03 to 92.
+  AUTHOPT=""
+  [ -n "${LEAP_TOKEN:-}" ] && AUTHOPT="Authorization: Bearer $LEAP_TOKEN"
+  if [ -n "$AUTHOPT" ]; then
+    DEPLOYED_VER=$(curl -s -m6 -H "$AUTHOPT" "http://$HOST:18080/api/proxies/active" \
+      | python3 -c "import sys,json;print(json.load(sys.stdin)['leap']['gateway_version'])" 2>/dev/null || echo "API_UNREACHABLE")
+  else
+    DEPLOYED_VER=$(curl -s -m6 "http://$HOST:18080/api/proxies/active" \
+      | python3 -c "import sys,json;print(json.load(sys.stdin)['leap']['gateway_version'])" 2>/dev/null || echo "API_UNREACHABLE")
+  fi
   if [ "$DEPLOYED_VER" = "API_UNREACHABLE" ]; then
     fail "$HOST: API unreachable after restart — check 'journalctl -u leap-gateway'"
   fi
