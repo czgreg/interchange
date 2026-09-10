@@ -13,8 +13,8 @@ cutover (2026-06-07) overwrote prod subscriptions with 89's set.
 
 If you migrate schema across nodes, splice the target node's
 `subscriptions:` block back in unchanged. The safe sync path is
-`make redeploy-89` / `make redeploy-92` — those pull the on-node
-yaml first and feed it back verbatim.
+`make redeploy-92` (or `make redeploy-full NODE=dianwei@<ip>` for any
+other host) — those pull the on-node yaml first and feed it back verbatim.
 
 This rule overrides any default "make configs consistent" instinct.
 

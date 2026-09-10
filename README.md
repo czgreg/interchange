@@ -190,8 +190,9 @@ make redeploy-full NODE=<user>@<node-ip>
 make deploy-fast NODE=<user>@<node-ip>
 ```
 
-`Makefile` 里的 `deploy-89` / `deploy-92` / `redeploy-89` / `redeploy-92`
-是作者环境的灰度/生产节点快捷方式，`NODE` 和 `REMOTE_USER` 都可以覆盖。
+`Makefile` 里的 `deploy-92` / `redeploy-92` 是作者生产节点的快捷方式，
+`NODE` 和 `REMOTE_USER` 都可以覆盖 —— 换成自己的节点用
+`make deploy-fast NODE=dianwei@<ip>` 或 `make redeploy-full NODE=dianwei@<ip>`。
 
 配置飞书告警（可选，secret 不落 yaml）：
 

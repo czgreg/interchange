@@ -5,11 +5,11 @@
 # never accidentally clobber the on-node config with a stale local one),
 # stages a fresh tarball, ships it, runs install.sh, verifies version +
 # services. Intended for full-stack reinstalls (new service files, new
-# install.sh, schema migration). For pure binary swaps use `make deploy-89`
+# install.sh, schema migration). For pure binary swaps use `make deploy-92`
 # / `scripts/deploy.sh` — they're faster and don't touch the unit files.
 #
 # Usage:
-#   scripts/redeploy-full.sh <host>            # e.g. 192.168.70.89
+#   scripts/redeploy-full.sh <host>            # e.g. 192.168.70.92
 #
 # Env:
 #   REMOTE_USER       SSH user (default dianwei)

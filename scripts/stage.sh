@@ -51,14 +51,14 @@ fail() { printf '[stage][FAIL] %s\n' "$*" >&2; exit 1; }
 
 # ---------------------------------------------------------------------------
 # Without an explicit yaml the staged tarball would be useless. The
-# preferred flow for an existing node is `make redeploy-89` /
-# `make redeploy-92` (or `scripts/redeploy-full.sh <host>`) — that pulls
+# preferred flow for an existing node is `make redeploy-92`
+# (or `scripts/redeploy-full.sh <host>`) — that pulls
 # /etc/leap/gateway.yaml from the node and feeds it to this script via
 # GATEWAY_YAML, so the staged tarball never lies about what the node will
 # end up running. Only fall back to ./gateway.yaml + plain `make stage`
 # when bootstrapping a fresh node that has no on-disk config yet.
 [ -f "$GATEWAY_YAML" ] || fail "gateway.yaml not found at $GATEWAY_YAML.
-       For an existing node, prefer:  make redeploy-89  /  make redeploy-92
+       For an existing node, prefer:  make redeploy-92  /  scripts/redeploy-full.sh <host>
        For a fresh node, copy:        configs/gateway.example.yaml → ./gateway.yaml
                                        and fill in subscription URL + node values."
 

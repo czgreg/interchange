@@ -4,11 +4,8 @@
 #   make help              # list targets
 #   make setup-ssh         # 一次性：推公钥 + NOPASSWD sudo（先跑这个！）
 #   make test              # go vet + go test
-#   make deploy-89         # binary-only deploy to 89 (~10s)
 #   make deploy-92         # binary-only deploy to 92 (~10s)
-#   make deploy-all        # 89 先，92 后
 #   make deploy-yaml       # 仅推 gateway.yaml（不换二进制）
-#   make redeploy-89       # ★ 全量重装到 89（先拉 89 的 yaml + stage + install）
 #   make redeploy-92       # ★ 全量重装到 92（先拉 92 的 yaml + stage + install）
 #   make redeploy-full NODE=dianwei@<ip>  # 同上，自定义节点
 #   make status            # /api/status
@@ -18,11 +15,12 @@
 #   make ssh               # ssh 进节点
 #
 # 首次使用：
-#   make setup-ssh NODE=dianwei@192.168.70.89
 #   make setup-ssh NODE=dianwei@192.168.70.92
 
-NODE        ?= dianwei@192.168.70.89
-NODE_89     := dianwei@192.168.70.89
+# 92 is the only live node — 89 was decommissioned 2026-08-31. A bare
+# `make deploy-fast` / `make status` therefore targets production; override
+# with NODE=dianwei@<ip> for any other host.
+NODE        ?= dianwei@192.168.70.92
 NODE_92     := dianwei@192.168.70.92
 NODE_HOST   := $(word 2,$(subst @, ,$(NODE)))
 LEAP_API    ?= http://$(NODE_HOST):18080
@@ -81,17 +79,8 @@ stage:  ## 打全量部署 tarball (build/leap-stage.tgz)
 deploy-fast: build-linux  ## ⚡ 热替换二进制 + 重启 (~10s)  NODE=dianwei@<ip>
 	scripts/deploy.sh --skip-build $(NODE_HOST)
 
-.PHONY: deploy-89
-deploy-89: build-linux  ## deploy to staging 89
-	scripts/deploy.sh --skip-build 192.168.70.89
-
 .PHONY: deploy-92
 deploy-92: build-linux  ## deploy to production 92
-	scripts/deploy.sh --skip-build 192.168.70.92
-
-.PHONY: deploy-all
-deploy-all: build-linux  ## deploy to 89 then 92 in sequence
-	scripts/deploy.sh --skip-build 192.168.70.89
 	scripts/deploy.sh --skip-build 192.168.70.92
 
 .PHONY: deploy-yaml
@@ -105,10 +94,6 @@ deploy-yaml:  ## 仅推 gateway.yaml + 重启  GATEWAY_YAML=./path/to/yaml
 .PHONY: redeploy-full
 redeploy-full:  ## ★ 安全全量重装：先拉节点 yaml，再 stage+install+verify  NODE=dianwei@<ip>
 	./scripts/redeploy-full.sh $(NODE_HOST)
-
-.PHONY: redeploy-89
-redeploy-89:  ## redeploy-full 到 89（pulls 89's yaml first）
-	./scripts/redeploy-full.sh 192.168.70.89
 
 .PHONY: redeploy-92
 redeploy-92:  ## redeploy-full 到 92（pulls 92's yaml first）

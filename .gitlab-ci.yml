@@ -7,7 +7,7 @@
 #
 #   2. Add a deploy SSH key:
 #      - ssh-keygen -t ed25519 -f deploy_key -N ""
-#      - Add deploy_key.pub to dianwei@89 and dianwei@92 authorized_keys
+#      - Add deploy_key.pub to dianwei@92 authorized_keys
 #      - GitLab → Settings → CI/CD → Variables → add DEPLOY_SSH_KEY (deploy_key content, masked)
 #
 #   3. Mirror this repo to GitLab (or use GitLab as primary remote):
@@ -23,7 +23,6 @@ variables:
   CGO_ENABLED: "0"
   GOOS: linux
   GOARCH: amd64
-  STAGING_HOST: "192.168.70.89"
   PROD_HOST:    "192.168.70.92"
   REMOTE_USER:  dianwei
 
@@ -66,27 +65,24 @@ build:
     when: on_success
 
 # ---------------------------------------------------------------------------
-# Stage: deploy — staging (auto on main) and production (manual)
+# Stage: deploy — production only, manual.
+#
+# There was a deploy-staging job here that auto-deployed every main commit
+# to 89. 89 was decommissioned 2026-08-31, so it could only ever fail — and
+# worse, it was the one non-manual deploy in the file. Removed rather than
+# repointed: repointing at 92 would silently turn every main commit into a
+# production deploy. If a staging node comes back, re-add the job with its
+# own host variable.
 # ---------------------------------------------------------------------------
 .deploy_base: &deploy_base
   stage: deploy
-  tags: [internal]    # runner is on the same subnet as 89/92 — direct SSH
+  tags: [internal]    # runner is on the same subnet as 92 — direct SSH
   needs: [build]
   before_script:
     - install -m 600 -D /dev/null ~/.ssh/id_deploy
     - echo "$DEPLOY_SSH_KEY" > ~/.ssh/id_deploy
     - echo -e "Host *\n  StrictHostKeyChecking no\n  IdentityFile ~/.ssh/id_deploy" > ~/.ssh/config
     - chmod +x scripts/deploy.sh
-
-deploy-staging:
-  <<: *deploy_base
-  environment:
-    name: staging
-    url: http://$STAGING_HOST:18080
-  rules:
-    - if: $CI_COMMIT_BRANCH == "main"
-  script:
-    - REMOTE_USER=$REMOTE_USER scripts/deploy.sh --skip-build "$STAGING_HOST"
 
 deploy-production:
   <<: *deploy_base

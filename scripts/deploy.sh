@@ -3,8 +3,7 @@
 #
 # Usage:
 #   scripts/deploy.sh <host> [<host> ...]          # deploy to given nodes
-#   scripts/deploy.sh 192.168.70.89                # deploy to 89
-#   scripts/deploy.sh 192.168.70.89 192.168.70.92  # deploy to both
+#   scripts/deploy.sh 192.168.70.92                # deploy to 92 (production)
 #
 # Prerequisites:
 #   - SSH key auth set up (ssh-copy-id dianwei@<host>) — no password prompts.

@@ -209,9 +209,10 @@ After that, binary-only swaps take about 10 seconds:
 make deploy-fast NODE=<user>@<node-ip>
 ```
 
-`deploy-89` / `deploy-92` / `redeploy-89` / `redeploy-92` in the `Makefile`
-are shortcuts for the author's staging and production nodes. Both `NODE`
-and `REMOTE_USER` can be overridden.
+`deploy-92` / `redeploy-92` in the `Makefile` are shortcuts for the author's
+production node. For any other host use `make deploy-fast NODE=dianwei@<ip>`
+or `make redeploy-full NODE=dianwei@<ip>`. Both `NODE` and `REMOTE_USER` can
+be overridden.
 
 Configure Lark alerts (optional; the secret never lands in yaml):
 
