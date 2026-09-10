@@ -5,26 +5,23 @@
 #      The runner needs: Go, ssh-client. Tag it `internal`.
 #      See: docs/ops.md — "Register CI Runner"
 #
-#   2. Add a deploy SSH key:
-#      - ssh-keygen -t ed25519 -f deploy_key -N ""
-#      - Add deploy_key.pub to dianwei@92 authorized_keys
-#      - GitLab → Settings → CI/CD → Variables → add DEPLOY_SSH_KEY (deploy_key content, masked)
-#
-#   3. Mirror this repo to GitLab (or use GitLab as primary remote):
+#   2. Mirror this repo to GitLab (or use GitLab as primary remote):
 #      git remote add gitlab http://<gitlab>/czgreg/leap-gateway.git
+#
+# This pipeline tests and builds only — it does NOT deploy. Deployment is
+# operator-driven from a workstation: `make deploy-92` (binary swap) or
+# `make redeploy-92` (full reinstall, pulls the node's yaml first). No
+# DEPLOY_SSH_KEY variable is needed; the runner never touches a node.
 
 stages:
   - test
   - build
-  - deploy
 
 variables:
   GOPATH: $CI_PROJECT_DIR/.go-cache
   CGO_ENABLED: "0"
   GOOS: linux
   GOARCH: amd64
-  PROD_HOST:    "192.168.70.92"
-  REMOTE_USER:  dianwei
 
 # ---------------------------------------------------------------------------
 # Stage: test
@@ -65,32 +62,18 @@ build:
     when: on_success
 
 # ---------------------------------------------------------------------------
-# Stage: deploy — production only, manual.
+# No deploy stage — deliberately.
 #
-# There was a deploy-staging job here that auto-deployed every main commit
-# to 89. 89 was decommissioned 2026-08-31, so it could only ever fail — and
-# worse, it was the one non-manual deploy in the file. Removed rather than
-# repointed: repointing at 92 would silently turn every main commit into a
-# production deploy. If a staging node comes back, re-add the job with its
-# own host variable.
+# This file used to end with two deploy jobs. deploy-staging auto-deployed
+# every main commit to node 89, which was decommissioned 2026-08-31.
+# deploy-production was manual-only against 92. Both were removed once 89
+# went away and the operator confirmed CI deploys are no longer wanted:
+# shipping to production stays a local, deliberate `make deploy-92` /
+# `make redeploy-92`, not a button in a web UI. redeploy-92 in particular
+# pulls the node's own gateway.yaml before staging, which is what keeps a
+# deploy from overwriting per-node `subscriptions:` (see CLAUDE.md) — a CI
+# job building from repo state has no equivalent safeguard.
+#
+# To restore CI deploys, re-add a `deploy` stage plus a job with its own
+# host variable and a DEPLOY_SSH_KEY masked variable.
 # ---------------------------------------------------------------------------
-.deploy_base: &deploy_base
-  stage: deploy
-  tags: [internal]    # runner is on the same subnet as 92 — direct SSH
-  needs: [build]
-  before_script:
-    - install -m 600 -D /dev/null ~/.ssh/id_deploy
-    - echo "$DEPLOY_SSH_KEY" > ~/.ssh/id_deploy
-    - echo -e "Host *\n  StrictHostKeyChecking no\n  IdentityFile ~/.ssh/id_deploy" > ~/.ssh/config
-    - chmod +x scripts/deploy.sh
-
-deploy-production:
-  <<: *deploy_base
-  environment:
-    name: production
-    url: http://$PROD_HOST:18080
-  rules:
-    - if: $CI_COMMIT_BRANCH == "main"
-      when: manual      # requires explicit click in GitLab UI
-  script:
-    - REMOTE_USER=$REMOTE_USER scripts/deploy.sh --skip-build "$PROD_HOST"
