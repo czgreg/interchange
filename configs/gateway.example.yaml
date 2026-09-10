@@ -213,6 +213,10 @@ node_qualify:
   max_jitter_ms:     300
   max_fail_rate:     0.25
   min_probes:        2
+  # evict_strikes: 不生效 —— 没有任何代码路径用它决定出池，唯一的读取处是启动
+  # 日志。原意是"连续 N 轮失败才剔除"，但 eligibility 模式下 strikes 只累加不比较，
+  # legacy 模式下按排名即时剔除。实际出池 = 1 轮 Qualified=false。保留仅为兼容旧
+  # 配置能解析，不要依赖它做容量规划。
   evict_strikes:     2
   readmit_strikes:   1
   # hot_reload_min_interval: 节流多久内不允许再触发 mihomo PUT /configs。

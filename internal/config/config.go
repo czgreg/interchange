@@ -496,13 +496,32 @@ type NodeQualifyConfig struct {
 	// MinProbes: minimum history entries before a node is eligible.
 	// Default 2.
 	MinProbes int `yaml:"min_probes"`
-	// EvictStrikes: consecutive scoring rounds a node must fail before
-	// being removed from the pool. Default 2. With ScoringInterval=5m
-	// this means a node has to fail two consecutive 5-minute reviews
-	// (10 minutes of consistent degradation) to be evicted —
-	// appropriate for "real degradation" vs transient noise (which
-	// mihomo's 30s health-check is already filtering at the routing
-	// layer).
+	// EvictStrikes: NOT HONOURED — no code path gates eviction on it.
+	//
+	// It was meant to be "consecutive failing rounds before a node leaves
+	// the pool", i.e. a 2-round (10min at ScoringInterval=5m) grace period
+	// against transient noise. Neither path implements that:
+	//
+	//   - sizing_mode=eligibility (what 92 runs): nodeState.strikes is
+	//     incremented and reset but never compared — see scorer.go's
+	//     eligibilityPoolLocked, "Diagnostic counters only; eligibility
+	//     does not gate on them". A member leaves after ONE round with
+	//     Qualified=false.
+	//   - sizing_mode=legacy: scorer.go's ranking pass says it outright —
+	//     "Not in top-K (or not qualified): exit immediately. No
+	//     EvictStrikes hysteresis — ranking is the sole criterion."
+	//
+	// Verified 2026-09-10 by experiment, not by reading: setting this to 1
+	// leaves TestDecision_CatastrophicMemberEvictedWhenSpareReady and
+	// TestDecision_HysteresisHoldsWithoutSpare both passing. The grace
+	// period the latter observes comes from the MinPoolSize/kTarget
+	// under-capacity refill, not from strikes.
+	//
+	// The only live read is the startup log line in scorer.go's Start.
+	// Kept (with its default) so existing gateway.yaml files do not fail
+	// to parse; do not rely on it. Giving eligibility a real exit-side
+	// hysteresis would mean adding the missing comparison here, which is
+	// a behaviour change and needs its own review.
 	EvictStrikes int `yaml:"evict_strikes"`
 	// ReadmitStrikes: consecutive passing rounds before a non-member node
 	// is added back. Default 1 (no hysteresis). Read by BOTH the legacy
@@ -566,7 +585,8 @@ type NodeQualifyConfig struct {
 	//   )
 	//   where K_min(T) = max(2, ⌈T / (cap × 1.5)⌉ + 1)  // failure resilience
 	//
-	// Hysteresis (EvictStrikes / ReadmitStrikes) governs membership moves;
+	// ReadmitStrikes gates membership entry (EvictStrikes does not gate
+	// exit — see its field doc);
 	// HotReloadMinInterval throttles reload frequency. The result: a small
 	// stable set of best-quality egresses for a given terminal load,
 	// preserving per-terminal HRW identity (perterminal.go).
@@ -962,6 +982,8 @@ func (c *NodeQualifyConfig) applyDefaults() {
 	if c.MinProbes == 0 {
 		c.MinProbes = 2
 	}
+	// Defaulted only so old configs parse; nothing reads the value to make
+	// a decision. See the field doc.
 	if c.EvictStrikes == 0 {
 		c.EvictStrikes = 2
 	}

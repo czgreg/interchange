@@ -305,10 +305,10 @@ func TestDecision_CatastrophicFailExcludedFromPool(t *testing.T) {
 
 // --- Eviction of a catastrophic-fail member when a healthy spare exists.
 //
-// CHARACTERIZATION FINDING: the EvictStrikes hysteresis (scorer.go:703,
-// "stay in pool until strikes reach evict bar") is OVERRIDDEN by the
-// exact-K post-pass (scorer.go:743-776) whenever a healthy spare is ready
-// to backfill. When n4 goes catastrophic it drops from preferredSet; the
+// CHARACTERIZATION FINDING: a catastrophic member is evicted on the NEXT
+// round whenever a healthy spare can backfill, via the exact-K post-pass
+// ("Post-pass — enforce |pool| == kTarget"). When n4 goes catastrophic it
+// drops from preferredSet; the
 // top-K qualified set then promotes the spare, pushing |newPoolSet| over
 // K; the over-capacity pass drops non-preferred members worst-first — and
 // n4, being unqualified, is exactly such a member. Net effect: a
@@ -316,10 +316,11 @@ func TestDecision_CatastrophicFailExcludedFromPool(t *testing.T) {
 // round (strikes=1), not after EvictStrikes rounds.
 //
 // This is arguably the right behavior (don't keep a dead node when a good
-// one is ready), but it means EvictStrikes only actually delays eviction
-// in the narrow case where evicting would drop the pool below K (no spare
-// available). If someone later relies on EvictStrikes giving a uniform
-// 2-round grace period, this test flips and points them here.
+// one is ready). Note what is NOT doing the work here: cfg.EvictStrikes is
+// set below but no path reads it — flipping it to 1 leaves this test and
+// TestDecision_HysteresisHoldsWithoutSpare both green (checked
+// 2026-09-10). The delay in that other test comes from the K-floor refill,
+// not from strikes. See config.EvictStrikes' field doc.
 func TestDecision_CatastrophicMemberEvictedWhenSpareReady(t *testing.T) {
 	cfg := kGatingCfg(4)
 	cfg.EvictStrikes = 2
@@ -354,11 +355,13 @@ func TestDecision_CatastrophicMemberEvictedWhenSpareReady(t *testing.T) {
 	}
 }
 
-// --- Eviction hysteresis genuinely holds when there is NO spare: a pool
-// member that drops out of the preferred top-K stays in the pool until
-// EvictStrikes consecutive rounds, because evicting it early would drop
-// the pool below K and the under-capacity pass would just re-add it. This
-// is the case where EvictStrikes actually does something.
+// --- A pool member that drops out of the preferred top-K stays in the
+// pool when there is NO spare, because evicting it would drop the pool
+// below K and the under-capacity pass would just re-add it.
+//
+// The K-floor refill is the whole mechanism; EvictStrikes is set below but
+// is not read by any path (flipping it to 1 keeps this test green), so
+// read this as "the floor holds the member", not as eviction hysteresis.
 //
 // We construct it with exactly K qualified nodes: when one ranks worst,
 // there's no qualified replacement, so the pool can't shrink and the
