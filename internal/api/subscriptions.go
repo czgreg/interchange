@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -162,10 +163,18 @@ func (s *Server) handleSubscriptionsDelete(w http.ResponseWriter, r *http.Reques
 // We have to call SetEntries first because Manager.entries is a defensive
 // copy made at construction; without re-seeding, Refresh would iterate the
 // stale set. Same reason for Renderer.SetSubscriptions.
+//
+// CONTEXT: WithoutCancel for the same reason as handleRefresh, and with a
+// sharper edge here — every caller has ALREADY persisted the new yaml via
+// Store.Mutate before reaching this point. A client disconnect mid-refresh
+// therefore strands the node with the edit committed to disk but the data
+// plane still running the pre-edit config, and the systemctl fallback dies
+// on the same cancelled context. The operator sees a successful write and a
+// data plane that ignores it.
 func (s *Server) refreshAfterEdit(r *http.Request) error {
 	s.deps.Subscribe.SetEntries(s.deps.Cfg.Subscriptions)
 	s.deps.Renderer.SetSubscriptions(s.deps.Cfg.Subscriptions)
-	return RunRefresh(r.Context(), s.deps.Subscribe, s.deps.Renderer, s.deps.Controller, s.deps.Notifier)
+	return RunRefresh(context.WithoutCancel(r.Context()), s.deps.Subscribe, s.deps.Renderer, s.deps.Controller, s.deps.Notifier)
 }
 
 func validateSubscriptionURL(s string) error {

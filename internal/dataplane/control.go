@@ -93,11 +93,25 @@ func (c *Controller) Reload(ctx context.Context, configPath string) error {
 				"err", err, "path", configPath)
 		}
 	}
-	cmd := exec.CommandContext(ctx, "systemctl", "restart", c.SystemdUnit)
+	// The fallback deliberately does NOT inherit ctx. A cancelled context
+	// disables hot-reload and its own fallback simultaneously, so the single
+	// recovery path is dead precisely when it is needed — exec.CommandContext
+	// on an already-cancelled ctx fails before systemctl is even spawned, and
+	// the engine silently stays on its previous config while the new one sits
+	// on disk. Verified 2026-09-24: two "falling back to systemctl restart"
+	// warnings, leap-mihomo NRestarts=0 and 23 days of uptime.
+	//
+	// No timeout wrapper either: systemd self-bounds this. leap-mihomo has
+	// TimeoutStartUSec=1min30s plus an ExecStartPre config check, so a
+	// legitimate restart can exceed any short cap we would pick here.
+	cmd := exec.Command("systemctl", "restart", c.SystemdUnit)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("systemctl restart %s: %w: %s", c.SystemdUnit, err, string(out))
 	}
+	// Logged because the warning above plus silence is indistinguishable in
+	// the journal from the warning above plus a fallback that never ran.
+	slog.Info("dataplane: restarted via systemctl fallback", "unit", c.SystemdUnit)
 	return nil
 }
 

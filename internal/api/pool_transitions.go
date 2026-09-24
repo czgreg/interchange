@@ -1,7 +1,9 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"time"
@@ -32,8 +34,8 @@ func (s *Server) handlePoolTransitions(w http.ResponseWriter, r *http.Request) {
 
 // rollbackDTO is POST /api/pool/rollback's request body.
 type rollbackDTO struct {
-	Steps              int `json:"steps"`               // default 1, max = audit log length
-	QuarantineSeconds  int `json:"quarantine_seconds"`  // default 3600 (1h), max 7d
+	Steps             int `json:"steps"`              // default 1, max = audit log length
+	QuarantineSeconds int `json:"quarantine_seconds"` // default 3600 (1h), max 7d
 }
 
 // handlePoolRollback un-does the last N transitions and quarantines the
@@ -71,8 +73,21 @@ func (s *Server) handlePoolRollback(w http.ResponseWriter, r *http.Request) {
 	// Trigger re-render + hot-reload so ops sees the rollback in mihomo
 	// without waiting for next 5min scoring round. Background since we
 	// already have the response ready.
+	//
+	// CONTEXT: WithoutCancel is not a precaution here, it is the difference
+	// between this working and never working. net/http cancels r.Context()
+	// as soon as the handler returns, and the handler returns immediately
+	// after the writeJSON below — so the goroutine's ctx was ALWAYS already
+	// cancelled by the time it did anything. Every rollback re-render since
+	// this endpoint was written has been a no-op; ops only ever saw the
+	// rollback in mihomo after the next 5min scoring round, which is exactly
+	// what the goroutine was added to avoid.
+	refreshCtx := context.WithoutCancel(r.Context())
 	go func() {
-		_ = RunRefresh(r.Context(), s.deps.Subscribe, s.deps.Renderer, s.deps.Controller, s.deps.Notifier)
+		if err := RunRefresh(refreshCtx, s.deps.Subscribe, s.deps.Renderer, s.deps.Controller, s.deps.Notifier); err != nil {
+			// Nothing to return an error to — the response is already sent.
+			slog.Error("pool rollback: re-render failed", "err", err)
+		}
 	}()
 	writeJSON(w, http.StatusOK, res)
 }

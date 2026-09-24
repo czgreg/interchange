@@ -183,7 +183,11 @@ func (s *Server) handleWhitelistPut(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := s.rerenderAndReload(r.Context()); err != nil {
+	// WithoutCancel: the whitelist is already persisted by the Mutate above,
+	// so a disconnect here leaves the new WL on disk with the data plane
+	// still routing by the old one — and takes the systemctl fallback down
+	// with it. Same defect as handleRefresh.
+	if err := s.rerenderAndReload(context.WithoutCancel(r.Context())); err != nil {
 		http.Error(w, "reload: "+err.Error(), http.StatusInternalServerError)
 		return
 	}

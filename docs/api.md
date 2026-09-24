@@ -296,6 +296,16 @@ override 不 sticky：NodeScorer 只管 us-pool 成员，不回写 selector 指�
 {"ok": true}
 ```
 
+一次刷新在开始后**不再受调用方连接控制**：断开连接不会取消渲染和 reload。
+耗时上界是 `订阅数 × 2 次 fetch × subscribe.http_timeout`（每个订阅最多
+探测两个 UA），实测冷刷新 17–30s，热刷新约 7s。
+
+同一时刻只允许一次刷新，重入返回 `409`：
+
+```json
+{"error": "refresh already in progress"}
+```
+
 ## GET /api/subscribe/refresh-interval
 
 ```json

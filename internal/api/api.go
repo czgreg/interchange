@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/leap-gateway/leap-gateway/internal/config"
@@ -79,9 +80,15 @@ type Renderer interface {
 }
 
 type Server struct {
-	deps    Deps
-	srv     *http.Server
-	egress  *egressCache
+	deps   Deps
+	srv    *http.Server
+	egress *egressCache
+
+	// refreshMu guards refreshing, the single-flight flag for
+	// POST /api/subscribe/refresh. See handleRefresh for why a second
+	// concurrent refresh became reachable at all.
+	refreshMu  sync.Mutex
+	refreshing bool
 }
 
 func NewServer(deps Deps) *Server {
@@ -307,8 +314,59 @@ func (s *Server) handleNodes(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, view)
 }
 
+// handleRefresh triggers the full subscribe -> render -> reload flow.
+//
+// CONTEXT: deliberately NOT r.Context(). A refresh has side effects that
+// must complete once started — it writes config.yaml and reloads the data
+// plane. Binding it to the request means a client disconnect leaves the
+// new config on disk while the reload is cancelled, and the systemctl
+// fallback inside Controller.Reload is handed the same dead context, so it
+// fails instantly too. The engine then keeps serving the OLD config with
+// no operator-visible signal. That is exactly what happened on 2026-09-24:
+// two refresh rounds died mid-flight, 3 of 6 subscriptions came back
+// "context canceled" (213 nodes -> 106), and leap-mihomo showed
+// NRestarts=0 / 23 days uptime — the advertised fallback had never once
+// run.
+//
+// No extra timeout is layered on: the flow is already bounded by
+// len(subscriptions) x 2 fetches x subscribe.http_timeout, each fetch
+// carrying its own deadline. A fixed cap here would be dead code today
+// (~6min natural bound vs any round number above it) and would start
+// truncating legitimate refreshes as soon as the subscription list grew
+// past it — reintroducing the very bug this fixes.
+//
+// SINGLE-FLIGHT: a consequence of the fix above, not a pre-existing need.
+// Before it, a second refresh could not overlap the first — round one
+// always died with the disconnect that prompted the retry, and the UI
+// button disables itself on click. Now round one survives a disconnect,
+// so "reload the page, click again" genuinely runs two refreshes at once,
+// and Renderer.Write stages every render through the same fixed `.tmp`
+// sibling with no lock. Concurrent writers would corrupt each other's
+// config. 409 rather than queueing: a duplicate refresh buys nothing and
+// costs another data-plane reload.
 func (s *Server) handleRefresh(w http.ResponseWriter, r *http.Request) {
-	if err := RunRefresh(r.Context(), s.deps.Subscribe, s.deps.Renderer, s.deps.Controller, s.deps.Notifier); err != nil {
+	s.refreshMu.Lock()
+	if s.refreshing {
+		s.refreshMu.Unlock()
+		writeJSON(w, http.StatusConflict, map[string]any{
+			"error": "refresh already in progress",
+		})
+		return
+	}
+	s.refreshing = true
+	s.refreshMu.Unlock()
+	defer func() {
+		s.refreshMu.Lock()
+		s.refreshing = false
+		s.refreshMu.Unlock()
+	}()
+
+	if err := RunRefresh(context.WithoutCancel(r.Context()), s.deps.Subscribe, s.deps.Renderer, s.deps.Controller, s.deps.Notifier); err != nil {
+		// Log before responding: the client that triggered this may well be
+		// gone (that is the failure mode this handler was fixed for), and
+		// writeJSON to a dead connection is the only place this error used
+		// to go. grep slog.Error internal/api/ was empty before this line.
+		slog.Error("refresh failed", "err", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 		return
 	}

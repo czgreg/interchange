@@ -5,7 +5,10 @@
  *     PUT 又要求 url 非空。所以编辑表单绝不回填脱敏 URL —— 那会把
  *     星号写进生产配置。要改 URL 必须粘贴完整新 URL。
  *  2. 订阅的增删改、以及 POST /api/subscribe/refresh 都会重载 mihomo
- *     （约 3–5 秒中断），所以这些操作一律先确认。
+ *     （约 3–5 秒中断），所以这些操作一律先确认。请求本身要慢得多：
+ *     每个订阅最多两次 fetch（UA 回退探测），实测冷刷新 17–30s。确认
+ *     文案必须说出这个时长 —— 操作者以为卡死而掐断连接，正是
+ *     2026-09-24 那次配置落盘但 reload 没跑的起因。
  *  3. token 只放在内存。不进 localStorage —— 这个页面可能开在共享的
  *     运维机上，而 token 能读到带凭据的订阅 URL。
  */
@@ -475,7 +478,8 @@ $('#subsTable').addEventListener('click', async (e) => {
 
   if (delName) {
     if (!confirm(`删除订阅「${delName}」？\n\n` +
-                 '这会立即重新拉取剩余订阅并重载 mihomo，约 3–5 秒中断。')) return;
+                 '这会立即重新拉取剩余订阅并重载 mihomo（约 3–5 秒中断）。\n' +
+                 '拉取可能需要 30 秒以上，期间请勿关闭或刷新页面。')) return;
     e.target.disabled = true;
     try {
       await api('/api/subscriptions/' + encodeURIComponent(delName), { method: 'DELETE' });
@@ -531,7 +535,9 @@ $('#subForm').addEventListener('submit', async (e) => {
 
 // 立即拉取全部
 $('#refreshSubsBtn').addEventListener('click', async (e) => {
-  if (!confirm('立即拉取所有订阅并重载 mihomo？\n\n约 3–5 秒连接中断。')) return;
+  if (!confirm('立即拉取所有订阅并重载 mihomo？\n\n' +
+              '重载时约 3–5 秒连接中断。拉取本身可能需要 30 秒以上\n' +
+              '（每个订阅最多两次 fetch），期间请勿关闭或刷新页面。')) return;
   e.target.disabled = true;
   e.target.textContent = '拉取中…';
   try {
