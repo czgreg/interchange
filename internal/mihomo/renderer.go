@@ -242,21 +242,48 @@ func (r *Renderer) RenderOnly(outbounds []subscribe.Outbound) ([]byte, error) {
 // Write renders a complete mihomo Clash YAML config and writes it atomically
 // to r.cfg.ConfigPath. Returns the rendered bytes for inspection.
 //
-// Atomic rename through a .tmp sibling so a render mid-flight never leaves
+// Atomic rename through a temp sibling so a render mid-flight never leaves
 // mihomo with a half-written config.
+//
+// The temp name is unique per call, not a fixed "<path>.tmp". Write runs
+// concurrently: the nodescorer hot-reload goroutine (RenderWithPools) plus
+// every API handler that re-renders. With one shared staging file, writer A
+// could rename B's truncated-and-still-being-written bytes into place.
+// Measured with 50 concurrent writers x 20 runs: most writers failed with
+// rename ENOENT (another writer had already moved the shared file away), the
+// published config was a failed writer's render in 16/20 runs, and TORN — no
+// complete render at all — in 3/20. A torn config.yaml fails mihomo's reload
+// and its ExecStartPre `-t` check. A private temp file per call means every
+// rename publishes a complete render. It does not order writers — the last
+// rename still wins.
 func (r *Renderer) Write(outbounds []subscribe.Outbound) ([]byte, error) {
 	out, err := r.RenderOnly(outbounds)
 	if err != nil {
 		return nil, fmt.Errorf("mihomo render: %w", err)
 	}
-	if err := os.MkdirAll(filepath.Dir(r.cfg.ConfigPath), 0o755); err != nil {
+	dir := filepath.Dir(r.cfg.ConfigPath)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, fmt.Errorf("mihomo render: mkdir: %w", err)
 	}
-	tmp := r.cfg.ConfigPath + ".tmp"
-	if err := os.WriteFile(tmp, out, 0o644); err != nil {
-		return nil, fmt.Errorf("mihomo render: write tmp: %w", err)
+	f, err := os.CreateTemp(dir, filepath.Base(r.cfg.ConfigPath)+".*.tmp")
+	if err != nil {
+		return nil, fmt.Errorf("mihomo render: create tmp: %w", err)
+	}
+	tmp := f.Name()
+	_, werr := f.Write(out)
+	if cerr := f.Close(); werr == nil {
+		werr = cerr
+	}
+	// CreateTemp opens 0600; keep the 0644 the fixed-name path produced.
+	if werr == nil {
+		werr = os.Chmod(tmp, 0o644)
+	}
+	if werr != nil {
+		os.Remove(tmp)
+		return nil, fmt.Errorf("mihomo render: write tmp: %w", werr)
 	}
 	if err := os.Rename(tmp, r.cfg.ConfigPath); err != nil {
+		os.Remove(tmp)
 		return nil, fmt.Errorf("mihomo render: rename: %w", err)
 	}
 	return out, nil
