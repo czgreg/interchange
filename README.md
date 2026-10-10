@@ -52,7 +52,8 @@ CorpLink）的转发节点。** 员工照常连飞连，什么都不用装、不
 - **节点自己会挑路** —— 每 5 分钟给所有候选节点打分，慢的、失败的自动
   剔出；节点挂了 30 秒内自动切备用；池组成变化推送飞书。
 - **可编排** —— 25 个 REST 端点，订阅、白名单、池成员、告警都能程序化操作；
-  自带一个免构建的 Web 控制台，订阅管理与节点状态直接在浏览器里看。
+  自带一个基于 [Arco Design](https://arco.design/) 的 Web 控制台，编进二进制，
+  订阅管理、节点打分、终端出口查询直接在浏览器里完成。
 
 ## 和其他方案的取舍
 
@@ -141,6 +142,8 @@ flowchart TB
 开发侧：
 
 - Go 1.22+、`make`
+- Node.js 20.19+ —— **仅在修改 Web 控制台时需要**；控制台的构建产物已提交在
+  仓库里，`go build` / 部署都不依赖 Node
 - 至少一个机场订阅（支持 clash YAML / sing-box JSON / URI 列表 / SIP008）
 
 节点上会装 mihomo 1.19.26 作为数据面；另外还会装一个 sing-box 1.10.7
@@ -205,36 +208,64 @@ curl -X POST -H "Content-Type: application/json" \
 
 ## Web 控制台
 
-控制面自带一个网页 UI，部署后直接访问：
+控制面自带一个网页控制台，部署后直接访问：
 
 ```
 http://<node-ip>:18080/ui/
 ```
 
-五个面板：
+<img src="assets/screenshots/overview.png" alt="控制台总览" width="100%">
 
-| 面板 | 用途 |
+> 本节截图来自 `web/` 自带的 mock 数据（虚构的机场、节点与出口 IP），不是生产节点。
+
+五个页面，覆盖日常运维的全部入口：
+
+| 页面 | 用途 |
 |---|---|
-| **总览** | 数据面是否正常、在池节点数、三个 systemd 单元状态、出口 IP、容量基准 |
-| **节点状态** | 每个候选节点的 p50/p95/抖动/失败率、是否在池、各站点探针结果（可按名筛选、只看在池） |
-| **订阅管理** | 新增 / 修改 / 删除订阅、手动拉取、调周期刷新间隔 |
-| **终端查询** | 输入员工的 10.8.x.x，直接看到他的 primary / secondary 出口及其健康数据 |
-| **池变更审计** | 池成员变更历史与当前隔离名单 |
+| **总览** | 6 个关键指标卡（数据面、在池节点、解析节点、24h 池变更、探针不通、数据通路断言）；`/healthz` 四项 TPROXY 断言明细；当前出口 IP 与归属；在池节点的 url-test 延迟；池规模与 24h 稳定度；三个 systemd 单元状态；容量基准 |
+| **节点状态** | 每个候选节点的 p50 / p95 / 抖动 / 失败率 / 活跃连接（可排序），在池与合格状态，各站点探针结果；顶部汇总观察阈值和每个探针的全局通过率；展开行看评分细节、被动连接统计、每个探针的 HTTP 状态码 / 耗时 / CF 挑战 / 错误 |
+| **订阅管理** | 新增 / 修改 / 删除订阅、立即拉取全部、调周期刷新间隔；所有会重载 mihomo 的操作都先弹确认，并写明耗时 |
+| **终端查询** | 输入员工的飞连地址，直接看到它的 `fb-<ip>` 组、primary / secondary 出口、哪个当前生效，以及两者的延迟、失败率、被动连接与站点探针 |
+| **池变更审计** | 24h 变更 / 回滚 / 移入 / 移出统计，当前隔离名单，按类型筛选的变更历史，展开看变更后的完整池 |
 
-它是一个无构建步骤、无依赖的页面，用 `go:embed` 编进二进制，所以部署仍然
-是“推一个文件”，不需要 Node、不需要额外的静态目录。
+<table>
+  <tr>
+    <td width="50%"><img src="assets/screenshots/nodes.png" alt="节点状态"><br><sub><b>节点状态</b> —— 打分、站点探针、按订阅 / 在池筛选</sub></td>
+    <td width="50%"><img src="assets/screenshots/terminal.png" alt="终端查询"><br><sub><b>终端查询</b> —— 员工报「慢 / 打不开」时的第一入口</sub></td>
+  </tr>
+  <tr>
+    <td width="50%"><img src="assets/screenshots/subscriptions.png" alt="订阅管理"><br><sub><b>订阅管理</b> —— URL 中的 token 由接口脱敏</sub></td>
+    <td width="50%"><img src="assets/screenshots/transitions.png" alt="池变更审计"><br><sub><b>池变更审计</b> —— 频繁变更说明打分在抖动</sub></td>
+  </tr>
+  <tr>
+    <td width="50%"><img src="assets/screenshots/subscription-masked-guard.png" alt="脱敏 URL 拦截"><br><sub><b>编辑订阅</b> —— 粘贴回脱敏 URL 会被前端拦下</sub></td>
+    <td width="50%"><img src="assets/screenshots/overview-dark.png" alt="深色模式"><br><sub><b>深色模式</b> —— 默认跟随系统，右上角一键切换</sub></td>
+  </tr>
+</table>
 
-关于安全，几个刻意的选择：
+其余细节：
+
+- **10 秒自动刷新**，可随时关闭；各接口独立失败 —— 比如 scorer 未启用时
+  `/api/nodes/health` 返回 503，只影响节点页，其余页面照常显示。
+- 顶栏的 `healthz` 标签悬停即可看到每一项数据通路断言；侧栏「节点状态」上的
+  红色角标是当前探针不通的节点数。
+- 每个页面都有独立地址（`/ui/#/nodes`、`/ui/#/terminal` …），可以收藏或发给同事。
+
+### 安全上的几个刻意选择
 
 - **`/ui/` 不鉴权，但它只是静态文件** —— 页面本身不含任何节点数据或凭据，
   所有真实数据都走 `/api/*`，那些端点仍在 `api.token` 后面。浏览器导航
   无法带 Bearer 头，硬要给 HTML 鉴权只会把 token 逃到 URL 或 Cookie 里，
   反而更差。
-- **token 只存在当前标签页内存**，不写 localStorage。刷新页面需要重新输入——
-  这是有意的：token 能读到带凭据的订阅 URL。
+- **token 只存在当前标签页内存**，不写入任何浏览器存储。刷新页面需要重新
+  输入 —— 这是有意的：token 能读到带凭据的订阅 URL。`go test` 会检查源码和
+  最终打包产物里都没有 `localStorage` / `sessionStorage`。
+- **严格的 CSP**：`default-src 'none'; script-src 'self'; style-src 'self'`，
+  不加载任何外部资源，不允许内联脚本和内联样式。`npm run preview` 用同一份
+  CSP 伺服构建产物，违规会在合入前暴露出来。
 - **可达范围由 `api.listen` 和 nft 规则控制**。默认 `127.0.0.1:18080` 意味着
   要用 SSH 端口转发；改成 `0.0.0.0` 才能远程访问，而飞连终端网段被 nft
-  固定拒绕。开启 UI 不会扩大这个面。
+  固定拒绝。开启 UI 不会扩大这个面。
 
 ```bash
 # api.listen 保持默认（仅本机）时，用端口转发访问
@@ -242,9 +273,33 @@ ssh -L 18080:127.0.0.1:18080 <user>@<node-ip>
 # 然后浏览器打开 http://127.0.0.1:18080/ui/
 ```
 
-> 订阅的增删改与“立即拉取”都会重载 mihomo（约 3–5 秒中断），UI 会先弹确认。
-> 另外 `GET /api/subscriptions` 返回的 URL 是脱敏的（`token=c85b***0f02`），
-> 所以编辑时不会回填旧 URL；要改地址必须粘贴完整的新 URL，脱敏值会被前端拦下。
+> 订阅的增删改与“立即拉取”都会重载 mihomo（约 3–5 秒中断），拉取本身可能
+> 要 30 秒以上，UI 会先弹确认并写明耗时。另外 `GET /api/subscriptions`
+> 返回的 URL 是脱敏的（`token=c85b***0f02`），所以编辑时不会回填旧 URL；
+> 要改地址必须粘贴完整的新 URL，含 `***` 的值会被前端拦下。
+
+### 开发控制台
+
+技术栈：React 18 + [Arco Design](https://arco.design/react) + TypeScript + Vite。
+源码在 `web/`，构建产物写入 `internal/api/ui/` 并**提交进仓库**，再由
+`go:embed` 编进二进制 —— 所以部署仍然是“推一个文件”，`go build`、CI 和
+`stage.sh` 都不需要 Node。
+
+```bash
+cd web && npm ci
+
+npm run mock       # 虚构节点的 mock 数据，不需要任何后端 → http://localhost:5173/
+npm run dev        # 代理到真实节点，默认 LEAP_API=http://127.0.0.1:18080（配合上面的 ssh -L）
+LEAP_API=http://<node-ip>:18080 npm run dev
+
+make ui            # 类型检查 + 构建，产物写入 internal/api/ui/
+npm run preview    # 用生产 CSP + mock 数据伺服构建产物，最后一道检查
+```
+
+改完 `web/src` 后跑 `make ui`，把 `web/` 和 `internal/api/ui/` 的改动一起提交。
+**不要手改 `internal/api/ui/` 里的文件**，下次构建会把它们覆盖掉。
+`go test ./internal/api/` 会校验：控制台调用的每个 `/api/*` 路径都已在
+`api.go` 注册、编辑订阅不回填脱敏 URL、不使用浏览器存储。
 
 ## 日常运维
 
@@ -407,6 +462,7 @@ cmd/
   render-mihomo/    mihomo 配置渲染 CLI（调试用）
 internal/
   api/              REST API（25 端点）
+    ui/             Web 控制台构建产物（由 web/ 生成，勿手改）
   config/           配置 schema + 默认值 + 校验
   configstore/      yaml 原子读写
   dataplane/        mihomo 进程控制（systemctl / clash-api / 断言）
@@ -419,6 +475,7 @@ internal/
   rulesets/         geosite / geoip 规则集管理
   subscribe/        订阅拉取与解析（4 种格式）
   whitelistexpand/  白名单展开为域名 + CIDR
+web/                Web 控制台源码（React + Arco Design + Vite）
 deploy/node/        systemd 单元 / nft 模板 / iproute.sh / install.sh
 scripts/
   deploy.sh         构建 + 推送 + 校验 + 重启

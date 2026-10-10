@@ -9,10 +9,15 @@ import (
 // uiFS holds the control-plane web UI. Embedded into the binary so the
 // deployment story stays "ship one file" — install.sh copies a single
 // leap-gateway binary and there is no separate asset directory to keep in
-// sync with it. The UI is plain HTML/CSS/JS with no build step, so what is
-// in internal/api/ui/ is exactly what is served.
+// sync with it.
 //
-//go:embed ui/index.html ui/app.css ui/app.js
+// internal/api/ui/ is BUILD OUTPUT, committed on purpose: the source is the
+// React + Arco Design app under web/, and `make ui` (npm run build) writes
+// the bundle here. Committing it keeps `go build`, CI and stage.sh free of
+// any Node toolchain. Never hand-edit files in ui/ — edit web/src and
+// rebuild, or the next build silently reverts the change.
+//
+//go:embed ui
 var uiFS embed.FS
 
 // registerUI mounts the web UI at /ui/ (and redirects /ui → /ui/).
@@ -45,16 +50,18 @@ func (s *Server) registerUI(mux *http.ServeMux) {
 }
 
 // noStoreHTML keeps browsers from caching the shell across upgrades. The
-// three assets are a few KB each and are fetched once per page load, so
-// revalidating costs nothing measurable — while a stale cached app.js
-// after a binary upgrade produces confusing "the UI is out of date but
-// the endpoint changed" bug reports.
+// bundle is ~1 MB fetched once per page load from a LAN / ssh-tunnelled
+// node, so revalidating costs little — while a stale cached app.js after a
+// binary upgrade produces confusing "the UI is out of date but the
+// endpoint changed" bug reports.
 func noStoreHTML(h http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
-		// Static, self-contained page: no inline handlers, no remote
-		// origins, no framing. Kept in sync with what index.html
-		// actually loads (its own app.css / app.js and nothing else).
+		// Static, self-contained page: no inline script or style, no
+		// remote origins, no framing. Kept in sync with what index.html
+		// actually loads (assets/app.js, assets/app.css, favicon.svg).
+		// web/vite.config.ts serves `npm run preview` with this same
+		// policy so a violation shows up before it reaches a node.
 		w.Header().Set("Content-Security-Policy",
 			"default-src 'none'; style-src 'self'; script-src 'self'; "+
 				"connect-src *; img-src 'self' data:; form-action 'none'; frame-ancestors 'none'")

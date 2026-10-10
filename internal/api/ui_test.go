@@ -2,9 +2,11 @@ package api
 
 import (
 	"io"
+	"io/fs"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
@@ -29,8 +31,9 @@ func TestUIServesAssets(t *testing.T) {
 		wantBody string
 	}{
 		{"/ui/", "text/html", "Interchange"},
-		{"/ui/app.css", "text/css", "--accent"},
-		{"/ui/app.js", "javascript", "/api/subscriptions"},
+		{"/ui/assets/app.css", "text/css", "arco-"},
+		{"/ui/assets/app.js", "javascript", "/api/subscriptions"},
+		{"/ui/favicon.svg", "image/svg+xml", "<svg"},
 	}
 	for _, c := range cases {
 		rec := httptest.NewRecorder()
@@ -82,34 +85,65 @@ func TestUISecurityHeaders(t *testing.T) {
 	}
 }
 
+// The UI's source lives in web/src (React + Arco); internal/api/ui/ only
+// holds the minified bundle built from it. Assertions about *how the code
+// behaves* read the source, where identifiers and literals are intact.
+const uiSrcDir = "../../web/src"
+
+func readUISource(t *testing.T, rel string) string {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join(uiSrcDir, rel))
+	if err != nil {
+		t.Fatalf("read web/src/%s: %v", rel, err)
+	}
+	return string(b)
+}
+
 // The UI must not embed a token, and must not prefill the masked URL that
 // GET /api/subscriptions returns. Writing a masked URL back through PUT
 // would persist "token=c85b***0f02" into the live subscription, breaking
 // it in a way that is tedious to diagnose.
 func TestUIDoesNotReuseMaskedURL(t *testing.T) {
-	js, err := uiFS.ReadFile("ui/app.js")
-	if err != nil {
-		t.Fatalf("read app.js: %v", err)
-	}
-	src := string(js)
+	src := readUISource(t, "pages/Subscriptions.tsx")
 
 	// The edit path must clear the URL field rather than assign the
 	// masked value from the subscription record.
-	for _, bad := range []string{"subUrl').value = sub.url", "subUrl').value = s.url"} {
+	for _, bad := range []string{"url: editing.url", "url: sub.url", "url: s.url"} {
 		if strings.Contains(src, bad) {
-			t.Errorf("app.js prefills masked URL via %q", bad)
+			t.Errorf("Subscriptions.tsx prefills masked URL via %q", bad)
 		}
 	}
 	// And it must guard against an operator pasting one back.
 	if !strings.Contains(src, `/\*\*\*/`) {
-		t.Error("app.js is missing the masked-URL (***) submit guard")
+		t.Error("Subscriptions.tsx is missing the masked-URL (***) submit guard")
 	}
-	// Token must stay in memory only. Strip line comments first: the file
-	// documents *why* web storage is avoided, and that prose must not be
-	// mistaken for a real call.
-	if code := stripComments(src); strings.Contains(code, "localStorage") ||
-		strings.Contains(code, "sessionStorage") {
-		t.Error("app.js must not persist the API token to web storage")
+}
+
+// Token must stay in memory only. Checked against the shipped bundle —
+// that is what runs in the browser, third-party code included — and
+// against the source with comments stripped, because api.ts documents
+// *why* web storage is avoided and that prose must not read as a call.
+func TestUIDoesNotUseWebStorage(t *testing.T) {
+	bundle, err := uiFS.ReadFile("ui/assets/app.js")
+	if err != nil {
+		t.Fatalf("read embedded app.js: %v", err)
+	}
+	sources := map[string]string{"embedded assets/app.js": string(bundle)}
+	err = filepath.WalkDir(uiSrcDir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() || !strings.HasSuffix(path, ".tsx") && !strings.HasSuffix(path, ".ts") {
+			return err
+		}
+		b, err := os.ReadFile(path)
+		sources[path] = stripComments(string(b))
+		return err
+	})
+	if err != nil {
+		t.Fatalf("walk web/src: %v", err)
+	}
+	for name, code := range sources {
+		if strings.Contains(code, "localStorage") || strings.Contains(code, "sessionStorage") {
+			t.Errorf("%s touches web storage; the API token must stay in memory", name)
+		}
 	}
 }
 
@@ -117,32 +151,29 @@ func TestUIDoesNotReuseMaskedURL(t *testing.T) {
 // renamed endpoint fails the build's tests instead of silently 404-ing in
 // the browser.
 func TestUIEndpointsAreRegistered(t *testing.T) {
-	js, err := uiFS.ReadFile("ui/app.js")
-	if err != nil {
-		t.Fatalf("read app.js: %v", err)
-	}
 	apiGo, err := os.ReadFile("api.go")
 	if err != nil {
 		t.Fatalf("read api.go: %v", err)
 	}
 	muxSrc := string(apiGo)
 
-	paths := extractAPIPaths(stripComments(string(js)))
+	paths := extractAPIPaths(stripComments(readUISource(t, "api.ts")))
 	if len(paths) == 0 {
-		t.Fatal("extracted no /api paths from app.js — the extractor is broken")
+		t.Fatal("extracted no /api paths from web/src/api.ts — the extractor is broken")
 	}
 	for _, path := range paths {
 		if !strings.Contains(muxSrc, path+`"`) {
-			t.Errorf("app.js calls %s which is not registered in api.go", path)
+			t.Errorf("api.ts calls %s which is not registered in api.go", path)
 		}
 	}
 }
 
 // stripComments removes `/* */` blocks and `//` line comments so
 // assertions about the code are not satisfied (or broken) by explanatory
-// prose — app.js documents *why* web storage is avoided, and that
-// sentence must not read as a real call. Crude but adequate: the UI
-// source has no string literals containing comment markers.
+// prose — api.ts documents *why* web storage is avoided, and that
+// sentence must not read as a real call. Crude but adequate for the UI
+// source: the only string literals containing `//` are URL placeholders,
+// and truncating those lines does not affect the assertions above.
 func stripComments(src string) string {
 	// Block comments first, so a `//` inside one cannot confuse the
 	// line pass.

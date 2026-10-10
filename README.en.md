@@ -65,8 +65,9 @@ crossing on separate levels, never interfering.
   minutes; slow or failing ones are evicted; a dead node fails over within
   30 seconds; pool changes are pushed to Lark.
 - **Programmable** — 25 REST endpoints covering subscriptions, whitelist,
-  pool membership and notifications, plus a build-free web console for
-  subscription management and live node status.
+  pool membership and notifications, plus an [Arco Design](https://arco.design/)
+  web console compiled into the binary for subscription management, node
+  scoring and per-terminal egress lookup.
 
 ## How it compares
 
@@ -158,6 +159,8 @@ On the node (each one is enforced by `precheck()` in
 For development:
 
 - Go 1.22+, `make`
+- Node.js 20.19+ — **only when changing the web console**; its build output
+  is committed, so `go build` and deployment never need Node
 - At least one proxy subscription (clash YAML, sing-box JSON, URI list, or SIP008)
 
 The installer places mihomo 1.19.26 as the data plane. It also installs a
@@ -225,35 +228,67 @@ curl -X POST -H "Content-Type: application/json" \
 
 ## Web console
 
-The control plane serves a web UI — no build step, no separate deploy:
+The control plane serves a web console:
 
 ```
 http://<node-ip>:18080/ui/
 ```
 
-Five panels:
+<img src="assets/screenshots/overview.png" alt="Console overview" width="100%">
 
-| Panel | Purpose |
+> Screenshots in this section use the mock data bundled with `web/`
+> (fictional providers, nodes and egress IPs), not a production node. The
+> console's UI language is Chinese.
+
+Five pages cover every day-to-day entry point:
+
+| Page | Purpose |
 |---|---|
-| **Overview** | data-plane health, pool size, the three systemd units, egress IP, capacity baseline |
-| **Nodes** | per-candidate p50/p95/jitter/fail-rate, pool membership, site-probe results (filterable, pool-only toggle) |
-| **Subscriptions** | add / edit / delete subscriptions, manual fetch, periodic-refresh interval |
-| **Terminal lookup** | enter an employee's 10.8.x.x and see their primary/secondary egress with health data |
-| **Pool audit** | membership-change history and the current quarantine list |
+| **Overview** | six headline cards (data plane, pool size, parsed nodes, 24h pool changes, failing probes, data-path assertions); the four TPROXY assertions behind `/healthz`; current egress IP and owner; url-test delay of every pool member; pool sizing and 24h stability; the three systemd units; capacity baseline |
+| **Nodes** | sortable p50 / p95 / jitter / fail-rate / active connections per candidate, pool and qualification state, per-site probe results; a summary row with the observation thresholds and each probe's global pass rate; expand a row for scoring detail, passive-connection stats, and each probe's HTTP status / latency / Cloudflare challenge / error |
+| **Subscriptions** | add / edit / delete subscriptions, fetch all now, periodic-refresh interval; every action that reloads mihomo asks first and states how long it takes |
+| **Terminal lookup** | enter an employee's FeiLian address and see its `fb-<ip>` group, primary / secondary egress, which one is live, and both nodes' latency, fail rate, passive connections and site probes |
+| **Pool audit** | 24h change / rollback / in / out counts, the current quarantine list, change history filterable by type; expand a row for the full post-change pool |
 
-It is a dependency-free page embedded with `go:embed`, so deployment stays
-"ship one binary" — no Node, no separate asset directory to keep in sync.
+<table>
+  <tr>
+    <td width="50%"><img src="assets/screenshots/nodes.png" alt="Nodes"><br><sub><b>Nodes</b> — scores, site probes, filter by subscription / pool</sub></td>
+    <td width="50%"><img src="assets/screenshots/terminal.png" alt="Terminal lookup"><br><sub><b>Terminal lookup</b> — first stop when someone says "it's slow"</sub></td>
+  </tr>
+  <tr>
+    <td width="50%"><img src="assets/screenshots/subscriptions.png" alt="Subscriptions"><br><sub><b>Subscriptions</b> — tokens in URLs are masked by the API</sub></td>
+    <td width="50%"><img src="assets/screenshots/transitions.png" alt="Pool audit"><br><sub><b>Pool audit</b> — frequent changes mean the scoring is jittering</sub></td>
+  </tr>
+  <tr>
+    <td width="50%"><img src="assets/screenshots/subscription-masked-guard.png" alt="Masked URL guard"><br><sub><b>Edit subscription</b> — pasting back a masked URL is rejected client-side</sub></td>
+    <td width="50%"><img src="assets/screenshots/overview-dark.png" alt="Dark mode"><br><sub><b>Dark mode</b> — follows the OS, one-click toggle</sub></td>
+  </tr>
+</table>
 
-A few deliberate security choices:
+Other details:
+
+- **Auto-refresh every 10 seconds**, switchable off. Endpoints fail
+  independently — e.g. `/api/nodes/health` returning 503 when the scorer is
+  disabled only affects the Nodes page.
+- Hover the `healthz` tag in the header for each data-path assertion; the
+  red badge on "Nodes" in the sidebar counts candidates whose probes fail.
+- Every page has its own address (`/ui/#/nodes`, `/ui/#/terminal`, …) to
+  bookmark or share.
+
+### Deliberate security choices
 
 - **`/ui/` is unauthenticated, but it is only static files.** The page
   contains no node data and no credentials; everything real comes from
   `/api/*`, which stays behind `api.token`. A browser navigation cannot
   carry a Bearer header, so gating the HTML itself would push the token
   into a URL or cookie — strictly worse.
-- **The token lives in tab memory only**, never `localStorage`. Reloading
-  asks again, on purpose: that token can read subscription URLs with
-  credentials in them.
+- **The token lives in tab memory only**, never in any browser storage.
+  Reloading asks again, on purpose: that token can read subscription URLs
+  with credentials in them. `go test` checks both the source and the shipped
+  bundle for `localStorage` / `sessionStorage`.
+- **Strict CSP**: `default-src 'none'; script-src 'self'; style-src 'self'` —
+  no external resources, no inline script or style. `npm run preview` serves
+  the build with the same policy, so a violation surfaces before it ships.
 - **Reachability is governed by `api.listen` and the nft rules.** The
   default `127.0.0.1:18080` means you port-forward; `0.0.0.0` allows remote
   access, while the FeiLian client subnet stays unconditionally denied.
@@ -266,10 +301,36 @@ ssh -L 18080:127.0.0.1:18080 <user>@<node-ip>
 ```
 
 > Subscription writes and "fetch now" both reload mihomo (~3–5s
-> interruption), so the UI confirms first. Also, `GET /api/subscriptions`
-> returns masked URLs (`token=c85b***0f02`), so editing never prefills the
-> old URL — changing one requires pasting a complete new URL, and a masked
-> value is rejected client-side before it can reach the node.
+> interruption), and the fetch itself can take 30s+, so the UI confirms
+> first and says so. Also, `GET /api/subscriptions` returns masked URLs
+> (`token=c85b***0f02`), so editing never prefills the old URL — changing
+> one requires pasting a complete new URL, and anything containing `***` is
+> rejected client-side before it can reach the node.
+
+### Developing the console
+
+Stack: React 18 + [Arco Design](https://arco.design/react) + TypeScript + Vite.
+The source lives in `web/`; the build is written to `internal/api/ui/`,
+**committed**, and embedded with `go:embed` — so deployment is still "ship
+one binary" and `go build`, CI and `stage.sh` need no Node.
+
+```bash
+cd web && npm ci
+
+npm run mock       # fictional node, no backend needed → http://localhost:5173/
+npm run dev        # proxy to a real node; LEAP_API defaults to http://127.0.0.1:18080 (pair with ssh -L above)
+LEAP_API=http://<node-ip>:18080 npm run dev
+
+make ui            # typecheck + build into internal/api/ui/
+npm run preview    # serve the build with the production CSP + mock data, as a last check
+```
+
+After editing `web/src`, run `make ui` and commit `web/` and
+`internal/api/ui/` together. **Never hand-edit `internal/api/ui/`** — the
+next build overwrites it. `go test ./internal/api/` verifies that every
+`/api/*` path the console calls is registered in `api.go`, that editing a
+subscription never prefills the masked URL, and that no browser storage is
+used.
 
 ## Day-to-day operations
 
@@ -466,6 +527,7 @@ cmd/
   render-mihomo/    mihomo config render CLI (debugging)
 internal/
   api/              REST API (25 endpoints)
+    ui/             web console build output (generated from web/, do not edit)
   config/           config schema, defaults, validation
   configstore/      atomic yaml read/write
   dataplane/        mihomo process control (systemctl / clash-api / assertions)
@@ -478,6 +540,7 @@ internal/
   rulesets/         geosite / geoip rule-set management
   subscribe/        subscription fetch and parsing (4 formats)
   whitelistexpand/  expands the whitelist into domains + CIDRs
+web/                web console source (React + Arco Design + Vite)
 deploy/node/        systemd units, nft template, iproute.sh, install.sh
 scripts/
   deploy.sh         build + push + validate + restart

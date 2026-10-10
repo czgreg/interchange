@@ -59,8 +59,16 @@ token 为空时不鉴权。
 
 ## GET /ui/
 
-内置 Web 控制台（`internal/api/ui/`，用 `go:embed` 编进二进制）。
-订阅管理 + 节点状态 + 终端查询 + 池变更审计。`/ui` 会 301 到 `/ui/`。
+内置 Web 控制台（React + Arco Design，源码在 `web/`，构建产物在
+`internal/api/ui/`，用 `go:embed` 编进二进制）。总览 + 节点状态 + 订阅管理 +
+终端查询 + 池变更审计。`/ui` 会 301 到 `/ui/`；各页面地址为
+`/ui/#/overview`、`#/nodes`、`#/subs`、`#/terminal`、`#/transitions`。
+
+控制台读取的端点：`/healthz`、`/api/status`、`/api/proxies/active`、
+`/api/nodes/health`、`/api/subscriptions`（含 POST / PUT / DELETE）、
+`/api/subscribe/refresh`、`/api/subscribe/refresh-interval`、
+`/api/pool/transitions`、`/api/pool/terminal`。改这些端点的响应结构时，
+同步改 `web/src/types.ts`，并跑 `make ui`。
 
 **不鉴权，但只返回静态文件**（html / css / js）——页面本身不含节点数据或
 凭据，所有真实数据由浏览器带 `Authorization: Bearer` 去请下面的 `/api/*`。

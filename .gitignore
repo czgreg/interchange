@@ -1,4 +1,5 @@
 # Build artifacts
+# (internal/api/ui/ is also build output, but committed on purpose — see internal/api/ui.go)
 /bin/
 /dist/
 /build/
@@ -26,3 +27,6 @@
 
 # Generated configs
 /configs/runtime/
+
+# Web console toolchain
+/web/node_modules/

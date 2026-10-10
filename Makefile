@@ -4,6 +4,7 @@
 #   make help              # list targets
 #   make setup-ssh         # 一次性：推公钥 + NOPASSWD sudo（先跑这个！）
 #   make test              # go vet + go test
+#   make ui                # 构建 Web 控制台（web/ → internal/api/ui/）
 #   make deploy-92         # binary-only deploy to 92 (~10s)
 #   make deploy-yaml       # 仅推 gateway.yaml（不换二进制）
 #   make redeploy-92       # ★ 全量重装到 92（先拉 92 的 yaml + stage + install）
@@ -61,6 +62,14 @@ build-linux:  ## 交叉编译 linux/amd64（部署用）
 	  -ldflags='$(LDFLAGS)' \
 	  -o build/leap-gateway-linux-amd64 ./cmd/gateway
 	@echo "  built build/leap-gateway-linux-amd64  version=$(VERSION)"
+
+.PHONY: ui
+ui:  ## 构建 Web 控制台：web/ → internal/api/ui/（需 Node 20.19+；产物要一起提交）
+	cd web && npm ci && npm run build
+
+.PHONY: ui-mock
+ui-mock:  ## 本地起控制台 + mock 数据，不需要节点  http://localhost:5173/
+	cd web && npm ci && npm run mock
 
 .PHONY: test
 test:  ## go vet + go test ./...
